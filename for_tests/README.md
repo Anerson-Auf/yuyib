@@ -1,37 +1,21 @@
 # Integration fixtures
 
-These user-provided `.glb` files are opt-in integration fixtures, not unit-test
-inputs. They intentionally remain outside the default `cargo test --workspace`
-path so a normal verification run stays fast and does not depend on large
-binary assets.
+Локальные `.glb` / `.yasset` **не коммитятся** в Git (см. корневой
+`.gitignore`). Нужны только на машине разработчика для examples / Editor /
+smokes. Перед распространением ассетов сверяйте лицензию источника.
 
-| Fixture | Intended future example |
+| Fixture (local) | Назначение |
 |---|---|
-| `cyber_samurai.glb` | Skeletal animation and transparent character preview. |
-| `velina_zzz.glb` | Static/animated character import, material and interaction demo. |
-| `no_i_am_not_a_human_location__map.glb` | Scene import, camera/light, LOD/culling and map interaction demo. |
-| `outdoor_probe.hdr` | Radiance equirect for street-city / playable IBL (`load_outdoor_equirect`). Tiny 64×32 sky/ground probe; replace with a real capture when available. |
+| `cyber_samurai.glb` | Skeletal animation / character preview |
+| `velina_zzz.glb` | Character import, materials, interaction |
+| `no_i_am_not_a_human_location__map.glb` | Scene import, camera/light, LOD |
+| `street_city_7_for_games_free.glb` | Playable / M1 smoke map |
+| `outdoor_probe.hdr` | Tiny IBL equirect для street-city (в репо) |
 
-Both files are GLB v2 containers. A future `xtask` integration-fixture audit
-reports exactly which currently unsupported glTF features each file uses:
-
-```powershell
-cargo run -p xtask -- gltf-fixtures
-```
-
-The command never adds these heavy files to default tests and prints one result
-per fixture. Embedded image buffers and
-`KHR_materials_pbrSpecularGlossiness`, double-sided material metadata and
-affine matrix node metadata are supported. The map can be materialized without
-lossy matrix decomposition. Character previews support bounded skinning and a
-sorted `BLEND` phase; unsupported primitive modes and material workflows must
-still be reported rather than silently skipped.
-
-Use an exact path to audit one additional GLB:
+Аудит одного локального GLB:
 
 ```powershell
 cargo run -p xtask -- gltf-fixtures for_tests/velina_zzz.glb
 ```
 
-Future examples must not silently skip unsupported data. Keep source/licensing
-information with the files before distributing the repository or a built demo.
+Default `cargo test` эти файлы не требует.

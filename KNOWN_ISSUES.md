@@ -44,6 +44,8 @@
 
 ## Assets / cook
 
+- Third-party `.glb` / `.gltf` / `.yasset` не хранятся в Git (локальные
+  fixtures в `for_tests/` и `editor_tests/*/assets/`).
 - Shipping без source importers (cooked-only feature) — post-core.
 - Hot-reload UI / file watchers и полный reverse dependency graph — частично /
   deferred.

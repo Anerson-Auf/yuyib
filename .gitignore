@@ -11,6 +11,11 @@ editor-ui/.vite/
 # Local cook / caches
 **/.yuyib_cook/
 
+# Third-party / local binary assets (keep off public remotes)
+*.glb
+*.gltf
+*.yasset
+
 # mdBook output (source of truth: docs/site/src)
 docs/site/book/
 
