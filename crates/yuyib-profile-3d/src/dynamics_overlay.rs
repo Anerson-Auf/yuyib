@@ -1,90 +1,90 @@
-//! Optional Rapier dynamics overlay for the street-city playable (M4.7–M4.9).
+//! Opt-in Rapier dynamics overlay next to mesh character collision (M4.7–M4.10 / M5.2).
 //!
-//! Side-by-side with [`yuyib::physics::TriangleMesh3d`] character collision:
-//! props live in a local Rapier world. Prefer a **budgeted local slice** of the
+//! Props live in a local Rapier world. Prefer a **budgeted local slice** of the
 //! solid collision mesh so crates collide with nearby walls/floors. An invisible
 //! **kinematic sphere** tracks the mesh character each fixed tick so the player
-//! can push props (one-way). The character proxy collides with **props only**,
-//! never with the map trimesh — map collision for the player stays on the mesh
-//! query path (avoids a dense sphere↔trimesh narrowphase every tick).
+//! can push props. After each Rapier step the overlay returns a soft
+//! **reaction displacement** derived from how far props were shoved by the
+//! kinematic (two-way without rewriting the mesh motor onto Rapier).
 //!
-//! Enable with `--features physics-rapier`. Without the feature this module is a
-//! no-op stub so default playable builds stay light.
+//! Enable with crate feature `rapier` (wired from `yuyib` via `physics-rapier`).
+//! Without the feature this type is a no-op stub.
 
-use std::error::Error;
+use std::{error::Error, fmt};
 
-#[cfg(feature = "physics-rapier")]
-use yuyib::{
-    model::MeshPrimitive,
-    physics::{
-        BodyId3d, CollisionGroups3d, DynamicsBackend3d, DynamicsWorldConfig3d,
-        RapierDynamicsWorld3d, TriangleMesh3d,
-    },
-    render::RenderFrame,
-    render_3d::{Camera3d, DepthLoad, MeshRenderer3d},
+use yuyib_physics::TriangleMesh3d;
+use yuyib_render::RenderFrame;
+use yuyib_render_3d::Camera3d;
+
+#[cfg(feature = "rapier")]
+use yuyib_model::{MeshPrimitive, PrimitiveError};
+#[cfg(feature = "rapier")]
+use yuyib_physics::{
+    BodyId3d, CollisionGroups3d, DynamicsBackend3d, DynamicsBackendError3d,
+    DynamicsWorldConfig3d, RapierDynamicsWorld3d,
 };
-
-#[cfg(not(feature = "physics-rapier"))]
-use yuyib::{render::RenderFrame, render_3d::Camera3d};
+#[cfg(feature = "rapier")]
+use yuyib_render_3d::{DepthLoad, MeshRenderError, MeshRenderer3d, MeshUploadError};
 
 /// Local-space cube half-extent shared by all prop visuals.
-#[cfg(feature = "physics-rapier")]
+#[cfg(feature = "rapier")]
 const MESH_HALF: f32 = 0.5;
 
 /// Soft XZ radius when selecting solid faces for the Rapier map collider.
-#[cfg(feature = "physics-rapier")]
-const MAP_TRIMESH_CAPTURE_RADIUS: f32 = 16.0;
+#[cfg(feature = "rapier")]
+const MAP_TRIMESH_CAPTURE_RADIUS: f32 = 24.0;
 
 /// Hard cap on faces inserted into Rapier (closest-to-spawn first).
-///
-/// Dense `all_geometry` lab meshes easily exceed this inside a few metres; the
-/// budget keeps narrowphase bounded for a handful of dynamic props.
-#[cfg(feature = "physics-rapier")]
-const MAP_TRIMESH_MAX_FACES: usize = 4_096;
+#[cfg(feature = "rapier")]
+const MAP_TRIMESH_MAX_FACES: usize = 24_576;
 
-/// Collision layer: fixed map geometry (trimesh / proxy floor).
-#[cfg(feature = "physics-rapier")]
+#[cfg(feature = "rapier")]
 const GROUP_MAP: u32 = 1;
-/// Collision layer: dynamic props.
-#[cfg(feature = "physics-rapier")]
+#[cfg(feature = "rapier")]
 const GROUP_PROP: u32 = 2;
-/// Collision layer: kinematic character proxy (props only).
-#[cfg(feature = "physics-rapier")]
+#[cfg(feature = "rapier")]
 const GROUP_CHAR: u32 = 4;
 
+#[cfg(feature = "rapier")]
+const PROP_REACTION_SHARE: f32 = 0.35;
+#[cfg(feature = "rapier")]
+const PROP_REACTION_Y_SCALE: f32 = 0.12;
+#[cfg(feature = "rapier")]
+const PROP_REACTION_MAX: f32 = 0.22;
+
 /// Rapier props demo layered next to mesh character collision.
-pub struct PlayableDynamicsOverlay {
-    #[cfg(feature = "physics-rapier")]
+pub struct DynamicsOverlay3d {
+    #[cfg(feature = "rapier")]
     inner: Option<OverlayInner>,
 }
 
-#[cfg(feature = "physics-rapier")]
+#[cfg(feature = "rapier")]
 struct OverlayInner {
     world: RapierDynamicsWorld3d,
     visuals: Vec<PropVisual>,
-    /// Invisible kinematic sphere that mirrors the mesh character centre.
+    dynamic_props: Vec<BodyId3d>,
     character_proxy: BodyId3d,
     cube: MeshPrimitive,
 }
 
-#[cfg(feature = "physics-rapier")]
+#[cfg(feature = "rapier")]
 struct PropVisual {
     id: BodyId3d,
     half_extents: [f32; 3],
     color: [f32; 4],
 }
 
-impl PlayableDynamicsOverlay {
+impl DynamicsOverlay3d {
     /// Creates a no-op overlay when Rapier is disabled.
     ///
     /// # Errors
     ///
     /// Never fails without the Rapier feature.
-    #[cfg(not(feature = "physics-rapier"))]
+    #[cfg(not(feature = "rapier"))]
     pub fn around_spawn(
         _spawn: [f32; 3],
         _character_radius: f32,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, DynamicsOverlayError3d> {
         Ok(Self {})
     }
 
@@ -93,57 +93,56 @@ impl PlayableDynamicsOverlay {
     /// # Errors
     ///
     /// Never fails without the Rapier feature.
-    #[cfg(not(feature = "physics-rapier"))]
+    #[cfg(not(feature = "rapier"))]
     pub fn around_spawn_with_solid_mesh(
         _spawn: [f32; 3],
         _character_radius: f32,
-        _solid: &yuyib::physics::TriangleMesh3d,
-    ) -> Result<Self, Box<dyn Error>> {
+        _solid: &TriangleMesh3d,
+    ) -> Result<Self, DynamicsOverlayError3d> {
         Ok(Self {})
     }
 
     /// Spawns a proxy floor, dynamic props, and a kinematic character proxy.
     ///
-    /// Prefer [`Self::around_spawn_with_solid_mesh`] in the playable so props
-    /// collide with map walls. This entry stays for headless smoke without a city
-    /// mesh.
+    /// Prefer [`Self::around_spawn_with_solid_mesh`] so props collide with map
+    /// walls. This entry stays for headless smoke without a city mesh.
     ///
     /// # Errors
     ///
     /// Returns dynamics/mesh errors when Rapier setup fails.
-    #[cfg(feature = "physics-rapier")]
+    #[cfg(feature = "rapier")]
     pub fn around_spawn(
         spawn: [f32; 3],
         character_radius: f32,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, DynamicsOverlayError3d> {
         Self::build(spawn, character_radius, None)
     }
 
     /// Same as [`Self::around_spawn`], but inserts a budgeted fixed trimesh from
-    /// the solid collision layer so props hit nearby walls/floors (M4.9). Falls
-    /// back to a proxy floor if the mesh slice is empty or Rapier rejects it.
+    /// the solid collision layer so props hit nearby walls/floors.
     ///
     /// # Errors
     ///
     /// Returns dynamics/mesh errors when Rapier setup fails.
-    #[cfg(feature = "physics-rapier")]
+    #[cfg(feature = "rapier")]
     pub fn around_spawn_with_solid_mesh(
         spawn: [f32; 3],
         character_radius: f32,
         solid: &TriangleMesh3d,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, DynamicsOverlayError3d> {
         Self::build(spawn, character_radius, Some(solid))
     }
 
-    #[cfg(feature = "physics-rapier")]
+    #[cfg(feature = "rapier")]
     fn build(
         spawn: [f32; 3],
         character_radius: f32,
         solid: Option<&TriangleMesh3d>,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, DynamicsOverlayError3d> {
         let mut world = RapierDynamicsWorld3d::new(DynamicsWorldConfig3d::earth_60hz())?;
         let floor_top = spawn[1] - character_radius;
         let mut visuals = Vec::new();
+        let mut dynamic_props = Vec::new();
         let mut used_proxy_floor = false;
         let mut map_body: Option<BodyId3d> = None;
 
@@ -160,7 +159,7 @@ impl PlayableDynamicsOverlay {
             {
                 map_body = Some(body);
                 eprintln!(
-                    "playable Rapier overlay: solid map trimesh ({} / {} candidates within \
+                    "dynamics overlay: solid map trimesh ({} / {} candidates within \
                      {:.0}m XZ, cap {}); character↔map contacts disabled",
                     slice.indices.len(),
                     slice.candidates,
@@ -169,7 +168,7 @@ impl PlayableDynamicsOverlay {
                 );
             } else {
                 eprintln!(
-                    "playable Rapier overlay: solid trimesh unavailable \
+                    "dynamics overlay: solid trimesh unavailable \
                      (candidates={}); falling back to proxy floor",
                     slice.candidates
                 );
@@ -197,7 +196,6 @@ impl PlayableDynamicsOverlay {
             world.set_collision_groups(map, CollisionGroups3d::new(GROUP_MAP, GROUP_PROP))?;
         }
 
-        // Place crates in front of a typical −Z spawn facing so they are easy to find.
         let props = [
             (
                 [spawn[0] + 0.6, floor_top + 0.55, spawn[2] - 2.2],
@@ -219,6 +217,7 @@ impl PlayableDynamicsOverlay {
         for (center, half, color) in props {
             let id = world.insert_dynamic_cuboid(center, half)?;
             world.set_collision_groups(id, CollisionGroups3d::new(GROUP_PROP, prop_filter))?;
+            dynamic_props.push(id);
             visuals.push(PropVisual {
                 id,
                 half_extents: half,
@@ -230,6 +229,7 @@ impl PlayableDynamicsOverlay {
             0.3,
         )?;
         world.set_collision_groups(ball, CollisionGroups3d::new(GROUP_PROP, prop_filter))?;
+        dynamic_props.push(ball);
         visuals.push(PropVisual {
             id: ball,
             half_extents: [0.3, 0.3, 0.3],
@@ -243,50 +243,98 @@ impl PlayableDynamicsOverlay {
             CollisionGroups3d::new(GROUP_CHAR, GROUP_PROP),
         )?;
 
-        let prop_count = if used_proxy_floor {
-            visuals.len().saturating_sub(1)
-        } else {
-            visuals.len()
-        };
         eprintln!(
-            "playable Rapier overlay: {prop_count} props + kinematic character sphere \
-             (one-way push; mesh character unchanged)"
+            "dynamics overlay: {} props + kinematic character sphere \
+             (two-way soft reaction; mesh character unchanged)",
+            dynamic_props.len()
         );
 
         Ok(Self {
             inner: Some(OverlayInner {
                 world,
                 visuals,
+                dynamic_props,
                 character_proxy,
                 cube: MeshPrimitive::cube(MESH_HALF)?,
             }),
         })
     }
 
-    /// Syncs the kinematic character proxy, then advances Rapier one fixed tick.
-    ///
-    /// `character_center` is the mesh character sphere centre (same as
-    /// [`yuyib::character_3d::CharacterController3d::position`]).
-    #[allow(clippy::unused_self, reason = "self is used under physics-rapier")]
-    pub fn step(&mut self, fixed_dt: f32, character_center: [f32; 3]) {
-        #[cfg(feature = "physics-rapier")]
-        if let Some(inner) = self.inner.as_mut()
-            && fixed_dt.is_finite()
-            && fixed_dt > 0.0
-            && character_center.iter().all(|channel| channel.is_finite())
+    /// Syncs the kinematic character proxy, advances Rapier, and returns a soft
+    /// world-space displacement to apply to the mesh character (often zero).
+    #[allow(clippy::unused_self, reason = "self is used under rapier")]
+    #[must_use]
+    pub fn step(&mut self, fixed_dt: f32, character_center: [f32; 3]) -> [f32; 3] {
+        #[cfg(feature = "rapier")]
         {
+            let Some(inner) = self.inner.as_mut() else {
+                return [0.0, 0.0, 0.0];
+            };
+            if !(fixed_dt.is_finite()
+                && fixed_dt > 0.0
+                && character_center.iter().all(|channel| channel.is_finite()))
+            {
+                return [0.0, 0.0, 0.0];
+            }
+
+            let mut before = Vec::with_capacity(inner.dynamic_props.len());
+            for &prop in &inner.dynamic_props {
+                let _ = inner.world.wake_up(prop);
+                before.push(inner.world.translation(prop).unwrap_or(character_center));
+            }
+
             let _ = inner
                 .world
                 .set_next_kinematic_translation(inner.character_proxy, character_center);
             let _ = inner.world.step(Some(fixed_dt));
+
+            let mut rx = 0.0_f32;
+            let mut ry = 0.0_f32;
+            let mut rz = 0.0_f32;
+            for (index, &prop) in inner.dynamic_props.iter().enumerate() {
+                let Some(after) = inner.world.translation(prop) else {
+                    continue;
+                };
+                let prev = before[index];
+                let moved = [
+                    after[0] - prev[0],
+                    after[1] - prev[1],
+                    after[2] - prev[2],
+                ];
+                let move_len_sq = moved[0] * moved[0] + moved[1] * moved[1] + moved[2] * moved[2];
+                if move_len_sq < 1.0e-10 {
+                    continue;
+                }
+                let to_prop = [
+                    prev[0] - character_center[0],
+                    prev[1] - character_center[1],
+                    prev[2] - character_center[2],
+                ];
+                let dist_sq =
+                    to_prop[0] * to_prop[0] + to_prop[1] * to_prop[1] + to_prop[2] * to_prop[2];
+                if dist_sq > 4.0 {
+                    continue;
+                }
+                let outward =
+                    moved[0] * to_prop[0] + moved[1] * to_prop[1] + moved[2] * to_prop[2];
+                if outward <= 0.0 {
+                    continue;
+                }
+                rx -= moved[0] * PROP_REACTION_SHARE;
+                ry -= moved[1] * PROP_REACTION_SHARE * PROP_REACTION_Y_SCALE;
+                rz -= moved[2] * PROP_REACTION_SHARE;
+            }
+            clamp_vec3(&mut rx, &mut ry, &mut rz, PROP_REACTION_MAX);
+            [rx, ry, rz]
         }
-        #[cfg(not(feature = "physics-rapier"))]
+        #[cfg(not(feature = "rapier"))]
         {
             let _ = (fixed_dt, character_center);
+            [0.0, 0.0, 0.0]
         }
     }
 
-    /// Draws prop meshes after the city/character passes (no-op without the feature).
+    /// Draws prop meshes after the city/character passes (no-op without Rapier).
     ///
     /// # Errors
     ///
@@ -295,8 +343,8 @@ impl PlayableDynamicsOverlay {
         &self,
         frame: &mut RenderFrame<'_>,
         camera: Camera3d,
-    ) -> Result<(), Box<dyn Error>> {
-        #[cfg(feature = "physics-rapier")]
+    ) -> Result<(), DynamicsOverlayError3d> {
+        #[cfg(feature = "rapier")]
         if let Some(inner) = self.inner.as_ref() {
             let meshes = MeshRenderer3d::new_for_frame(frame);
             let gpu_cube = meshes.upload_mesh_for_frame(frame, &inner.cube)?;
@@ -329,7 +377,7 @@ impl PlayableDynamicsOverlay {
                 DepthLoad::Load,
             )?;
         }
-        #[cfg(not(feature = "physics-rapier"))]
+        #[cfg(not(feature = "rapier"))]
         {
             let _ = (frame, camera);
         }
@@ -338,28 +386,120 @@ impl PlayableDynamicsOverlay {
 
     /// Returns whether the Rapier overlay is active.
     #[must_use]
-    #[allow(dead_code, reason = "used by playable_dynamics_overlay_smoke")]
     pub fn is_active(&self) -> bool {
-        #[cfg(feature = "physics-rapier")]
+        #[cfg(feature = "rapier")]
         {
             self.inner.is_some()
         }
-        #[cfg(not(feature = "physics-rapier"))]
+        #[cfg(not(feature = "rapier"))]
         {
             false
         }
     }
 }
 
-#[cfg(feature = "physics-rapier")]
+/// Failure while constructing or drawing [`DynamicsOverlay3d`].
+#[derive(Debug)]
+pub enum DynamicsOverlayError3d {
+    /// Rapier / dynamics backend failure.
+    #[cfg(feature = "rapier")]
+    Dynamics(DynamicsBackendError3d),
+    /// Cube primitive construction failed.
+    #[cfg(feature = "rapier")]
+    Primitive(PrimitiveError),
+    /// GPU mesh upload failed.
+    #[cfg(feature = "rapier")]
+    Upload(MeshUploadError),
+    /// Prop batch draw failed.
+    #[cfg(feature = "rapier")]
+    Render(MeshRenderError),
+    /// Stub variant so the enum is non-empty without Rapier.
+    #[cfg(not(feature = "rapier"))]
+    Inactive,
+}
+
+impl fmt::Display for DynamicsOverlayError3d {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            #[cfg(feature = "rapier")]
+            Self::Dynamics(ref error) => write!(formatter, "dynamics overlay: {error}"),
+            #[cfg(feature = "rapier")]
+            Self::Primitive(ref error) => write!(formatter, "dynamics overlay primitive: {error}"),
+            #[cfg(feature = "rapier")]
+            Self::Upload(ref error) => write!(formatter, "dynamics overlay upload: {error}"),
+            #[cfg(feature = "rapier")]
+            Self::Render(ref error) => write!(formatter, "dynamics overlay render: {error}"),
+            #[cfg(not(feature = "rapier"))]
+            Self::Inactive => formatter.write_str("dynamics overlay inactive"),
+        }
+    }
+}
+
+impl Error for DynamicsOverlayError3d {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match *self {
+            #[cfg(feature = "rapier")]
+            Self::Dynamics(ref error) => Some(error),
+            #[cfg(feature = "rapier")]
+            Self::Primitive(ref error) => Some(error),
+            #[cfg(feature = "rapier")]
+            Self::Upload(ref error) => Some(error),
+            #[cfg(feature = "rapier")]
+            Self::Render(ref error) => Some(error),
+            #[cfg(not(feature = "rapier"))]
+            Self::Inactive => None,
+        }
+    }
+}
+
+#[cfg(feature = "rapier")]
+impl From<DynamicsBackendError3d> for DynamicsOverlayError3d {
+    fn from(value: DynamicsBackendError3d) -> Self {
+        Self::Dynamics(value)
+    }
+}
+
+#[cfg(feature = "rapier")]
+impl From<PrimitiveError> for DynamicsOverlayError3d {
+    fn from(value: PrimitiveError) -> Self {
+        Self::Primitive(value)
+    }
+}
+
+#[cfg(feature = "rapier")]
+impl From<MeshUploadError> for DynamicsOverlayError3d {
+    fn from(value: MeshUploadError) -> Self {
+        Self::Upload(value)
+    }
+}
+
+#[cfg(feature = "rapier")]
+impl From<MeshRenderError> for DynamicsOverlayError3d {
+    fn from(value: MeshRenderError) -> Self {
+        Self::Render(value)
+    }
+}
+
+#[cfg(feature = "rapier")]
+fn clamp_vec3(x: &mut f32, y: &mut f32, z: &mut f32, max_len: f32) {
+    let len_sq = *x * *x + *y * *y + *z * *z;
+    let max_sq = max_len * max_len;
+    if len_sq > max_sq && len_sq > 0.0 {
+        let scale = max_len / len_sq.sqrt();
+        *x *= scale;
+        *y *= scale;
+        *z *= scale;
+    }
+}
+
+#[cfg(feature = "rapier")]
 struct LocalTrimeshSlice {
     vertices: Vec<[f32; 3]>,
     indices: Vec<[u32; 3]>,
     candidates: usize,
 }
 
-/// Copies non-degenerate faces near `center` on XZ, closest-first, up to `max_faces`.
-#[cfg(feature = "physics-rapier")]
+#[cfg(feature = "rapier")]
 fn local_trimesh_from_mesh(
     mesh: &TriangleMesh3d,
     center: [f32; 3],
@@ -428,7 +568,7 @@ fn local_trimesh_from_mesh(
     }
 }
 
-#[cfg(feature = "physics-rapier")]
+#[cfg(feature = "rapier")]
 fn trs_matrix_xyzw(
     translation: [f32; 3],
     quat_xyzw: [f32; 4],

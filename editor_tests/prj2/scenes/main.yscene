@@ -23,7 +23,7 @@
               1.0
             ],
             "translation": [
-              0.0,
+              17.28954315185547,
               0.0,
               -8.593111038208008
             ]
@@ -55,7 +55,7 @@
               1.0
             ],
             "translation": [
-              0.0,
+              17.28954315185547,
               0.0,
               -8.593111038208008
             ]
@@ -121,9 +121,9 @@
               1.0
             ],
             "translation": [
-              0.2630000710487366,
-              0.8881561160087585,
-              19.679553985595703
+              5.301210403442383,
+              1.588155746459961,
+              20.29362678527832
             ]
           }
         },
@@ -181,6 +181,100 @@
             ],
             "enabled": true,
             "illuminance_lux": 8.0
+          }
+        }
+      ]
+    },
+    {
+      "guid": "a7b1c201-1111-4111-8111-000000000201",
+      "name": "TalkNpc",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              8.827106475830078,
+              1.0,
+              19.5
+            ]
+          }
+        },
+        {
+          "schema": "yuyib.model3d",
+          "version": 1,
+          "payload": {
+            "mesh": null,
+            "model": "builtin:cube",
+            "render_order": 0,
+            "visible": true
+          }
+        },
+        {
+          "schema": "yuyib.interactable",
+          "version": 1,
+          "payload": {
+            "enabled": true,
+            "interaction": "world.talk_npc",
+            "max_distance": 3.0
+          }
+        }
+      ]
+    },
+    {
+      "guid": "a7b1c202-2222-4222-8222-000000000202",
+      "name": "ExitVolume",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              4.5,
+              1.0,
+              19.5
+            ]
+          }
+        },
+        {
+          "schema": "yuyib.model3d",
+          "version": 1,
+          "payload": {
+            "mesh": null,
+            "model": "builtin:cube",
+            "render_order": 0,
+            "visible": true
+          }
+        },
+        {
+          "schema": "yuyib.trigger",
+          "version": 1,
+          "payload": {
+            "enabled": true,
+            "radius": 1.5,
+            "trigger": "level.exit"
           }
         }
       ]

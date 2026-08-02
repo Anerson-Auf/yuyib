@@ -154,7 +154,7 @@ pub fn read_texture_rgba8(
         match format {
             TextureReadbackFormat::Rgba8 => pixels.extend_from_slice(row_bytes),
             TextureReadbackFormat::Bgra8 => {
-                for chunk in row_bytes.chunks_exact(4) {
+                for chunk in row_bytes.as_chunks::<4>().0 {
                     pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
                 }
             }

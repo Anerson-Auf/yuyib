@@ -330,6 +330,348 @@ impl SceneSession {
         Ok(revision)
     }
 
+    /// Applies Rust projection edits as a single undoable transaction.
+    ///
+    /// Maps [`yuyib_scene_projection::ProjectionEdit`] 1:1 onto rename /
+    /// component add-remove / field-set commands. Empty edit lists are a no-op.
+    pub fn apply_projection_edits(
+        &mut self,
+        expected_revision: u64,
+        edits: &[yuyib_scene_projection::ProjectionEdit],
+    ) -> Result<Revision, SceneMutationError> {
+        if self.read_only {
+            return Err(SceneMutationError::Invalid(format!(
+                "scene container version {} is newer than the Editor mutation version {}",
+                self.document.format_version.get(),
+                SCENE_FORMAT_VERSION
+            )));
+        }
+        if edits.is_empty() {
+            return Ok(self.history.revision());
+        }
+
+        let mut transaction = CommandTransaction::new("Apply projection code");
+        let mut pending_removes: Vec<(EntityGuid, ComponentSchemaId, ComponentRecord, usize)> =
+            Vec::new();
+
+        for edit in edits {
+            match edit {
+                yuyib_scene_projection::ProjectionEdit::Rename { entity_guid, name } => {
+                    validate_name(name.as_deref())?;
+                    let entity = parse_entity_guid(entity_guid)?;
+                    let before = find_entity(&self.document, entity)?.name.clone();
+                    if before == *name {
+                        continue;
+                    }
+                    transaction = transaction.push(RenameEntity {
+                        entity,
+                        before,
+                        after: name.clone(),
+                    });
+                }
+                yuyib_scene_projection::ProjectionEdit::AddComponent {
+                    entity_guid,
+                    schema,
+                    version,
+                    payload,
+                } => {
+                    let entity = parse_entity_guid(entity_guid)?;
+                    let schema_id = ComponentSchemaId::new(schema)
+                        .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+                    if find_component(&self.document, entity, &schema_id).is_ok() {
+                        return Err(SceneMutationError::Invalid(format!(
+                            "component {schema} already exists on scene entity {entity}"
+                        )));
+                    }
+                    let schema_version = SchemaVersion::new(*version)
+                        .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+                    let component =
+                        ComponentRecord::new(schema_id, schema_version, payload.clone());
+                    transaction = transaction.push(AddComponent { entity, component });
+                }
+                yuyib_scene_projection::ProjectionEdit::RemoveComponent {
+                    entity_guid,
+                    schema,
+                } => {
+                    let entity = parse_entity_guid(entity_guid)?;
+                    let schema_id = ComponentSchemaId::new(schema)
+                        .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+                    let entity_record = find_entity(&self.document, entity)?;
+                    let index = entity_record
+                        .components
+                        .iter()
+                        .position(|record| record.schema() == &schema_id)
+                        .ok_or_else(|| {
+                            SceneMutationError::Invalid(format!(
+                                "component {schema} was not found on scene entity {entity}"
+                            ))
+                        })?;
+                    let removed = entity_record.components[index].clone();
+                    pending_removes.push((entity, schema_id, removed, index));
+                }
+                yuyib_scene_projection::ProjectionEdit::SetField {
+                    entity_guid,
+                    schema,
+                    field_path,
+                    value,
+                } => {
+                    validate_field(field_path)?;
+                    let entity = parse_entity_guid(entity_guid)?;
+                    let schema_id = ComponentSchemaId::new(schema)
+                        .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+                    let component = find_component(&self.document, entity, &schema_id)?;
+                    let before = read_object_field(component, field_path)?;
+                    if before.as_ref() == Some(value) {
+                        continue;
+                    }
+                    transaction = transaction.push(SetComponentField {
+                        entity,
+                        schema: schema_id,
+                        field: field_path.clone(),
+                        before,
+                        after: value.clone(),
+                    });
+                }
+            }
+        }
+
+        // Apply removals highest-index-first so stored indices stay valid within
+        // one transaction when several components leave the same entity.
+        pending_removes.sort_by(|left, right| right.3.cmp(&left.3));
+        for (entity, schema, removed, index) in pending_removes {
+            transaction = transaction.push(RemoveComponent {
+                entity,
+                schema,
+                removed,
+                index,
+            });
+        }
+
+        if transaction.is_empty() {
+            return Ok(self.history.revision());
+        }
+        let revision = self.history.commit(
+            &mut self.document,
+            Revision::new(expected_revision),
+            transaction,
+        )?;
+        self.dirty = self.saved_document.as_ref() != Some(&self.document);
+        Ok(revision)
+    }
+
+    /// Applies script interaction intents as one undoable transaction.
+    ///
+    /// [`yuyib_scene_interaction::SceneInteractionIntent::EmitSignal`] does not
+    /// mutate the document; signals are returned in the batch result for the
+    /// host to publish. Document-facing intents share validators with Inspector.
+    pub fn apply_interaction_intents(
+        &mut self,
+        expected_revision: u64,
+        intents: &[yuyib_scene_interaction::SceneInteractionIntent],
+    ) -> Result<
+        (
+            Revision,
+            yuyib_scene_interaction::SceneInteractionBatchResult,
+        ),
+        SceneMutationError,
+    > {
+        use yuyib_scene_interaction::{
+            SceneInteractionBatchResult, SceneInteractionIntent, SceneInteractionSignal,
+            TransformSpace, editor_capabilities, translation_field_writes, translation_schemas,
+            validate_intent,
+        };
+
+        if self.read_only {
+            return Err(SceneMutationError::Invalid(format!(
+                "scene container version {} is newer than the Editor mutation version {}",
+                self.document.format_version.get(),
+                SCENE_FORMAT_VERSION
+            )));
+        }
+
+        let caps = editor_capabilities();
+        let mut result = SceneInteractionBatchResult::empty(intents.len());
+        let mut transaction = CommandTransaction::new("Scene interaction");
+
+        for intent in intents {
+            validate_intent(intent).map_err(SceneMutationError::Invalid)?;
+            if !caps.supports(intent) {
+                return Err(SceneMutationError::Invalid(caps.unsupported_message(intent)));
+            }
+            match intent {
+                SceneInteractionIntent::EmitSignal { name, payload } => {
+                    result
+                        .signals
+                        .push(SceneInteractionSignal::new(name.clone(), payload.clone()));
+                    result.applied += 1;
+                }
+                SceneInteractionIntent::SetTranslation {
+                    entity,
+                    translation,
+                    space,
+                } => {
+                    let fields = translation_field_writes(*translation);
+                    let mut matched = false;
+                    let mut wrote = false;
+                    for schema_name in translation_schemas(*space) {
+                        let schema = ComponentSchemaId::new(*schema_name)
+                            .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+                        let Ok(component) = find_component(&self.document, *entity, &schema) else {
+                            continue;
+                        };
+                        matched = true;
+                        for (field, value) in &fields {
+                            validate_field(field)?;
+                            let before = read_object_field(component, field)?;
+                            if before.as_ref() == Some(value) {
+                                continue;
+                            }
+                            transaction = transaction.push(SetComponentField {
+                                entity: *entity,
+                                schema: schema.clone(),
+                                field: field.clone(),
+                                before,
+                                after: value.clone(),
+                            });
+                            wrote = true;
+                        }
+                        // Local space: stop after first matching schema in preference order.
+                        // World space: mirror onto Local when both exist (gizmo parity).
+                        if matches!(space, TransformSpace::Local) {
+                            break;
+                        }
+                    }
+                    if !matched {
+                        return Err(SceneMutationError::Invalid(format!(
+                            "scene entity {entity} has no Transform3d / LocalTransform3d for SetTranslation"
+                        )));
+                    }
+                    if wrote {
+                        result.applied += 1;
+                    }
+                }
+                SceneInteractionIntent::SetComponentField {
+                    entity,
+                    schema,
+                    field_path,
+                    value,
+                } => {
+                    validate_field(field_path)?;
+                    let schema_id = ComponentSchemaId::new(schema)
+                        .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+                    let component = find_component(&self.document, *entity, &schema_id)?;
+                    let before = read_object_field(component, field_path)?;
+                    if before.as_ref() == Some(value) {
+                        continue;
+                    }
+                    transaction = transaction.push(SetComponentField {
+                        entity: *entity,
+                        schema: schema_id,
+                        field: field_path.clone(),
+                        before,
+                        after: value.clone(),
+                    });
+                    result.applied += 1;
+                }
+                SceneInteractionIntent::AddComponent {
+                    entity,
+                    schema,
+                    version,
+                    payload,
+                } => {
+                    let schema_id = ComponentSchemaId::new(schema)
+                        .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+                    if find_component(&self.document, *entity, &schema_id).is_ok() {
+                        return Err(SceneMutationError::Invalid(format!(
+                            "component {schema} already exists on scene entity {entity}"
+                        )));
+                    }
+                    let component = match payload {
+                        Some(payload) => {
+                            let schema_version = SchemaVersion::new(version.unwrap_or(1))
+                                .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+                            ComponentRecord::new(schema_id, schema_version, payload.clone())
+                        }
+                        None => default_component_record(schema)?,
+                    };
+                    transaction = transaction.push(AddComponent {
+                        entity: *entity,
+                        component,
+                    });
+                    result.applied += 1;
+                }
+            }
+        }
+
+        if transaction.is_empty() {
+            return Ok((self.history.revision(), result));
+        }
+        let revision = self.history.commit(
+            &mut self.document,
+            Revision::new(expected_revision),
+            transaction,
+        )?;
+        self.dirty = self.saved_document.as_ref() != Some(&self.document);
+        Ok((revision, result))
+    }
+
+    /// Applies Play Mode TRS report fields for Transform3d / LocalTransform3d.
+    ///
+    /// Only fields that already exist on the authored component are written.
+    /// Empty / identical values are skipped. One undoable transaction.
+    pub fn apply_play_transform_report(
+        &mut self,
+        expected_revision: u64,
+        changes: &[(String, String, Vec<(String, Value)>)],
+    ) -> Result<Revision, SceneMutationError> {
+        if self.read_only {
+            return Err(SceneMutationError::Invalid(format!(
+                "scene container version {} is newer than the Editor mutation version {}",
+                self.document.format_version.get(),
+                SCENE_FORMAT_VERSION
+            )));
+        }
+        let mut transaction = CommandTransaction::new("Apply Play Changes");
+        for (entity_guid, component_id, fields) in changes {
+            if !matches!(
+                component_id.as_str(),
+                "yuyib.transform3d" | "yuyib.local-transform3d"
+            ) {
+                continue;
+            }
+            let entity = parse_entity_guid(entity_guid)?;
+            let schema = ComponentSchemaId::new(component_id.as_str())
+                .map_err(|error| SceneMutationError::Invalid(error.to_string()))?;
+            let Ok(component) = find_component(&self.document, entity, &schema) else {
+                continue;
+            };
+            for (field, value) in fields {
+                validate_field(field)?;
+                let before = read_object_field(component, field)?;
+                if before.as_ref() == Some(value) {
+                    continue;
+                }
+                transaction = transaction.push(SetComponentField {
+                    entity,
+                    schema: schema.clone(),
+                    field: field.clone(),
+                    before,
+                    after: value.clone(),
+                });
+            }
+        }
+        if transaction.is_empty() {
+            return Ok(self.history.revision());
+        }
+        let revision = self.history.commit(
+            &mut self.document,
+            Revision::new(expected_revision),
+            transaction,
+        )?;
+        self.dirty = self.saved_document.as_ref() != Some(&self.document);
+        Ok(revision)
+    }
+
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -485,6 +827,16 @@ fn default_component_record(component_id: &str) -> Result<ComponentRecord, Scene
             "color": [1.0, 0.95, 0.9],
             "illuminance_lux": 8.0,
             "enabled": true
+        }),
+        "yuyib.interactable" => json!({
+            "interaction": "world.interact",
+            "enabled": true,
+            "max_distance": 3.0
+        }),
+        "yuyib.trigger" => json!({
+            "trigger": "level.trigger",
+            "enabled": true,
+            "radius": 1.0
         }),
         _ => {
             return Err(SceneMutationError::Invalid(format!(

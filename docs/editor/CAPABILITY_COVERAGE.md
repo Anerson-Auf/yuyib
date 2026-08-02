@@ -8,6 +8,8 @@ Capability coverage отвечает на вопрос: «как пользов�
 > deterministic JSON manifest реализованы в `yuyib-authoring`; bootstrap в
 > `yuyib-authoring-yuyib` отдаётся host-ом как `host.coverage`.
 > **Visual (closed playable slice):** `Transform3d`, `LocalTransform3d`,
+> `Parent3d`, `Model3d`, `DirectionalLight3d`, plus Interactable / Trigger
+> (`yuyib.gameplay-interactions`) — Inspector + Play materialize/signals.
 > `Parent3d`, `Model3d`, `DirectionalLight3d` — Inspector + materialize +
 > viewport/Play evidence. **Asset (incremental):** `yuyib.gltf-import` /
 > `yuyib.gltf-preview` — `GltfPreviewAdapter` over production `GltfSceneLoad`
@@ -108,12 +110,12 @@ Human-readable documentation и Editor palette генерируются из т�
 | Mesh/material/animation subresources | Есть 3D foundation | `Unavailable` | `Asset`: selection, clip playback, material assignment |
 | 3D transform/hierarchy | Есть ECS foundation | `Visual` | hierarchy, Inspector, gizmo, round-trip — **closed** |
 | Camera/light/model instance | Есть частично | Model/Light `Visual`; Camera follow-up | Light transform/cone/Play — **closed** |
-| Collision/bounds/normals/tangents/UV | Есть разные runtime paths | All five Preview overlays partial | Bounds AABB + collision wireframe + normals/tangents shafts + UV0 markers in Asset Preview; animation selection open |
+| Collision/bounds/normals/tangents/UV | Есть разные runtime paths | All five Preview overlays + animation clip selection | Bounds AABB + collision wireframe + normals/tangents shafts + UV0 markers + clip inventory/playback in Asset Preview |
 | 3D PBR/render presets | Есть частично | partial Scene/Play PBR parity | Preview Asset route still open |
 | Scene persistence/materialization | `.yscene` foundation | partial | GUID, schemas, opaque preservation — **closed** for TRS/Model/Light |
-| Play Mode | Game lifecycle есть | process-isolated `yuyib-play` | Player motor + mesh physics + lights — **closed**; Apply Play off |
-| System/source navigation | ECS schedules есть | `Unavailable` | `SystemDescriptor`, read/write search, plugin ownership |
-| Code workspace | WebView foundation есть | `Unavailable` | Mature editor component + rust-analyzer/LSP |
+| Play Mode | Game lifecycle есть | process-isolated `yuyib-play` | Player motor + mesh physics + lights — **closed**; Apply Play TRS whitelist — **closed** |
+| System/source navigation | ECS schedules есть | partial | Systems list + open `source.file` / runtime/authoring paths |
+| Code workspace | Monaco + diagnostics-only RA | partial (E1 enough) | Completion/hover/rename → end-game |
 | 2D authoring | Runtime foundation partial | `Unavailable` | Следующий slice после 3D Asset coverage |
 | Custom low-level Rust/WGPU | Есть escape hatches | `CodeOnly` target | Docs/navigation, без фиктивного visual control |
 

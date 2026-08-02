@@ -18,7 +18,12 @@
 //! corridor, stop at walls and jump from floors. For a custom collider, use
 //! [`CharacterController3d::step_with_collision`] and supply the resolution
 //! function directly. Neither controller is a general rigid-body solver:
-//! there are no moving platforms, steps, slopes policy or dynamic bodies yet.
+//! there is no step-offset climbing or dynamic body response yet.
+//! Walkable slope is configurable via
+//! [`CharacterControllerConfig3d::max_walkable_slope_radians`].
+//! Kinematic moving platforms are supported through
+//! [`CharacterController3d::step_on_triangle_mesh_with_platform`] (carry +
+//! optional platform mesh).
 //! The triangle-map path divides one normal fixed movement into a small,
 //! bounded number of sphere resolutions. This prevents ordinary jumping from
 //! skipping a thin ceiling; it is deliberately not a replacement for
@@ -380,6 +385,11 @@ pub struct CharacterControllerConfig3d {
     /// for unusually dense overlapping map geometry; it scales collision cost
     /// linearly.
     pub collision_iterations: usize,
+    /// Maximum angle from world up at which a contact counts as walkable ground.
+    ///
+    /// Passed to [`TriangleMesh3d::resolve_sphere_with_slope`]. The default
+    /// matches the historical mesh threshold (`acos(0.55)` ≈ 56.6°).
+    pub max_walkable_slope_radians: f32,
 }
 
 impl CharacterControllerConfig3d {
@@ -407,6 +417,18 @@ impl CharacterControllerConfig3d {
                 reason: "must be positive",
             });
         }
+        validate_controller_finite(
+            self.max_walkable_slope_radians,
+            "max_walkable_slope_radians",
+        )?;
+        if self.max_walkable_slope_radians <= 0.0
+            || self.max_walkable_slope_radians > std::f32::consts::FRAC_PI_2
+        {
+            return Err(CharacterControllerError3d::InvalidConfig {
+                field: "max_walkable_slope_radians",
+                reason: "must be in (0, π/2]",
+            });
+        }
         Ok(())
     }
 }
@@ -420,6 +442,7 @@ impl Default for CharacterControllerConfig3d {
             jump_speed: 7.0,
             radius: 0.35,
             collision_iterations: 4,
+            max_walkable_slope_radians: yuyib_physics::default_max_walkable_slope_radians(),
         }
     }
 }
@@ -872,12 +895,27 @@ impl CharacterControllerStep3d {
     }
 }
 
+/// One fixed-tick kinematic platform sampled with the mesh character.
+///
+/// Games supply the platform's collision mesh in its **current** pose and the
+/// world-space translation applied this tick. When the controller is grounded,
+/// that delta is applied first (carry), then locomotion resolves against both
+/// the static world mesh and this platform mesh.
+#[derive(Clone, Copy, Debug)]
+pub struct CharacterMovingPlatform3d<'a> {
+    /// Platform triangles in world space for this fixed tick.
+    pub mesh: &'a TriangleMesh3d,
+    /// World-space translation of the platform during this fixed tick.
+    pub translation_delta: Vec3,
+}
+
 /// Fixed-step character controller for a static map.
 ///
 /// Use [`Self::step_on_triangle_mesh`] for the normal case. It is the compact
 /// high-level API for imported maps. It splits a normal fixed displacement
 /// into bounded sphere-resolution increments, so a jump cannot pass through
-/// an ordinary thin ceiling. [`Self::step_with_collision`] is the explicit
+/// an ordinary thin ceiling. [`Self::step_on_triangle_mesh_with_platform`]
+/// adds kinematic platform carry. [`Self::step_with_collision`] is the explicit
 /// low-level escape hatch for a custom physics world. This is not general
 /// continuous collision detection: keep speed and fixed step bounded.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1088,7 +1126,12 @@ impl CharacterController3d {
                 floor.z,
             );
             let clearance = collision_mesh
-                .resolve_sphere(position, config.radius, config.collision_iterations)
+                .resolve_sphere_with_slope(
+                    position,
+                    config.radius,
+                    config.collision_iterations,
+                    config.max_walkable_slope_radians,
+                )
                 .map_err(CharacterCollisionError3d::from)
                 .map_err(CharacterControllerError3d::Collision)?;
             if clearance.contacts != 0 {
@@ -1218,6 +1261,45 @@ impl CharacterController3d {
         Ok(())
     }
 
+    /// Applies an external world-space displacement, then resolves against `mesh`.
+    ///
+    /// Intended for hybrid dynamics feedback (e.g. Rapier props pushing a mesh
+    /// character) without clearing locomotion velocity. Velocity components that
+    /// oppose the net correction are zeroed so the push does not immediately
+    /// fight the next motor step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CharacterControllerError3d`] for non-finite input or when the
+    /// mesh query fails / yields a non-finite result.
+    pub fn apply_external_displacement(
+        &mut self,
+        displacement: Vec3,
+        mesh: &TriangleMesh3d,
+    ) -> Result<(), CharacterControllerError3d> {
+        if !finite_vec3(displacement) {
+            return Err(CharacterControllerError3d::InvalidPosition);
+        }
+        if displacement.x == 0.0 && displacement.y == 0.0 && displacement.z == 0.0 {
+            return Ok(());
+        }
+        let desired = self.position + displacement;
+        validate_controller_position(desired)?;
+        let result = mesh
+            .resolve_sphere_with_slope(
+                desired,
+                self.config.radius,
+                self.config.collision_iterations,
+                self.config.max_walkable_slope_radians,
+            )
+            .map_err(CharacterCollisionError3d::from)
+            .map_err(CharacterControllerError3d::Collision)?;
+        let net = result.position - self.position;
+        cancel_velocity_against_correction(&mut self.velocity, net);
+        self.apply_resolution(result)?;
+        Ok(())
+    }
+
     /// Resolves a spawn or teleport immediately against a static triangle map.
     ///
     /// This is normally called once after loading a map, before the first
@@ -1232,10 +1314,11 @@ impl CharacterController3d {
         mesh: &TriangleMesh3d,
     ) -> Result<(), CharacterControllerError3d> {
         let result = mesh
-            .resolve_sphere(
+            .resolve_sphere_with_slope(
                 self.position,
                 self.config.radius,
                 self.config.collision_iterations,
+                self.config.max_walkable_slope_radians,
             )
             .map_err(CharacterCollisionError3d::from)
             .map_err(CharacterControllerError3d::Collision)?;
@@ -1259,13 +1342,75 @@ impl CharacterController3d {
         input: CharacterInput3d,
         mesh: &TriangleMesh3d,
     ) -> Result<CharacterControllerStep3d, CharacterControllerError3d> {
+        self.step_on_triangle_mesh_with_platform(input, mesh, None)
+    }
+
+    /// Like [`Self::step_on_triangle_mesh`], with optional kinematic platform carry.
+    ///
+    /// When `platform` is set and the controller is currently grounded, the
+    /// platform's `translation_delta` is applied first and resolved against
+    /// both meshes so the player rides elevators/conveyors without rewriting
+    /// the motor onto Rapier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either mesh resolve fails or simulation becomes
+    /// non-finite.
+    pub fn step_on_triangle_mesh_with_platform(
+        &mut self,
+        input: CharacterInput3d,
+        world_mesh: &TriangleMesh3d,
+        platform: Option<CharacterMovingPlatform3d<'_>>,
+    ) -> Result<CharacterControllerStep3d, CharacterControllerError3d> {
         let radius = self.config.radius;
         let iterations = self.config.collision_iterations;
+        let max_slope = self.config.max_walkable_slope_radians;
+        let platform_mesh = platform.map(|platform| platform.mesh);
+        let platform_delta = platform.map(|platform| platform.translation_delta);
+
+        if self.grounded
+            && let Some(delta) = platform_delta
+            && finite_vec3(delta)
+            && (delta.x != 0.0 || delta.y != 0.0 || delta.z != 0.0)
+        {
+            let carried = self.position + delta;
+            validate_controller_position(carried)?;
+            let mut carried = resolve_world_and_platform(
+                carried,
+                radius,
+                iterations,
+                max_slope,
+                world_mesh,
+                platform_mesh,
+            )
+            .map_err(CharacterCollisionError3d::from)
+            .map_err(CharacterControllerError3d::Collision)?;
+            // Exact post-carry resting height is often tangent (no penetration),
+            // so probe like the locomotion path to retain grounded / platform stick.
+            if !carried.ground_contact {
+                let probe = Vec3::new(
+                    carried.position.x,
+                    carried.position.y - 0.001,
+                    carried.position.z,
+                );
+                let ground = resolve_world_and_platform(
+                    probe,
+                    radius,
+                    iterations,
+                    max_slope,
+                    world_mesh,
+                    platform_mesh,
+                )
+                .map_err(CharacterCollisionError3d::from)
+                .map_err(CharacterControllerError3d::Collision)?;
+                if ground.ground_contact {
+                    carried = ground;
+                }
+            }
+            self.apply_resolution(carried)?;
+        }
+
         let start = self.position;
-        // `resolve_sphere` deliberately reports only penetration. A sphere
-        // exactly tangent to a floor therefore needs this tiny bounded probe
-        // to retain grounded state while walking, without turning a step into
-        // a permanently invisible infinite floor.
         let probe_ground = self.grounded && !input.jump_pressed;
         self.step_with_collision(input, |desired, _| {
             let delta = desired - start;
@@ -1283,9 +1428,15 @@ impl CharacterController3d {
             let mut ground_contact = false;
 
             for _ in 0..substeps {
-                let result = mesh
-                    .resolve_sphere(position + increment, radius, iterations)
-                    .map_err(CharacterCollisionError3d::from)?;
+                let result = resolve_world_and_platform(
+                    position + increment,
+                    radius,
+                    iterations,
+                    max_slope,
+                    world_mesh,
+                    platform_mesh,
+                )
+                .map_err(CharacterCollisionError3d::from)?;
                 position = result.position;
                 contacts += result.contacts;
                 ground_contact |= result.ground_contact;
@@ -1301,9 +1452,15 @@ impl CharacterController3d {
                     result.position.y - 0.001,
                     result.position.z,
                 );
-                let ground = mesh
-                    .resolve_sphere(probe, radius, iterations)
-                    .map_err(CharacterCollisionError3d::from)?;
+                let ground = resolve_world_and_platform(
+                    probe,
+                    radius,
+                    iterations,
+                    max_slope,
+                    world_mesh,
+                    platform_mesh,
+                )
+                .map_err(CharacterCollisionError3d::from)?;
                 if ground.ground_contact {
                     result = ground;
                 }
@@ -1610,6 +1767,39 @@ fn cancel_velocity_against_correction(velocity: &mut Vec3, correction: Vec3) {
     }
 }
 
+fn resolve_world_and_platform(
+    position: Vec3,
+    radius: f32,
+    iterations: usize,
+    max_slope_radians: f32,
+    world_mesh: &TriangleMesh3d,
+    platform_mesh: Option<&TriangleMesh3d>,
+) -> Result<yuyib_physics::SphereMeshResolution3d, TriangleMeshQueryError> {
+    let mut ground_contact = false;
+    let mut contacts = 0;
+    let mut resolved = position;
+    if let Some(platform) = platform_mesh {
+        let platform = platform.resolve_sphere_with_slope(
+            resolved,
+            radius,
+            iterations,
+            max_slope_radians,
+        )?;
+        resolved = platform.position;
+        ground_contact |= platform.ground_contact;
+        contacts += platform.contacts;
+    }
+    let world =
+        world_mesh.resolve_sphere_with_slope(resolved, radius, iterations, max_slope_radians)?;
+    ground_contact |= world.ground_contact;
+    contacts += world.contacts;
+    Ok(yuyib_physics::SphereMeshResolution3d {
+        position: world.position,
+        ground_contact,
+        contacts,
+    })
+}
+
 fn cross3(left: Vec3, right: Vec3) -> Vec3 {
     Vec3::new(
         left.y * right.z - left.z * right.y,
@@ -1838,6 +2028,7 @@ mod tests {
             jump_speed: 3.0,
             radius: 0.25,
             collision_iterations: 4,
+            ..CharacterControllerConfig3d::default()
         };
         let mut controller =
             CharacterController3d::new(config, Vec3::new(0.0, 0.2, 0.0)).expect("valid controller");
@@ -1891,6 +2082,7 @@ mod tests {
             jump_speed: 10.0,
             radius: 0.25,
             collision_iterations: 4,
+            ..CharacterControllerConfig3d::default()
         };
         let mut controller =
             CharacterController3d::new(config, Vec3::new(0.0, 0.25, 0.0)).expect("controller");
@@ -1925,6 +2117,7 @@ mod tests {
             jump_speed: 4.0,
             radius: 0.5,
             collision_iterations: 1,
+            ..CharacterControllerConfig3d::default()
         };
         let mut controller =
             CharacterController3d::new(config, Vec3::ZERO).expect("valid controller");
@@ -2179,5 +2372,154 @@ mod tests {
                 Err(CharacterControllerError3d::InvalidConfig { .. })
             ));
         }
+    }
+
+    #[test]
+    fn controller_respects_max_walkable_slope_on_ramp() {
+        let ramp_angle = 30.0_f32.to_radians();
+        let run = 4.0_f32;
+        let rise = run * ramp_angle.tan();
+        let ramp = TriangleMesh3d::from_indexed(
+            &[
+                Vec3::new(-2.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(2.0, rise, run),
+                Vec3::new(-2.0, rise, run),
+            ],
+            &[0, 2, 1, 0, 3, 2],
+        )
+        .expect("ramp");
+        let surface_y = 1.0 * ramp_angle.tan();
+        let start = Vec3::new(0.0, surface_y + 0.35, 1.0);
+
+        let mut steep = CharacterController3d::new(
+            CharacterControllerConfig3d {
+                max_walkable_slope_radians: 20.0_f32.to_radians(),
+                gravity_y: 0.0,
+                move_speed: 0.0,
+                ..CharacterControllerConfig3d::default()
+            },
+            start,
+        )
+        .expect("steep controller");
+        steep.place_on_triangle_mesh(&ramp).expect("place steep");
+        assert!(
+            !steep.is_grounded(),
+            "30° ramp must not ground at 20° max slope"
+        );
+
+        let mut walkable = CharacterController3d::new(
+            CharacterControllerConfig3d {
+                max_walkable_slope_radians: 35.0_f32.to_radians(),
+                gravity_y: 0.0,
+                move_speed: 0.0,
+                ..CharacterControllerConfig3d::default()
+            },
+            start,
+        )
+        .expect("walkable controller");
+        walkable
+            .place_on_triangle_mesh(&ramp)
+            .expect("place walkable");
+        assert!(
+            walkable.is_grounded(),
+            "30° ramp must ground at 35° max slope"
+        );
+    }
+
+    fn flat_floor_at(y: f32) -> TriangleMesh3d {
+        TriangleMesh3d::from_indexed(
+            &[
+                Vec3::new(-3.0, y, -3.0),
+                Vec3::new(3.0, y, -3.0),
+                Vec3::new(3.0, y, 3.0),
+                Vec3::new(-3.0, y, 3.0),
+            ],
+            &[0, 2, 1, 0, 3, 2],
+        )
+        .expect("floor")
+    }
+
+    #[test]
+    fn grounded_controller_rides_vertical_platform_carry() {
+        let world = flat_floor_at(-50.0);
+        let platform_start = flat_floor_at(0.0);
+        let platform_end = flat_floor_at(0.5);
+        let radius = 0.35;
+        let mut controller = CharacterController3d::new(
+            CharacterControllerConfig3d {
+                radius,
+                gravity_y: 0.0,
+                move_speed: 0.0,
+                ..CharacterControllerConfig3d::default()
+            },
+            Vec3::new(0.0, 0.1, 0.0),
+        )
+        .expect("controller");
+        controller
+            .place_on_triangle_mesh(&platform_start)
+            .expect("place");
+        assert!(controller.is_grounded());
+        let before = controller.position();
+
+        controller
+            .step_on_triangle_mesh_with_platform(
+                CharacterInput3d::idle(),
+                &world,
+                Some(CharacterMovingPlatform3d {
+                    mesh: &platform_end,
+                    translation_delta: Vec3::new(0.0, 0.5, 0.0),
+                }),
+            )
+            .expect("ride");
+
+        assert!(controller.is_grounded());
+        assert!(
+            controller.position().y > before.y + 0.35,
+            "elevator carry should lift the character, before={} after={}",
+            before.y,
+            controller.position().y
+        );
+    }
+
+    #[test]
+    fn grounded_controller_rides_horizontal_platform_carry() {
+        let world = flat_floor_at(-50.0);
+        let platform = flat_floor_at(0.0);
+        let radius = 0.35;
+        let mut controller = CharacterController3d::new(
+            CharacterControllerConfig3d {
+                radius,
+                gravity_y: 0.0,
+                move_speed: 0.0,
+                ..CharacterControllerConfig3d::default()
+            },
+            Vec3::new(0.0, 0.1, 0.0),
+        )
+        .expect("controller");
+        controller
+            .place_on_triangle_mesh(&platform)
+            .expect("place");
+        assert!(controller.is_grounded());
+        let before = controller.position();
+
+        controller
+            .step_on_triangle_mesh_with_platform(
+                CharacterInput3d::idle(),
+                &world,
+                Some(CharacterMovingPlatform3d {
+                    mesh: &platform,
+                    translation_delta: Vec3::new(1.0, 0.0, 0.0),
+                }),
+            )
+            .expect("conveyor");
+
+        assert!(controller.is_grounded());
+        assert!(
+            (controller.position().x - (before.x + 1.0)).abs() < 0.05,
+            "conveyor carry should move X, before={} after={}",
+            before.x,
+            controller.position().x
+        );
     }
 }

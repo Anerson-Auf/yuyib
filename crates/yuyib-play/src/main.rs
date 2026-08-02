@@ -9,6 +9,11 @@
 
 #![forbid(unsafe_code)]
 
+mod interaction_bridge;
+mod trigger_signals;
+mod trigger_volumes;
+mod use_interaction;
+
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -50,7 +55,20 @@ use yuyib_game_3d::{
     build_static_scene_collider_3d, scene_bounds_3d, set_parent_3d,
 };
 use yuyib_game_3d_authoring::materialize_transform_scene;
+use yuyib_gameplay::ActionStates;
+use yuyib_platform::winit::{
+    event::{ElementState, WindowEvent},
+    keyboard::{KeyCode, PhysicalKey},
+};
 use yuyib_scene::{SceneSelection, spawn_scene};
+
+use interaction_bridge::PlayInteractionHost;
+use trigger_volumes::{
+    EntityTriggerTracker, materialize_triggers, step_trigger_volumes, sync_trigger_positions,
+};
+use use_interaction::{
+    materialize_interactables, sync_interactable_positions, try_use_interaction,
+};
 
 const MAX_FIXED_STEPS_PER_FRAME: u32 = 8;
 
@@ -97,14 +115,15 @@ fn run() -> Result<(), String> {
         ));
     }
 
-    let history_revision = arg_value(&args, "--scene-revision");
-    let expected_file_revision = arg_value(&args, "--scene-file-revision");
+    let history_revision = arg_value(&args, "--scene-revision").map(str::to_owned);
+    let expected_file_revision = arg_value(&args, "--scene-file-revision").map(str::to_owned);
+    let apply_report = arg_value(&args, "--apply-report").map(PathBuf::from);
 
     let bytes = fs::read(&scene_path).map_err(|error| error.to_string())?;
-    if let Some(expected) = expected_file_revision {
+    if let Some(expected) = expected_file_revision.as_deref() {
         validate_scene_file_revision(&bytes, expected)?;
     }
-    if let Some(revision) = history_revision {
+    if let Some(revision) = history_revision.as_deref() {
         eprintln!(
             "yuyib-play: pinned scene `{scene_rel}` history_revision={revision} file_ok={}",
             expected_file_revision.is_some()
@@ -199,6 +218,8 @@ fn run() -> Result<(), String> {
 
     let _ = yuyib_game_3d::propagate_world_transforms(&mut world);
     apply_world_light_directions(&mut world, &document, &materialized.entities);
+    materialize_interactables(&document, &mut world, &materialized.entities);
+    materialize_triggers(&document, &mut world, &materialized.entities);
 
     let player_config = player_control_config();
     let player_entity = find_player_entity(&document, &materialized.entities);
@@ -244,6 +265,7 @@ fn run() -> Result<(), String> {
     }
 
     let models = Rc::new(models);
+    let entity_map = Rc::new(materialized.entities);
     let world = Rc::new(RefCell::new(world));
     let scene = Rc::new(RefCell::new(
         Game3dScene::new(
@@ -282,6 +304,11 @@ fn run() -> Result<(), String> {
         fixed_accumulator_seconds: 0.0,
         last_frame: Instant::now(),
         plane_chase_mesh: ground_chase_mesh()?,
+        entity_map: Rc::clone(&entity_map),
+        interaction: PlayInteractionHost::default(),
+        actions: ActionStates::default(),
+        pending_use: false,
+        trigger_tracker: EntityTriggerTracker::default(),
     }));
 
     let event_play = Rc::clone(&play);
@@ -319,6 +346,17 @@ fn run() -> Result<(), String> {
         .on_window_event(move |event, context| {
             let mut runtime = event_play.borrow_mut();
             runtime.controls.handle_window_event(event);
+            if let WindowEvent::KeyboardInput { event: key_event, .. } = event {
+                if key_event.state == ElementState::Pressed
+                    && !key_event.repeat
+                    && matches!(
+                        key_event.physical_key,
+                        PhysicalKey::Code(KeyCode::KeyE)
+                    )
+                {
+                    runtime.pending_use = true;
+                }
+            }
             if let Some(follow) = runtime.follow_camera.as_mut() {
                 let result = follow.handle_window_event(event);
                 if let Some(cursor) = result.cursor_control {
@@ -356,7 +394,85 @@ fn run() -> Result<(), String> {
             }
         })
         .run()
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    if let Some(report_path) = apply_report {
+        write_apply_report(
+            &report_path,
+            &scene_rel,
+            history_revision.as_deref(),
+            expected_file_revision.as_deref(),
+            &entity_map,
+            &world.borrow(),
+        )?;
+    }
+    Ok(())
+}
+
+fn write_apply_report(
+    path: &Path,
+    scene_path: &str,
+    history_revision: Option<&str>,
+    file_revision: Option<&str>,
+    entities: &std::collections::BTreeMap<yuyib_authoring::EntityGuid, Entity>,
+    world: &yuyib_ecs::prelude::World,
+) -> Result<(), String> {
+    let changes: Vec<Value> = entities
+        .iter()
+        .filter_map(|(guid, &entity)| {
+            if let Some(local) = world.get::<LocalTransform3d>(entity) {
+                return Some(serde_json::json!({
+                    "entity": guid.to_string(),
+                    "component": "yuyib.local-transform3d",
+                    "fields": {
+                        "translation.x": local.translation[0],
+                        "translation.y": local.translation[1],
+                        "translation.z": local.translation[2],
+                        "rotation.x": local.rotation[0],
+                        "rotation.y": local.rotation[1],
+                        "rotation.z": local.rotation[2],
+                        "rotation.w": local.rotation[3],
+                        "scale.x": local.scale[0],
+                        "scale.y": local.scale[1],
+                        "scale.z": local.scale[2],
+                    }
+                }));
+            }
+            let transform = world.get::<Transform3d>(entity)?;
+            Some(serde_json::json!({
+                "entity": guid.to_string(),
+                "component": "yuyib.transform3d",
+                "fields": {
+                    "translation.x": transform.translation[0],
+                    "translation.y": transform.translation[1],
+                    "translation.z": transform.translation[2],
+                    "rotation.x": transform.rotation[0],
+                    "rotation.y": transform.rotation[1],
+                    "rotation.z": transform.rotation[2],
+                    "rotation.w": transform.rotation[3],
+                    "scale.x": transform.scale[0],
+                    "scale.y": transform.scale[1],
+                    "scale.z": transform.scale[2],
+                }
+            }))
+        })
+        .collect();
+    let report = serde_json::json!({
+        "schema": "yuyib.play-apply-report@1",
+        "scene_path": scene_path,
+        "history_revision": history_revision.and_then(|value| value.parse::<u64>().ok()),
+        "file_revision": file_revision,
+        "changes": changes,
+    });
+    let parent = path.parent().ok_or_else(|| "apply report path has no parent".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::rename(&temporary, path).map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -388,6 +504,16 @@ struct PlayRuntime {
     fixed_accumulator_seconds: f32,
     last_frame: Instant,
     plane_chase_mesh: TriangleMesh3d,
+    /// Stable authored GUID → runtime Entity (materialization map).
+    entity_map: Rc<std::collections::BTreeMap<yuyib_authoring::EntityGuid, Entity>>,
+    /// Script interaction pending queue + frame signal drain.
+    interaction: PlayInteractionHost,
+    /// Semantic action states for `game.use` (Interactable raycast).
+    actions: ActionStates,
+    /// Edge-triggered `KeyE` → attempt use this frame.
+    pending_use: bool,
+    /// Authoring sphere triggers → `trigger.*` bridge signals.
+    trigger_tracker: EntityTriggerTracker,
 }
 
 enum PlayerBody {
@@ -446,7 +572,52 @@ impl PlayerBody {
 }
 
 impl PlayRuntime {
+    /// Attaches a gameplay [`yuyib_gameplay::QuestBook`] for signal consumption.
+    #[allow(dead_code)]
+    fn set_quest_book(&mut self, book: yuyib_gameplay::QuestBook) {
+        self.interaction.set_quest_book(book);
+    }
+
+    /// Enqueues a script intent (behavior modules / tests).
+    #[allow(dead_code)]
+    fn enqueue_interaction(&mut self, intent: yuyib_scene_interaction::SceneInteractionIntent) {
+        self.interaction.enqueue(intent);
+    }
+
+    fn flush_interactions(&mut self, world: &mut yuyib_ecs::prelude::World) {
+        match self.interaction.flush(world, &self.entity_map) {
+            Ok(batch) if batch.submitted > 0 => {
+                let _ = yuyib_game_3d::propagate_world_transforms(world);
+                if batch.applied > 0 || !batch.signals.is_empty() {
+                    eprintln!(
+                        "yuyib-play: interaction flush submitted={} applied={} signals={}",
+                        batch.submitted,
+                        batch.applied,
+                        batch.signals.len()
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("yuyib-play: interaction flush failed: {error}"),
+        }
+        self.interaction.advance_signals();
+        self.interaction.consume_signals();
+    }
+
     fn step(&mut self, frame_delta_seconds: f32, world: &mut yuyib_ecs::prelude::World) {
+        sync_interactable_positions(world);
+        if self.pending_use {
+            self.pending_use = false;
+            if let (Some(actor), Some(follow)) = (self.player_entity, self.follow_camera.as_ref()) {
+                let camera = follow.look().camera();
+                if let Some(intent) =
+                    try_use_interaction(world, &mut self.actions, actor, camera.position, camera.target)
+                {
+                    self.interaction.enqueue(intent);
+                }
+            }
+        }
+        self.flush_interactions(world);
         if let Some(follow) = self.follow_camera.as_mut() {
             if follow.apply_look_input().is_err() {
                 return;
@@ -502,6 +673,12 @@ impl PlayRuntime {
 
             let position = body.position();
             sync_player_visual_transform(world, entity, position);
+            sync_trigger_positions(world);
+            for intent in step_trigger_volumes(world, entity, position, &mut self.trigger_tracker)
+            {
+                self.interaction.enqueue(intent);
+            }
+            self.flush_interactions(world);
         }
 
         let Some(focus) = self.camera_focus() else {

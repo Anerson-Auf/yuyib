@@ -27,6 +27,8 @@ yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }
 yuyib-render = { path = "../yuyib-render", version = "0.1.0" }
 yuyib-render-3d = { path = "../yuyib-render-3d", version = "0.1.0" }
 yuyib-scene = { path = "../yuyib-scene", version = "0.1.0" }
+yuyib-scene-projection = { path = "../yuyib-scene-projection", version = "0.1.0" }
+yuyib-scene-interaction = { path = "../yuyib-scene-interaction", version = "0.1.0" }
 yuyib-webview = { path = "../yuyib-webview", version = "0.1.0" }
 
 [lints]

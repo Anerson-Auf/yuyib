@@ -54,10 +54,25 @@ jobs:
           --lib
           -- --test-threads=2
 
-      - name: glTF authoring coverage gate
+      - name: Editor coverage gate (yuyib-gltf-authoring)
         run: >
           cargo test -p yuyib-gltf-authoring
           -- --test-threads=2
+
+      - name: Coverage gate focused checks
+        run: >
+          cargo test -p yuyib-gltf-authoring
+          coverage_manifest_export_round_trips_and_matches_golden
+          foundation_plus_preview_adapter_closes_coverage_gate
+          -- --test-threads=2
+
+      - name: Upload coverage manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-coverage-manifest
+          path: crates/yuyib-gltf-authoring/tests/fixtures/coverage-manifest.json
+          if-no-files-found: error
+          retention-days: 14
 
   clippy:
     name: Clippy (scoped)
@@ -77,6 +92,9 @@ jobs:
           shared-key: clippy-windows
 
       - name: Clippy foundation crates
+        # Lint only the listed packages. Without `--no-deps`, Clippy also
+        # denies lints in path dependencies (yuyib-model, yuyib-image, …).
+        # Pedantic stays advisory (workspace warn); CI denies clippy::all.
         run: >
           cargo clippy
           -p yuyib-authoring
@@ -84,4 +102,5 @@ jobs:
           -p yuyib-editor-core
           -p yuyib-gltf-authoring
           -p yuyib-render
-          -- -D warnings
+          --no-deps
+          -- -D clippy::all -A clippy::pedantic

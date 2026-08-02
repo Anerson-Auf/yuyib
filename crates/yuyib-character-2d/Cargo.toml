@@ -1,0 +1,14 @@
+[package]
+name = "yuyib-character-2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Rapier-backed 2D platformer character controller for Yuyib."
+
+[dependencies]
+yuyib-physics = { path = "../yuyib-physics", features = ["rapier2d"] }
+
+[lints]
+workspace = true

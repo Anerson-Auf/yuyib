@@ -252,9 +252,10 @@ authority acceptance и progression objective. Он намеренно не от
   Mouse, gamepad, text/IME, touch, rebinding UI и persistent bindings пока не
   входят в contract.
 - `CharacterMotor3d` сохраняет прежний простой infinite-ground-plane режим.
-  `CharacterController3d` добавляет static triangle-map стены и пол, но всё
-  ещё не имеет steps/slopes policy, moving platforms, CCD, broad phase или
-  camera policy.
+  `CharacterController3d` добавляет static triangle-map стены/пол,
+  настраиваемый max walkable slope (`max_walkable_slope_radians`) и kinematic
+  moving platforms (`step_on_triangle_mesh_with_platform`), но всё ещё не
+  имеет step-offset climbing, CCD, broad phase или camera policy.
 - Quest engine не загружает definitions из файлов, не сериализует snapshot,
   не делает replication и не устанавливает trust/authority boundary. Это
   обязанность game/application layer.

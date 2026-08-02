@@ -35,14 +35,23 @@ const state = {
   transactionId: 1,
   sourcePath: hosted ? null : "src/neon_sign.rs",
   sourceRevision: hosted ? null : 12,
+  sourceTree: [],
+  lspStatus: "idle",
+  sourceChangeTimer: null,
   overlays: { bounds: true, collision: false, normals: true, tangents: false, uv: false },
   previewMeshes: [],
   previewSelectedMesh: null,
   previewMaterials: [],
   previewSelectedMaterial: null,
+  previewMaterialOverride: null,
+  previewTextures: [],
+  previewAnimations: [],
+  previewSelectedAnimation: null,
   scene: { path: null, revision: 0, document: null, dirty: false, canUndo: false, canRedo: false, readOnly: false },
   componentCoverage: new Map(),
+  systemsCoverage: [],
   assetPreview: null,
+  previewLoadingPath: null,
   availableComponents: defaultAddableComponents,
   projectConfig: { name: null, package: null, executable: null, args: [], ready: false, root: null, scenes: [] },
   assets: [],
@@ -372,6 +381,17 @@ function mockHost(message) {
     }
     case "source.save":
       respond("host.source", { path: message.payload.path, content: message.payload.content, revision: (message.payload.revision || 0) + 1, saved: true }, 75);
+      break;
+    case "source.change":
+      // Diagnostics-only sync; browser mock has no rust-analyzer sidecar.
+      break;
+    case "source.list":
+      respond("host.source.tree", {
+        root: "mock-project",
+        code_root: ".",
+        files: ["src/main.rs", "src/neon_sign.rs", "src/neon_systems.rs"],
+        preferred: "src/main.rs",
+      }, 40);
       break;
     case "cargo.check": {
       respond("host.process", { kind: "cargo", status: "queued", package: message.payload.package, completed: 0.05 }, 50);
@@ -1437,6 +1457,7 @@ function renderAssetInspector(list, nameInput) {
       const value = materialSelect.value;
       const index = value === "" ? null : Number(value);
       state.previewSelectedMaterial = index;
+      state.previewMaterialOverride = null;
       if (hosted) {
         post("preview.selection.set", { kind: "material", index });
       } else {
@@ -1445,6 +1466,158 @@ function renderAssetInspector(list, nameInput) {
     });
     materialField.append(materialSpan, materialSelect);
     card.append(materialField);
+
+    if (state.previewSelectedMaterial != null) {
+      const override = state.previewMaterialOverride || {};
+      const postOverride = () => {
+        if (!hosted) return;
+        post("preview.material_override.set", {
+          material_index: state.previewSelectedMaterial,
+          parameters: state.previewMaterialOverride,
+        });
+      };
+      const addFactor = (label, key, count, defaults) => {
+        const field = document.createElement("label");
+        field.className = "field";
+        const span = document.createElement("span");
+        span.textContent = label;
+        const values = Array.isArray(override[key])
+          ? override[key]
+          : (count === 1 && typeof override[key] === "number" ? [override[key]] : defaults);
+        const inputs = [];
+        for (let i = 0; i < count; i += 1) {
+          const input = document.createElement("input");
+          input.type = "number";
+          input.step = "0.01";
+          input.value = String(values[i]);
+          input.addEventListener("change", () => {
+            state.previewMaterialOverride = state.previewMaterialOverride || {};
+            const next = inputs.map((entry) => Number(entry.value));
+            state.previewMaterialOverride[key] = count === 1 ? next[0] : next;
+            postOverride();
+          });
+          inputs.push(input);
+        }
+        field.append(span, ...inputs);
+        card.append(field);
+      };
+      addFactor("Base color", "base_color_factor", 4, [1, 1, 1, 1]);
+      addFactor("Metallic", "metallic_factor", 1, [1]);
+      addFactor("Roughness", "roughness_factor", 1, [1]);
+      addFactor("Emissive", "emissive_factor", 3, [0, 0, 0]);
+
+      const sidedField = document.createElement("label");
+      sidedField.className = "field";
+      const sidedInput = document.createElement("input");
+      sidedInput.type = "checkbox";
+      sidedInput.checked = Boolean(override.double_sided);
+      sidedInput.addEventListener("change", () => {
+        state.previewMaterialOverride = state.previewMaterialOverride || {};
+        state.previewMaterialOverride.double_sided = sidedInput.checked;
+        postOverride();
+      });
+      sidedField.append(document.createTextNode("Double sided"), sidedInput);
+      card.append(sidedField);
+
+      const textures = Array.isArray(state.previewTextures) ? state.previewTextures : [];
+      if (textures.length) {
+        const addTextureSelect = (label, key) => {
+          const field = document.createElement("label");
+          field.className = "field";
+          const span = document.createElement("span");
+          span.textContent = label;
+          const select = document.createElement("select");
+          const keep = document.createElement("option");
+          keep.value = "";
+          keep.textContent = "(unchanged)";
+          select.append(keep);
+          const clear = document.createElement("option");
+          clear.value = "null";
+          clear.textContent = "(clear texture)";
+          select.append(clear);
+          textures.forEach((entry) => {
+            const option = document.createElement("option");
+            option.value = String(entry.index);
+            option.textContent = entry.name ? `${entry.index}: ${entry.name}` : `texture_${entry.index}`;
+            select.append(option);
+          });
+          if (override[key] === null) clear.selected = true;
+          else if (override[key] != null && override[key] !== "") {
+            select.value = String(override[key]);
+          } else {
+            keep.selected = true;
+          }
+          select.addEventListener("change", () => {
+            state.previewMaterialOverride = state.previewMaterialOverride || {};
+            if (select.value === "") delete state.previewMaterialOverride[key];
+            else if (select.value === "null") state.previewMaterialOverride[key] = null;
+            else state.previewMaterialOverride[key] = Number(select.value);
+            if (Object.keys(state.previewMaterialOverride).length === 0) {
+              state.previewMaterialOverride = null;
+            }
+            postOverride();
+          });
+          field.append(span, select);
+          card.append(field);
+        };
+        addTextureSelect("Base color tex", "base_color_texture");
+        addTextureSelect("MetallicRoughness tex", "metallic_roughness_texture");
+        addTextureSelect("Emissive tex", "emissive_texture");
+        addTextureSelect("Normal tex", "normal_texture");
+      }
+
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.textContent = "Reset material override";
+      reset.addEventListener("click", () => {
+        state.previewMaterialOverride = null;
+        postOverride();
+        renderInspector();
+      });
+      card.append(reset);
+    }
+  }
+
+  const animations = Array.isArray(state.previewAnimations) ? state.previewAnimations : [];
+  if (animations.length) {
+    const animField = document.createElement("label");
+    animField.className = "field";
+    const animSpan = document.createElement("span");
+    animSpan.textContent = "Animation";
+    const animSelect = document.createElement("select");
+    const noneOption = document.createElement("option");
+    noneOption.value = "";
+    noneOption.textContent = "Bind pose (no clip)";
+    animSelect.append(noneOption);
+    animations.forEach((entry) => {
+      const option = document.createElement("option");
+      option.value = String(entry.index);
+      const name = entry.name || `Clip ${entry.index}`;
+      const duration =
+        typeof entry.duration_seconds === "number" ? entry.duration_seconds.toFixed(2) : "?";
+      option.textContent = `${name} (${duration}s)`;
+      option.title = entry.name || option.textContent;
+      if (
+        state.previewSelectedAnimation != null &&
+        Number(state.previewSelectedAnimation) === Number(entry.index)
+      ) {
+        option.selected = true;
+      }
+      animSelect.append(option);
+    });
+    if (state.previewSelectedAnimation == null) noneOption.selected = true;
+    animSelect.addEventListener("change", () => {
+      const value = animSelect.value;
+      const index = value === "" ? null : Number(value);
+      state.previewSelectedAnimation = index;
+      if (hosted) {
+        post("preview.selection.set", { kind: "animation", index });
+      } else {
+        executeCommand("preview.selection.set", { kind: "animation", index });
+      }
+    });
+    animField.append(animSpan, animSelect);
+    card.append(animField);
   }
 
   const tracking = document.createElement("p");
@@ -1505,15 +1678,112 @@ function renderAssetInspector(list, nameInput) {
 
 function updateSourceNavigation(entity) {
   const component = entity?.components?.[0];
-  const descriptor = component ? state.componentCoverage.get(component.id) : null;
+  const descriptor = component ? state.componentCoverage.get(component.id || component.schema) : null;
   document.querySelector(".coverage-chip").textContent = descriptor?.status || (component ? "Opaque" : "No component");
+  const systemsForComponent = findSystemsForComponent(component?.id || component?.schema);
   document.querySelectorAll("[data-open-source]").forEach((button) => {
     const kind = button.dataset.openSource;
-    const sourceKey = kind === "systems.reading" ? "systems" : kind;
-    const path = descriptor?.source?.[sourceKey];
+    let path = "";
+    let hint = "Not provided by host coverage";
+    if (kind === "entity.projection") {
+      path = entity?.projection_path || "";
+      hint = path || "Save/Sync Code to create entity projection";
+    } else if (kind === "component") {
+      path = descriptor?.source?.component || descriptor?.runtime_source?.file || "";
+      hint = path || "No runtime_source.file";
+    } else if (kind === "adapter") {
+      path = descriptor?.source?.adapter || descriptor?.authoring_source?.file || "";
+      hint = path || "No authoring_source.file";
+    } else if (kind === "systems.reading") {
+      const withSource = systemsForComponent.find((system) => system?.source?.file);
+      path = withSource?.source?.file || "";
+      hint = systemsForComponent.length
+        ? `${systemsForComponent.length} system(s)${path ? ` · ${path}` : " · no source.file"}`
+        : "No systems read/write this component";
+      button.dataset.systems = JSON.stringify(systemsForComponent.map((system) => ({
+        id: system.id,
+        file: system.source?.file || null,
+        line: system.source?.line || null,
+      })));
+    }
     button.dataset.path = path || "";
-    button.disabled = !path;
-    button.querySelector("small").textContent = path || "Not provided by host coverage";
+    button.disabled = kind === "systems.reading" ? systemsForComponent.length === 0 : !path;
+    const small = button.querySelector("small");
+    if (small) small.textContent = hint;
+  });
+}
+
+function findSystemsForComponent(componentId) {
+  if (!componentId) return [];
+  const systems = Array.isArray(state.systemsCoverage) ? state.systemsCoverage : [];
+  return systems.filter((system) => {
+    const reads = Array.isArray(system.reads) ? system.reads : [];
+    const writes = Array.isArray(system.writes) ? system.writes : [];
+    return reads.includes(componentId) || writes.includes(componentId);
+  });
+}
+
+function openCoverageSource(path, systemsPayload) {
+  if (Array.isArray(systemsPayload) && systemsPayload.length) {
+    const withFile = systemsPayload.filter((entry) => entry.file);
+    if (withFile.length > 1) {
+      const listing = withFile.map((entry, index) => `${index + 1}. ${entry.id} — ${entry.file}${entry.line ? `:${entry.line}` : ""}`).join("\n");
+      const choice = window.prompt(`Open system source (number):\n${listing}`, "1")?.trim();
+      if (!choice) return;
+      const picked = withFile[Number(choice) - 1] || withFile.find((entry) => entry.id === choice || entry.file === choice);
+      if (!picked?.file) {
+        showToast("No source", "Selected system has no source.file", "warning");
+        return;
+      }
+      setMainView("code");
+      post("source.read", { path: picked.file });
+      return;
+    }
+    if (withFile.length === 1) {
+      setMainView("code");
+      post("source.read", { path: withFile[0].file });
+      return;
+    }
+    showToast("Systems found", `${systemsPayload.length} system(s), none expose source.file`, "info");
+    renderSystemsOutline(systemsPayload.map((entry) => entry.id));
+    setMainView("code");
+    return;
+  }
+  if (!path) {
+    showToast("Source location unavailable", "host.coverage did not provide source metadata", "warning");
+    return;
+  }
+  setMainView("code");
+  post("source.read", { path });
+}
+
+function renderSystemsOutline(filterIds) {
+  const explorer = document.querySelector(".code-explorer");
+  if (!explorer) return;
+  explorer.querySelectorAll(".code-outline-heading, .outline-row").forEach((el) => el.remove());
+  const systems = Array.isArray(state.systemsCoverage) ? state.systemsCoverage : [];
+  const filtered = filterIds?.length
+    ? systems.filter((system) => filterIds.includes(system.id))
+    : systems;
+  if (!filtered.length) return;
+  const heading = document.createElement("div");
+  heading.className = "code-outline-heading";
+  heading.textContent = filterIds?.length ? "Systems (selection)" : "Systems";
+  explorer.append(heading);
+  filtered.forEach((system) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "outline-row";
+    const file = system.source?.file;
+    row.innerHTML = `<span class="outline-symbol outline-symbol--fn">ƒ</span><span></span>`;
+    row.querySelectorAll("span")[1].textContent = system.id || "system";
+    row.title = file ? `${file}${system.source?.line ? `:${system.source.line}` : ""}` : "No source.file";
+    row.disabled = !file;
+    row.addEventListener("click", () => {
+      if (!file) return;
+      post("source.read", { path: file });
+    });
+    explorer.append(row);
   });
 }
 
@@ -1558,6 +1828,10 @@ function applySceneHistory(payload) {
   if (undo) undo.disabled = !state.scene.canUndo;
   if (redo) redo.disabled = !state.scene.canRedo;
   document.querySelector("#saveButton").disabled = state.scene.readOnly;
+  const syncCode = document.querySelector("#syncCodeButton");
+  if (syncCode) syncCode.disabled = !state.scene.document || state.scene.readOnly;
+  const applyCode = document.querySelector("#applyCodeButton");
+  if (applyCode) applyCode.disabled = !state.scene.document || state.scene.readOnly;
 }
 
 function collectComponentCoverage(payload) {
@@ -1595,7 +1869,7 @@ function renderUnavailableCapabilities(payload) {
   summary.textContent = `${unavailable.length} engine capabilities not authorable yet (expected)`;
   const tip = document.createElement("p");
   tip.className = "unavailable-tip";
-  tip.textContent = "Authoring that works now: scenes, hierarchy reparent, Transform W/E/R gizmo, Model3d + DirectionalLight Visual, pinned Play (scene+revision), Asset Preview Bounds/Collision/Normals/Tangents/UV + mesh/material selection. Apply Play Changes and animation clip selection remain unavailable.";
+  tip.textContent = "Authoring that works now: scenes, hierarchy, Transform gizmo, Model3d + lights, Play pin, Asset Preview overlays/selection/animation/material factors+texture remap, Apply Play Changes, Sync/Apply Code scene↔.rs projection, coverage CI, rust-analyzer diagnostics, source/system navigation.";
   const list = document.createElement("ul");
   unavailable.forEach((entry) => {
     const item = document.createElement("li");
@@ -1614,6 +1888,11 @@ function renderUnavailableCapabilities(payload) {
 
 function configureCoverage(payload) {
   state.componentCoverage = new Map(collectComponentCoverage(payload).map((descriptor) => [descriptor.id, descriptor]));
+  state.systemsCoverage = Array.isArray(payload.systems)
+    ? payload.systems
+    : Array.isArray(payload.manifest?.systems)
+      ? payload.manifest.systems
+      : [];
   configureAvailableComponents(payload.available_components ?? payload.availableComponents ?? payload.manifest?.available_components);
   renderUnavailableCapabilities(payload);
   const project = typeof payload.project === "object" && payload.project
@@ -1627,6 +1906,7 @@ function configureCoverage(payload) {
     labels[1].textContent = payload.preview.foundationViewport ? "Foundation viewport" : "Viewport unavailable";
     labels[2].textContent = `glTF ${payload.preview.gltf || "not reported"}`;
   }
+  if (state.view === "code") renderSystemsOutline();
   renderInspector();
 }
 
@@ -1857,11 +2137,15 @@ window.addEventListener("yuyib:event", ({ detail }) => {
         appendOutput("project", `Opened ${root}`);
         setLauncherStatus(`Opened ${root}`, "success");
         if (!wasReady) showToast("Project opened", String(root), "success");
+        if (hosted) post("source.list", {});
       } else {
         appendOutput("project", "Waiting for project selection");
       }
       break;
     }
+    case "host.source.tree":
+      renderSourceTree(payload);
+      break;
     case "host.assets":
       renderAssetIndex(payload.items || []);
       appendOutput("assets", `${(payload.items || []).length} assets · ${payload.status || "ready"}`);
@@ -1891,6 +2175,12 @@ window.addEventListener("yuyib:event", ({ detail }) => {
     case "host.diagnostics":
       updateDiagnostics(payload.items || payload.diagnostics || []);
       break;
+    case "host.lsp.status":
+      handleLspStatus(payload);
+      break;
+    case "host.lsp.diagnostics":
+      applyLspDiagnostics(payload);
+      break;
     case "host.source":
       if (payload.saved) {
         state.sourceRevision = payload.revision ?? state.sourceRevision;
@@ -1919,6 +2209,19 @@ window.addEventListener("yuyib:event", ({ detail }) => {
     case "scene.history":
       applySceneHistory(payload);
       break;
+    case "host.scene.interaction.signal": {
+      const name = payload?.name || "?";
+      const phase = payload?.payload?.phase;
+      const quest = payload?.quest_progress;
+      const summary = quest
+        ? `quest ${quest.event} ×${quest.amount}`
+        : phase
+          ? `${name} phase=${phase}`
+          : name;
+      appendOutput("interaction", `signal ${summary}`);
+      showToast("Interaction signal", summary, "info");
+      break;
+    }
     default:
       appendOutput("bridge", `Ignored unsupported event ${detail.event}`);
   }
@@ -1966,11 +2269,33 @@ function handleHostProcess(payload) {
     appendOutput("play", `${payload.status} code=${code} reason=${reason} ${pinLabel}`.trim());
     if (payload.status === "stopped" || payload.status === "timeout" || payload.status === "error") {
       const ok = payload.success === true;
+      const applyReady = ok && payload.apply_play_changes === true;
+      const applyCount = Number(payload.apply_change_count || 0);
+      const applyButton = document.querySelector("#applyPlayButton");
+      if (applyButton) {
+        applyButton.hidden = !applyReady;
+        applyButton.textContent = applyReady
+          ? `Apply Play (${applyCount})`
+          : "Apply Play";
+      }
       showToast(
         ok ? "Play stopped" : "Play ended",
-        `${reason} · exit ${code}${pinLabel ? ` · ${pinLabel}` : ""}`,
-        ok ? "info" : "warning",
+        applyReady
+          ? `${pinLabel || "scene"} · ${applyCount} transform change(s) ready to apply`
+          : (pinLabel || reason || ""),
+        ok ? "success" : "warning",
       );
+      return;
+    }
+    if (payload.status === "applied") {
+      const applyButton = document.querySelector("#applyPlayButton");
+      if (applyButton) applyButton.hidden = true;
+      showToast(
+        "Play changes applied",
+        `${payload.applied_entities || 0} entit(y/ies) · undoable`,
+        "success",
+      );
+      return;
     }
     return;
   }
@@ -2020,10 +2345,23 @@ function handleHostProcess(payload) {
         renderInspector();
       }
     }
+    if (Array.isArray(payload.animations)) {
+      state.previewAnimations = payload.animations;
+      state.previewSelectedAnimation = payload.selected_animation ?? null;
+      if (state.selection?.kind === "asset" || state.view === "preview") {
+        renderInspector();
+      }
+    }
+    if (Array.isArray(payload.textures)) {
+      state.previewTextures = payload.textures;
+      if (state.selection?.kind === "asset" || state.view === "preview") {
+        renderInspector();
+      }
+    }
     if (payload.status === "selection") {
       appendOutput(
         "preview",
-        `selection mesh=${payload.selected_mesh == null ? "all" : payload.selected_mesh} material=${payload.selected_material == null ? "all" : payload.selected_material}`,
+        `selection mesh=${payload.selected_mesh == null ? "all" : payload.selected_mesh} material=${payload.selected_material == null ? "all" : payload.selected_material} animation=${payload.selected_animation == null ? "none" : payload.selected_animation} textures=${(payload.textures || []).length}`,
       );
       return;
     }
@@ -2034,16 +2372,25 @@ function handleHostProcess(payload) {
         const strong = assetLoading.querySelector("strong");
         if (strong) strong.textContent = `${Math.round((payload.completed || 0) * 100)}%`;
       }
+      if (payload.path) {
+        state.previewLoadingPath = String(payload.path).replace(/\\/g, "/");
+      }
+      if (payload.stage === "already_loading") {
+        appendOutput("preview", `already loading ${payload.path || ""}`);
+        return;
+      }
       if (payload.stage === "import") {
         showToast("Loading model", payload.path || "glTF import…", "info");
       }
       appendOutput("preview", `${payload.stage} ${Math.round((payload.completed || 0) * 100)}%`);
     } else if (payload.status === "scene_model_ready") {
       document.querySelector("#assetPreviewLoading")?.classList.add("is-hidden");
+      state.previewLoadingPath = null;
       showToast("Model ready", payload.path || "glTF hierarchy spawned", "success");
       appendOutput("preview", `Scene model ready ${payload.path || ""}`);
     } else if (payload.status === "ready") {
       document.querySelector("#assetPreviewLoading")?.classList.add("is-hidden");
+      state.previewLoadingPath = null;
       const primitives = Number.isFinite(payload.primitive_count) ? payload.primitive_count : 0;
       const gpuMb = Number.isFinite(payload.gpu_bytes)
         ? Math.round(payload.gpu_bytes / 1048576)
@@ -2059,6 +2406,7 @@ function handleHostProcess(payload) {
       window.requestAnimationFrame(sendViewportBounds);
     } else if (payload.status === "failed") {
       document.querySelector("#assetPreviewLoading")?.classList.add("is-hidden");
+      state.previewLoadingPath = null;
       showToast("Preview failed", payload.message || payload.stage || "import error", "warning");
     }
     return;
@@ -2152,8 +2500,8 @@ function requestSelection(kind, stableId) {
 
 function requestAssetOpen(assetId) {
   if (hosted) {
-    // Switch Preview + sync bounds BEFORE asset.open so the native hole exists
-    // when CPU import finishes and GPU upload can start on the first click.
+    // Switch Preview + wait for non-zero Preview-stage bounds BEFORE asset.open
+    // so the native hole is not painted with stale Scene rect / cleared by 0×0.
     const id = String(assetId || "");
     const fromIndex = (state.assets || []).find((item) =>
       item.id === id || item.path === id || `asset://${item.path}` === id
@@ -2163,17 +2511,53 @@ function requestAssetOpen(assetId) {
     const wantsPreview = kind === "model" || kind === "asset"
       || /\.(glb|gltf|yasset)$/i.test(path)
       || /^asset:\/\//i.test(id);
+    const normalizedPath = String(path).replace(/\\/g, "/");
+    // Same glTF already importing — do not restart the production import.
+    if (
+      wantsPreview
+      && state.previewLoadingPath
+      && (normalizedPath === state.previewLoadingPath
+        || normalizedPath.endsWith(state.previewLoadingPath)
+        || state.previewLoadingPath.endsWith(normalizedPath)
+        || id === state.previewLoadingPath
+        || `asset://${normalizedPath}` === state.previewLoadingPath)
+    ) {
+      appendOutput("preview", `ignored reopen while loading ${state.previewLoadingPath}`);
+      return;
+    }
+    const open = () => {
+      if (wantsPreview) state.previewLoadingPath = normalizedPath;
+      post("asset.open", { id: assetId });
+    };
     if (wantsPreview) {
       if (state.view !== "preview") setMainView("preview");
       else {
         post("workspace.mode", { mode: "preview" });
         sendViewportBounds();
       }
+      waitForPreviewBounds(open);
+      return;
     }
-    post("asset.open", { id: assetId });
+    open();
     return;
   }
   requestSelection("asset", assetId);
+}
+
+function waitForPreviewBounds(then, attempts = 0) {
+  const stage = document.querySelector(".preview-stage");
+  const rect = stage?.getBoundingClientRect();
+  if (rect && rect.width > 2 && rect.height > 2) {
+    sendViewportBounds();
+    then();
+    return;
+  }
+  if (attempts >= 20) {
+    sendViewportBounds();
+    then();
+    return;
+  }
+  window.requestAnimationFrame(() => waitForPreviewBounds(then, attempts + 1));
 }
 
 function setMainView(view) {
@@ -2187,6 +2571,7 @@ function setMainView(view) {
   if (view === "code") {
     ensureMonaco();
     window.requestAnimationFrame(() => state.monacoEditor?.layout());
+    if (hosted) post("source.list", {});
   }
   if (view === "scene") window.requestAnimationFrame(drawScene);
   // Preview/Code must hide the sibling WGPU HWND or it covers WebView dialogs/tabs.
@@ -2413,9 +2798,166 @@ function ensureMonaco() {
       { startLineNumber: 17, startColumn: 13, endLineNumber: 17, endColumn: 17, severity: monaco.MarkerSeverity.Warning, message: "Mock: material query currently updates every frame", source: "clippy" },
       { startLineNumber: 18, startColumn: 9, endLineNumber: 18, endColumn: 36, severity: monaco.MarkerSeverity.Info, message: "Preview values are applied to runtime state only", source: "yuyib-authoring" },
     ]);
+  } else {
+    monaco.editor.setModelMarkers(state.monacoModel, "yuyib-mock", []);
   }
+  state.monacoEditor.onDidChangeModelContent(() => {
+    if (!hosted || !state.sourcePath) return;
+    if (state.sourceChangeTimer) window.clearTimeout(state.sourceChangeTimer);
+    state.sourceChangeTimer = window.setTimeout(() => {
+      state.sourceChangeTimer = null;
+      post("source.change", { path: state.sourcePath, content: state.monacoEditor.getValue() });
+    }, 400);
+  });
   state.monacoEditor.focus();
   return state.monacoEditor;
+}
+
+function lspSeverityToMonaco(severity) {
+  switch (Number(severity)) {
+    case 1: return monaco.MarkerSeverity.Error;
+    case 2: return monaco.MarkerSeverity.Warning;
+    case 3: return monaco.MarkerSeverity.Info;
+    case 4: return monaco.MarkerSeverity.Hint;
+    default: return monaco.MarkerSeverity.Warning;
+  }
+}
+
+function handleLspStatus(payload) {
+  state.lspStatus = payload?.status || "idle";
+  const message = payload?.message ? ` · ${payload.message}` : "";
+  appendOutput("lsp", `status ${state.lspStatus}${message}`);
+  if (state.lspStatus === "unavailable" || state.lspStatus === "error") {
+    showToast("rust-analyzer", payload?.message || state.lspStatus, "warning");
+  }
+}
+
+function applyLspDiagnostics(payload) {
+  const path = payload?.path || "";
+  const diagnostics = Array.isArray(payload?.diagnostics) ? payload.diagnostics : [];
+  if (!state.monacoModel) return;
+  const modelPath = (state.sourcePath || "").replace(/\//g, "\\");
+  const diagPath = String(path).replace(/\//g, "\\");
+  const pathMatches = !path
+    || !state.sourcePath
+    || diagPath.endsWith(modelPath)
+    || diagPath.toLowerCase().endsWith(modelPath.toLowerCase())
+    || modelPath.endsWith(diagPath.split("\\").slice(-2).join("\\"));
+  if (!pathMatches && state.sourcePath) return;
+  const markers = diagnostics.map((item) => ({
+    startLineNumber: item.start_line || 1,
+    startColumn: item.start_column || 1,
+    endLineNumber: item.end_line || item.start_line || 1,
+    endColumn: item.end_column || (item.start_column || 1) + 1,
+    severity: lspSeverityToMonaco(item.severity),
+    message: item.message || "diagnostic",
+    source: item.source || "rust-analyzer",
+  }));
+  monaco.editor.setModelMarkers(state.monacoModel, "rust-analyzer", markers);
+  appendOutput("lsp", `${markers.length} diagnostic(s) for ${path || state.sourcePath || "?"}`);
+}
+
+function renderSourceTree(payload) {
+  const explorer = document.querySelector(".code-explorer");
+  if (!explorer) return;
+  const files = Array.isArray(payload?.files) ? payload.files : [];
+  state.sourceTree = files;
+  explorer.querySelectorAll(
+    ".code-tree-row, .code-tree-group, .code-outline-heading, .outline-row, .data-empty-state",
+  ).forEach((el) => el.remove());
+  const workspaceName = explorer.querySelector(".code-workspace-name");
+  if (workspaceName) {
+    const rootLabel = String(payload?.root || state.projectConfig.root || "WORKSPACE").replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || "WORKSPACE";
+    workspaceName.textContent = rootLabel.toUpperCase();
+  }
+  if (!files.length) {
+    const empty = document.createElement("div");
+    empty.className = "data-empty-state";
+    empty.textContent = "No .rs files found under project code_root";
+    explorer.append(empty);
+    return;
+  }
+  const tree = buildSourceFolderTree(files);
+  renderSourceFolderNode(explorer, tree, "", 0);
+  const preferred = payload?.preferred || files.find((path) => path.endsWith("main.rs")) || files[0];
+  if (preferred && !state.sourcePath && state.view === "code") {
+    post("source.read", { path: preferred });
+  } else if (state.sourcePath) {
+    highlightSourceTreePath(state.sourcePath);
+  }
+  renderSystemsOutline();
+}
+
+function buildSourceFolderTree(files) {
+  const root = { dirs: new Map(), files: [] };
+  for (const path of files) {
+    const parts = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
+    if (!parts.length) continue;
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const part = parts[i];
+      if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
+      node = node.dirs.get(part);
+    }
+    const fileName = parts.at(-1);
+    if (fileName && !node.files.includes(fileName)) node.files.push(fileName);
+  }
+  return root;
+}
+
+function renderSourceFolderNode(parent, node, prefix, depth) {
+  const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
+  for (const name of dirNames) {
+    const folderPath = prefix ? `${prefix}/${name}` : name;
+    const group = document.createElement("div");
+    group.className = "code-tree-group is-expanded";
+    group.dataset.folder = folderPath;
+
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "code-tree-row is-open";
+    row.style.paddingLeft = `${7 + depth * 14}px`;
+    row.dataset.folder = folderPath;
+    row.innerHTML = `<svg><use href="#i-chevron"/></svg><span></span>`;
+    row.querySelector("span").textContent = name;
+    row.addEventListener("click", (event) => {
+      event.preventDefault();
+      const expanded = group.classList.toggle("is-expanded");
+      row.classList.toggle("is-open", expanded);
+    });
+
+    const children = document.createElement("div");
+    children.className = "code-tree-children";
+    renderSourceFolderNode(children, node.dirs.get(name), folderPath, depth + 1);
+
+    group.append(row, children);
+    parent.append(group);
+  }
+
+  const fileNames = [...node.files].sort((a, b) => a.localeCompare(b));
+  for (const name of fileNames) {
+    const path = prefix ? `${prefix}/${name}` : name;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "code-tree-row";
+    row.style.paddingLeft = `${7 + depth * 14}px`;
+    row.dataset.path = path;
+    row.innerHTML = `<span class="rust-file-icon">Rs</span><span></span>`;
+    row.querySelectorAll("span")[1].textContent = name;
+    row.title = path;
+    row.addEventListener("click", () => {
+      highlightSourceTreePath(path);
+      post("source.read", { path });
+    });
+    parent.append(row);
+  }
+}
+
+function highlightSourceTreePath(path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  document.querySelectorAll(".code-explorer [data-path]").forEach((row) => {
+    row.classList.toggle("is-selected", row.dataset.path === normalized);
+  });
 }
 
 function openDocument(sourceDoc) {
@@ -2430,11 +2972,22 @@ function openDocument(sourceDoc) {
   state.monacoModel = model;
   state.sourcePath = sourceDoc.path || state.sourcePath;
   state.sourceRevision = sourceDoc.revision ?? state.sourceRevision;
+  monaco.editor.setModelMarkers(model, "rust-analyzer", []);
+  highlightSourceTreePath(state.sourcePath);
   const displayName = sourceDoc.display_name || state.sourcePath.split("/").at(-1);
   document.querySelector(".code-file-tab").childNodes[1].textContent = displayName;
   const crumbs = document.querySelectorAll(".code-breadcrumb span");
-  crumbs[2].textContent = displayName;
-  showToast("Source opened", `${displayName} · ${state.sourcePath}`, "success");
+  if (crumbs[0]) crumbs[0].textContent = sourceDoc.external ? "workspace" : "project";
+  if (crumbs[1]) {
+    const parts = String(state.sourcePath || "").replace(/\\/g, "/").split("/");
+    crumbs[1].textContent = parts.length > 1 ? parts.slice(0, -1).join("/") : "src";
+  }
+  if (crumbs[2]) crumbs[2].textContent = displayName;
+  showToast(
+    sourceDoc.external ? "Engine source opened" : "Source opened",
+    `${displayName} · ${state.sourcePath}${sourceDoc.read_only ? " · read-only" : ""}`,
+    "success",
+  );
 }
 
 function runScopedCargoCheck() {
@@ -2823,9 +3376,13 @@ document.querySelector("#launcherProjectName")?.addEventListener("keydown", (eve
 });
 
 document.querySelectorAll("[data-open-source]").forEach((button) => button.addEventListener("click", () => {
-  const path = button.dataset.path;
-  if (path) post("source.open", { path });
-  else showToast("Source location unavailable", "host.coverage did not provide source metadata", "warning");
+  let systemsPayload = null;
+  try {
+    systemsPayload = button.dataset.systems ? JSON.parse(button.dataset.systems) : null;
+  } catch {
+    systemsPayload = null;
+  }
+  openCoverageSource(button.dataset.path, systemsPayload);
 }));
 
 document.querySelectorAll("[data-source]").forEach((button) => button.addEventListener("click", () => {
@@ -2844,6 +3401,17 @@ document.querySelector("#pauseButton").addEventListener("click", () => {
   showToast("Pause unavailable", "Pinned Play v1 supports Start/Stop only — Apply/Pause are out of scope", "info");
 });
 document.querySelector("#stopButton").addEventListener("click", () => post("play.stop", {}));
+document.querySelector("#applyPlayButton")?.addEventListener("click", () => {
+  post("play.apply_changes", {});
+});
+document.querySelector("#syncCodeButton")?.addEventListener("click", () => {
+  post("scene.projection.export", {});
+});
+document.querySelector("#applyCodeButton")?.addEventListener("click", () => {
+  post("scene.projection.apply", {
+    expected_revision: state.scene.revision ?? undefined,
+  });
+});
 document.querySelector("#saveButton").addEventListener("click", () => {
   if (state.scene.document && state.scene.dirty) post("scene.save", {});
   else if (state.scene.document) showToast("Scene already saved", state.scene.path || "No pending scene changes", "info");
@@ -3180,7 +3748,7 @@ function initializeUiMode() {
   }
 
   const codeExplorer = document.querySelector(".code-explorer");
-  codeExplorer.querySelectorAll(".code-tree-row, .code-outline-heading, .outline-row").forEach((element) => element.remove());
+  codeExplorer.querySelectorAll(".code-tree-row, .code-tree-group, .code-outline-heading, .outline-row").forEach((element) => element.remove());
   codeExplorer.querySelector(".code-workspace-name").textContent = "HOST WORKSPACE";
   const codeTab = document.querySelector(".code-file-tab");
   if (codeTab) {
@@ -3188,15 +3756,12 @@ function initializeUiMode() {
     if (codeTab.childNodes[1]) codeTab.childNodes[1].textContent = "No source";
   }
   const hostedCrumbs = document.querySelectorAll(".code-breadcrumb span");
-  if (hostedCrumbs[0]) hostedCrumbs[0].textContent = "host";
+  if (hostedCrumbs[0]) hostedCrumbs[0].textContent = "project";
   if (hostedCrumbs[1]) hostedCrumbs[1].textContent = "";
   if (hostedCrumbs[2]) hostedCrumbs[2].textContent = "No source";
   const breadcrumbSymbol = document.querySelector(".code-breadcrumb strong");
   if (breadcrumbSymbol) breadcrumbSymbol.textContent = "—";
-  const sourceEmpty = document.createElement("div");
-  sourceEmpty.className = "data-empty-state";
-  sourceEmpty.textContent = "Open a Rust source through Code navigation or Explorer after the project is loaded";
-  codeExplorer.append(sourceEmpty);
+  // Host fills Explorer via host.source.tree after project open / Code tab.
 
   const previewSummary = document.querySelector(".preview-summary");
   if (previewSummary) {

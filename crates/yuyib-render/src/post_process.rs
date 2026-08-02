@@ -647,10 +647,10 @@ impl PostProcessResources {
         surface_view: &TextureView,
         config: ColorPostProcess,
     ) {
-        if config.bloom().is_some() {
-            if let Some(bloom) = &self.bloom {
-                self.encode_bloom(encoder, device, bloom);
-            }
+        if config.bloom().is_some()
+            && let Some(bloom) = &self.bloom
+        {
+            self.encode_bloom(encoder, device, bloom);
         }
         let resolve_target = self
             .fxaa
@@ -674,25 +674,25 @@ impl PostProcessResources {
             pass.set_bind_group(0, Some(&self.bind_group), &[]);
             pass.draw(0..3, 0..1);
         }
-        if config.fxaa().is_some() {
-            if let Some(fxaa) = &self.fxaa {
-                let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("yuyib FXAA"),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: surface_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: Operations {
-                            load: LoadOp::Clear(wgpu::Color::BLACK),
-                            store: StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-                pass.set_pipeline(&fxaa.pipeline);
-                pass.set_bind_group(0, Some(&fxaa.bind_group), &[]);
-                pass.draw(0..3, 0..1);
-            }
+        if config.fxaa().is_some()
+            && let Some(fxaa) = &self.fxaa
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("yuyib FXAA"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: surface_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(wgpu::Color::BLACK),
+                        store: StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&fxaa.pipeline);
+            pass.set_bind_group(0, Some(&fxaa.bind_group), &[]);
+            pass.draw(0..3, 0..1);
         }
     }
 

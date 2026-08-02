@@ -22,22 +22,22 @@
 | Область | Состояние | Главный остаток |
 |---|---|---|
 | Windows application | partial | multi-window, device-loss recovery, production diagnostics |
-| Game/ECS lifecycle | foundation complete | composition profiles, save/load lifecycle |
+| Game/ECS lifecycle | foundation + M5.1 profiles | Deep 2D HL started (`PlayableLoop2d`); save/load |
 | Tasks/assets/importers | strong foundation | hot reload UI, eviction, shipping without importers |
-| 2D | partial | editor import, lighting, platformer/dynamic physics |
+| 2D | partial + Deep 2D A | PlayableLoop2d/camera follow; platformer HL, Tiled, UI slices |
 | 3D/glTF/animation | strong partial | compatibility tail, material overrides, animation authoring |
 | 3D rendering | usable MVP | validated CSM, TAA/GTAO, GPU instancing, timestamps |
 | Shader API | not as planned | high-level effects/material templates |
-| Physics | prototype | mature rigid-body backend behind Yuyib facade |
+| Physics | usable MVP (Rapier 3D/2D + platformer controller) | editor physics UI, tile broadphase cache |
 | Navigation | early partial | agent navmesh, smoothing, dynamic obstacles |
 | Gameplay | partial | persistence, UI composition, authority/replication |
-| Native UI | early partial | nested scroll, clipping, widgets, text input/IME, accessibility |
+| Native UI | early partial | ScrollView+thumb done; drag/IME/a11y/images open |
 | WebView | partial | facade decision, focus/accessibility/composition |
 | Audio | partial | spatial audio, buses, streaming and device policy |
 | Networking | early partial | TLS/auth, replication, prediction and observability |
 | Source 1 | early partial | BSP/VPK/lightmaps/displacements/props/material integration |
 | Source 2 | missing/research | format/version/legal matrix and importer plugin |
-| Editor/authoring | E1 in progress | Asset DoD remainder, coverage Actions CI, rust-analyzer/LSP |
+| Editor/authoring | E1 in progress | Project wizard / cook export; LSP completion deferred to end-game |
 | Documentation/release | partial | book freshness, golden tests, stable policy; Actions foundation CI landed |
 
 ## Критический путь
@@ -59,8 +59,9 @@ Editor — отдельный strategic development-tool track и consumer runti
    non-destructive reimport. Открыто: selection/overlays, full Asset DoD
    (`yuyib.gltf-import` / `yuyib.gltf-preview` = `Asset`);
 3. ~~asset preview через общий importer/cooker/renderer path~~ — **partial:**
-   production `GltfSceneLoad` path + host-registered adapter. Открыто: overlays,
-   material-to-mesh selection;
+   production `GltfSceneLoad` path + host-registered adapter; overlays +
+   mesh/material/**animation** selection. Открыто: full Asset DoD / material
+   override;
 4. ~~scene hierarchy, Inspector, commands и transform gizmo~~ — **closed:**
    hierarchy, Inspector, undo/redo, Move/Rotate/Scale gizmo, Model3d
    place/spawn;
@@ -71,8 +72,9 @@ Editor — отдельный strategic development-tool track и consumer runti
    `--scene-file-revision` (blake3), Player motor + mesh collider, authored
    light, dark PBR fallback; `host.process` возвращает pin + exit code.
    Apply-Play reverse-sync отключён;
-7. source/system navigation и mature code workspace с rust-analyzer/LSP —
-   **open**.
+7. source/system navigation — **partial closed** (file tree + coverage systems /
+   runtime/authoring jump); mature LSP completion/hover/rename —
+   **deferred to end-game** (diagnostics-only already shipped).
 
 Evidence (closed items): Transform gizmo; Player motor; mesh physics;
 DirectionalLight transform/cone; dark Play fallback. Full E1 DoD ниже не
@@ -202,19 +204,34 @@ Definition of Done (core): неизменённый GLB повторно не п
 
 ### M4 — Physics facade над mature backend
 
-**M4.1–M4.9 usable MVP slice:** Rapier facade + playable side-by-side overlay
-(`support/playable_dynamics.rs`): local solid **map trimesh** (walls/floors near
-spawn), props, and a **kinematic character sphere** that tracks the mesh player
-so crates can be pushed (one-way). Character locomotion/collision still uses
-`TriangleMesh3d::resolve_sphere` — no motor rewrite.
+**M4.1–M4.13 usable MVP slice:** Rapier 3D facade + playable side-by-side overlay
+(`DynamicsOverlay3d` in `yuyib-profile-3d`, feature `rapier` / `physics-rapier`):
+local solid **map trimesh**, props, kinematic character sphere, soft two-way
+reaction, **configurable walkable slope**, and **kinematic moving platforms** on
+the mesh character path
+(`CharacterController3d::step_on_triangle_mesh_with_platform` + carry). Character
+locomotion still uses `TriangleMesh3d` queries — no motor rewrite onto Rapier.
+**M4.13:** Rapier 2D facade (`RapierDynamicsWorld2d`, feature `physics-rapier2d`)
+mirrors early 3D surface — fixed/dynamic box/ball/capsule, kinematic platforms,
+triggers, collision groups, CCD, contacts, joints, `DynamicsFixedStepper2d`,
+platformer + top-down configs; smoke `physics_rapier2d_smoke`.
 
 Собственные static queries/BVH сохраняются. General-purpose rigid-body solver
 не следует разрабатывать внутри Yuyib: dynamic bodies, broadphase, CCD, sleeping,
 joints и determinism должны прийти через заменяемый mature backend adapter
 (**Rapier #1**; Avian #2 later).
 
-**M4.10+ / still open:** two-way character↔prop response, slope-aware character
-rewrite, 2D Rapier port.
+**Still open (M4 DoD remainder / v2.0):** editor physics UI; replacing 3D character
+mesh queries with backend mesh queries.
+
+**3D examples (done):** `physics_3d_showcase` (high-level mesh character + Rapier
+facade tour) and `physics_3d_lowlevel` (custom `step_with_collision`, direct mesh
+queries, collision groups / contacts).
+
+**2D examples (done for facade + platformer MVP):** `physics_rapier2d_smoke`
+(platformer settle + top-down kinematic/trigger) and `physics_platformer2d_smoke`
+(`PlatformerController2d`: gravity/jump/coyote/buffer, walls, one-way platforms via
+Rapier KCC — separate from top-down `KinematicSpriteController2d`).
 
 **v2.0 polish (do not block):** editor physics UI, replacing character mesh
 queries with backend mesh queries.
@@ -226,13 +243,54 @@ top-down, 2D platformer и 3D physics examples.
 
 ### M5 — Ergonomic high-level profiles
 
-После стабилизации M1–M4 нужны небольшие composition profiles:
-`Game3dProfile`, `CharacterGame3d`, `Game2dProfile`,
-`NativeApplicationProfile` и формальное решение по отдельному `Web` facade.
+**M5.1 usable MVP slice:** composition profiles that collapse repeated owner
+wiring without hiding budgets/errors:
 
-Definition of Done: typical playable example не связывает вручную десять
-внутренних owners; один builder подключает loading/render/collision/controller/
-camera/audio/interaction, сохраняя budgets, errors и low-level ownership.
+- `Game3dProfile` (`yuyib-profile-3d`, feature `profile-3d`) — shared `TaskPool`,
+  `Game3dScene`, one `GltfSceneLoad`/`LoadedGltfScene` lifecycle, prepare/render
+  helpers; smoke `game3d_profile_smoke`.
+- `CharacterGame3d` — opt-in mesh character spawn/step on profile layers or raw
+  meshes (not folded into the base profile).
+- `Game2dProfile` (`yuyib-profile-2d`, feature `profile-2d`) — `World` +
+  `Game2dScene`, animation step + render helpers; smoke `game2d_profile_smoke`.
+
+**Deferred / explicit decisions:**
+
+- `NativeApplicationProfile` — low ROI while `Application` already is the native
+  builder; revisit when ≥2 repeated app compositions exist.
+- Standalone `Web` facade / `yuyib-web` — **deferred**. Keep
+  `Application::webview(...)` behind `webview` until a first-class `WebSurface`
+  lifecycle (non-overlay placement, focus/accessibility) exists. A thin alias
+  now would fossilize an underspecified API (RFC 0001 gap).
+
+Definition of Done (remaining): migrate more playables onto profiles where
+policy is stable (`cyberpunk_city_playable` uses `Game3dProfile` +
+`AnimatedCharacter3d` + `PlayableLoop3d` + `DynamicsOverlay3d`). **Current:**
+Deep 2D A (`PlayableLoop2d` / `CameraFollow2d`). Audio/interaction remain
+opt-in adapters.
+
+## Ближайший порядок работ
+
+1. **Current (узкий M6)** — ScrollView glyph clip + vertical thumb (**done**).
+   Drag/inertia, IME, a11y, images — позже.
+2. **High-Level composition (M5.2)** — engine-owned playable loop, не helpers в
+   `examples/support`:
+   - `AnimatedCharacter3d` / `AnimatedCharacterLoad3d` (**done**, smoke
+     `animated_character_smoke`);
+   - `EnvironmentPreset` / `Game3dProfile::with_environment` (**done**, street-city
+     IBL/shadows/SSAO);
+   - `Game3dPlayableLoad` co-load map+character (**done**);
+   - `PlayableLoop3d` (controls+camera+step+draw) (**done**, playable migrated);
+   - `DynamicsOverlay3d` (**done**, feature `rapier` / `physics-rapier`; smoke
+     `playable_dynamics_overlay_smoke`).
+   **DoD:** `cyberpunk_city_playable` ≈ 150–250 строк без glue-support для
+   avatar/IBL/input/step/dynamics (остаётся window Application glue + street knobs).
+3. **Deep 2D** — HL-паттерны как M5.2 3D:
+   - A. `PlayableLoop2d` + `CameraFollow2d` (**done**, smoke
+     `playable_loop_2d_smoke`; `two_d_tile_playground` migrated);
+   - дальше: platformer HL / sprite↔body sync; thin UI (pause/HUD); Tiled/LDtk
+     (M7) → `TileMap2d`.
+   Rapier2D facade / `PlatformerController2d` / `Game2dProfile` smokes уже есть.
 
 ### M6 — Application capability completion
 
@@ -242,8 +300,11 @@ persistent rebinding. Audio: listener/source, buses и master mixer. WebView:
 focus/input/accessibility lifecycle и окончательное facade decision.
 
 **Started:** bounded vertical `ScrollView` — retained wheel offset, viewport
-pointer clipping, WGPU scissor для одного column content child. Открыто:
-nested clipping, scrollbar/inertia, virtualization, IME, accessibility.
+pointer clipping, WGPU scissor для rectangles **и** `ApplicationUi::with_text`
+glyph path (`UiLayout::clip` → `TextClipRect`), plus vertical thumb indicator
+на input-aware extract (`UiVisualStyle::scroll_thumb`, no drag/inertia). Nested
+scroll clips intersect на layout path. Открыто: scrollbar drag/inertia,
+virtualization, IME, accessibility, images/icons.
 
 ### M7 — Content formats
 

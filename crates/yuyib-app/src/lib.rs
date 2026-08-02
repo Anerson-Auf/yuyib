@@ -38,12 +38,15 @@ use yuyib_ui::{Size as UiSize, UiError, UiLayout, UiTokens, UiTree, layout_with_
 #[cfg(feature = "ui")]
 use yuyib_ui::{UiInputState, UiResponse};
 #[cfg(feature = "ui")]
-use yuyib_ui_render::{UiRectangle, UiRenderError, UiRenderLimits, UiRenderStats, UiRenderer};
+use yuyib_ui_render::{
+    UiInputRenderOptions, UiRectangle, UiRenderError, UiRenderLimits, UiRenderStats, UiRenderer,
+    UiVisualStyle,
+};
 #[cfg(feature = "ui-text")]
 use yuyib_ui_text::{FontSource, TextEngine, TextError, TextLayoutOptions, TextLimits};
 #[cfg(feature = "ui-text")]
 use yuyib_ui_text_render::{
-    GlyphAtlasConfig, GpuGlyphAtlas, TextColor, TextDrawList, TextGlyphDrawOptions,
+    GlyphAtlasConfig, GpuGlyphAtlas, TextClipRect, TextColor, TextDrawList, TextGlyphDrawOptions,
     TextGlyphRenderLimits, TextGlyphRenderer, TextGpuRenderError, TextRasterizer, TextRenderError,
     TextViewport,
 };
@@ -816,8 +819,9 @@ impl Error for NativeUiTextError {
 /// and flushes ordered [`UiResponse`] values before `on_render` and this UI's
 /// overlay pass. The adapter keeps its explicit [`yuyib_input::UiDpiPolicy`].
 /// With the `ui-text` feature, [`Self::with_text`] adds labels and button
-/// captions from one explicitly configured font. IME, accessibility, scrolling
-/// and custom render ordering remain lower-level host responsibilities.
+/// captions from one explicitly configured font. Glyph draws honour retained
+/// [`UiLayout::clip`] from `ScrollView` (WGPU scissor). IME, accessibility and
+/// custom render ordering remain lower-level host responsibilities.
 #[cfg(feature = "ui")]
 pub struct ApplicationUi {
     tree: UiTree,
@@ -896,12 +900,26 @@ impl ApplicationUiText {
         limits: UiRenderLimits,
         input: Option<&UiInputState>,
     ) -> Result<UiRenderStats, NativeUiTextError> {
-        let stats = rectangles
-            .draw(frame, root, layout, tokens, limits)
-            .map_err(NativeUiTextError::Ui)?;
-        let mut draw_list = TextDrawList::default();
-        self.collect_text(root, layout, tokens, &mut draw_list)?;
-        if draw_list.quads().is_empty() {
+        let stats = match input {
+            Some(state) => rectangles
+                .draw_with_input(
+                    frame,
+                    root,
+                    layout,
+                    tokens,
+                    UiInputRenderOptions::new(state)
+                        .with_limits(limits)
+                        // Hover/press/focus overlays are drawn after glyphs.
+                        .with_visuals(UiVisualStyle::default().with_focus_outline(None)),
+                )
+                .map_err(NativeUiTextError::Ui)?,
+            None => rectangles
+                .draw(frame, root, layout, tokens, limits)
+                .map_err(NativeUiTextError::Ui)?,
+        };
+        let mut batches = Vec::new();
+        self.collect_text(root, layout, tokens, &mut batches)?;
+        if batches.is_empty() {
             return Ok(stats);
         }
         let glyph_renderer = self
@@ -918,7 +936,6 @@ impl ApplicationUiText {
             return Ok(stats);
         };
         let viewport = TextViewport::new(0, 0, frame.surface_size()[0], frame.surface_size()[1]);
-        let options = TextGlyphDrawOptions::new(viewport).with_limits(self.config.gpu_limits);
         glyph_renderer
             .update_atlas(
                 frame,
@@ -927,9 +944,14 @@ impl ApplicationUiText {
                 self.config.gpu_limits,
             )
             .map_err(NativeUiTextError::Gpu)?;
-        let _ = glyph_renderer
-            .draw(frame, gpu_atlas, &draw_list, options)
-            .map_err(NativeUiTextError::Gpu)?;
+        for batch in &batches {
+            let options = TextGlyphDrawOptions::new(viewport)
+                .with_limits(self.config.gpu_limits)
+                .with_clip(batch.clip);
+            let _ = glyph_renderer
+                .draw(frame, gpu_atlas, &batch.draw_list, options)
+                .map_err(NativeUiTextError::Gpu)?;
+        }
         let overlays = interaction_overlays(input, layout);
         if !overlays.is_empty() {
             let _ = rectangles
@@ -944,16 +966,16 @@ impl ApplicationUiText {
         widget: &Widget,
         layout: &UiLayout,
         tokens: UiTokens,
-        draw_list: &mut TextDrawList,
+        batches: &mut Vec<ApplicationUiTextBatch>,
     ) -> Result<(), NativeUiTextError> {
         let bounds = layout
             .bounds(widget.id())
             .ok_or(NativeUiTextError::MetricsOutsideUiRange)?;
         if let Some(content) = widget.text() {
-            self.collect_widget_text(widget, bounds, tokens, content, draw_list)?;
+            self.collect_widget_text(widget, layout, bounds, tokens, content, batches)?;
         }
         for child in widget.children() {
-            self.collect_text(child, layout, tokens, draw_list)?;
+            self.collect_text(child, layout, tokens, batches)?;
         }
         Ok(())
     }
@@ -961,10 +983,11 @@ impl ApplicationUiText {
     fn collect_widget_text(
         &mut self,
         widget: &Widget,
+        layout: &UiLayout,
         bounds: yuyib_ui::Rect,
         tokens: UiTokens,
         content: &str,
-        draw_list: &mut TextDrawList,
+        batches: &mut Vec<ApplicationUiTextBatch>,
     ) -> Result<(), NativeUiTextError> {
         let padding = widget.style().padding;
         let inner = yuyib_ui::Rect {
@@ -1008,11 +1031,54 @@ impl ApplicationUiText {
         let translated = text_frame
             .draw_list()
             .translated(to_f32_i32(inner.origin.x), to_f32_i32(inner.origin.y));
-        draw_list
-            .append(&translated)
-            .map_err(|_| NativeUiTextError::MetricsOutsideUiRange)?;
+        push_text_batch(batches, text_clip_rect(layout, widget.id()), &translated)?;
         Ok(())
     }
+}
+
+/// One glyph submission with a shared scroll viewport clip.
+#[cfg(feature = "ui-text")]
+struct ApplicationUiTextBatch {
+    clip: Option<TextClipRect>,
+    draw_list: TextDrawList,
+}
+
+/// Maps retained UI scroll clip into a viewport-local glyph scissor rectangle.
+#[cfg(feature = "ui-text")]
+fn text_clip_rect(layout: &UiLayout, id: yuyib_ui::WidgetId) -> Option<TextClipRect> {
+    let rect = layout.clip(id)?;
+    Some(TextClipRect::new(
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+    ))
+}
+
+/// Appends quads into the last batch when the clip matches; otherwise starts a new batch.
+#[cfg(feature = "ui-text")]
+fn push_text_batch(
+    batches: &mut Vec<ApplicationUiTextBatch>,
+    clip: Option<TextClipRect>,
+    quads: &TextDrawList,
+) -> Result<(), NativeUiTextError> {
+    if quads.quads().is_empty() {
+        return Ok(());
+    }
+    if let Some(last) = batches.last_mut()
+        && last.clip == clip
+    {
+        last.draw_list
+            .append(quads)
+            .map_err(|_| NativeUiTextError::MetricsOutsideUiRange)?;
+        return Ok(());
+    }
+    let mut draw_list = TextDrawList::default();
+    draw_list
+        .append(quads)
+        .map_err(|_| NativeUiTextError::MetricsOutsideUiRange)?;
+    batches.push(ApplicationUiTextBatch { clip, draw_list });
+    Ok(())
 }
 
 #[cfg(feature = "ui-text")]
@@ -1378,6 +1444,17 @@ impl ApplicationUi {
                     input,
                 )
                 .map_err(ApplicationUiError::TextRender);
+        }
+        if let Some(input) = &self.input {
+            return renderer
+                .draw_with_input(
+                    frame,
+                    self.tree.root(),
+                    &layout,
+                    self.tokens,
+                    UiInputRenderOptions::new(&input.state).with_limits(self.limits),
+                )
+                .map_err(ApplicationUiError::Render);
         }
         renderer
             .draw(frame, self.tree.root(), &layout, self.tokens, self.limits)
@@ -2142,6 +2219,12 @@ mod tests {
     };
     #[cfg(feature = "ui")]
     use yuyib_ui::{LayoutKind, Size, UiAction, UiBuilder, Widget, WidgetId};
+    #[cfg(feature = "ui-text")]
+    use yuyib_ui::{
+        Dimension, LayoutConstraints, UiInputState, UiTree, layout_with_input_state,
+    };
+    #[cfg(feature = "ui-text")]
+    use yuyib_ui_text_render::TextClipRect;
     #[cfg(feature = "webview")]
     use yuyib_webview::{BridgeLimits, EndpointName, PageEvent, PageSessionId, WebViewBuilder};
 
@@ -2406,6 +2489,153 @@ mod tests {
         assert_eq!(
             ui.input.as_ref().expect("registered input").state.focused(),
             None
+        );
+    }
+
+    #[cfg(feature = "ui-text")]
+    fn scroll_text_tree() -> UiTree {
+        UiBuilder::new(WidgetId::from_key("root"), LayoutKind::Column)
+            .child(
+                Widget::label(WidgetId::from_key("outside"), "outside").with_constraints(
+                    LayoutConstraints::auto().with_height(Dimension::Points(20)),
+                ),
+            )
+            .child(
+                Widget::scroll_view(WidgetId::from_key("scroll"))
+                    .with_constraints(
+                        LayoutConstraints::auto()
+                            .with_width(Dimension::Points(100))
+                            .with_height(Dimension::Points(40)),
+                    )
+                    .with_children(vec![
+                        Widget::container(WidgetId::from_key("content"), LayoutKind::Column)
+                            .with_constraints(
+                                LayoutConstraints::auto().with_height(Dimension::Points(120)),
+                            )
+                            .with_children(vec![
+                                Widget::label(WidgetId::from_key("inside"), "inside")
+                                    .with_constraints(
+                                        LayoutConstraints::auto()
+                                            .with_height(Dimension::Points(32)),
+                                    ),
+                            ]),
+                    ]),
+            )
+            .build()
+            .expect("scroll text tree")
+    }
+
+    #[cfg(feature = "ui-text")]
+    #[test]
+    fn scroll_view_text_clip_matches_viewport_and_skips_siblings() {
+        let tree = scroll_text_tree();
+        let layout =
+            layout_with_input_state(&tree, Size::new(100, 100), &UiInputState::default())
+                .expect("layout");
+        let scroll = layout
+            .bounds(WidgetId::from_key("scroll"))
+            .expect("scroll bounds");
+        assert_eq!(
+            super::text_clip_rect(&layout, WidgetId::from_key("inside")),
+            Some(TextClipRect::new(
+                scroll.origin.x,
+                scroll.origin.y,
+                scroll.size.width,
+                scroll.size.height,
+            ))
+        );
+        assert_eq!(
+            super::text_clip_rect(&layout, WidgetId::from_key("outside")),
+            None
+        );
+    }
+
+    #[cfg(feature = "ui-text")]
+    #[test]
+    fn nested_scroll_text_clip_intersects_parent_and_child_viewports() {
+        let tree = UiBuilder::new(WidgetId::from_key("root"), LayoutKind::Column)
+            .child(
+                Widget::scroll_view(WidgetId::from_key("outer"))
+                    .with_constraints(
+                        LayoutConstraints::auto()
+                            .with_width(Dimension::Points(100))
+                            .with_height(Dimension::Points(60)),
+                    )
+                    .with_children(vec![
+                        Widget::container(WidgetId::from_key("outer-content"), LayoutKind::Column)
+                            .with_constraints(
+                                LayoutConstraints::auto()
+                                    .with_width(Dimension::Points(100))
+                                    .with_height(Dimension::Points(120)),
+                            )
+                            .with_children(vec![
+                                Widget::scroll_view(WidgetId::from_key("inner"))
+                                    .with_constraints(
+                                        LayoutConstraints::auto()
+                                            .with_width(Dimension::Points(100))
+                                            .with_height(Dimension::Points(40)),
+                                    )
+                                    .with_children(vec![
+                                        Widget::container(
+                                            WidgetId::from_key("inner-content"),
+                                            LayoutKind::Column,
+                                        )
+                                        .with_constraints(
+                                            LayoutConstraints::auto()
+                                                .with_width(Dimension::Points(100))
+                                                .with_height(Dimension::Points(80)),
+                                        )
+                                        .with_children(vec![
+                                            Widget::label(WidgetId::from_key("nested"), "nested")
+                                                .with_constraints(
+                                                    LayoutConstraints::auto()
+                                                        .with_width(Dimension::Points(100))
+                                                        .with_height(Dimension::Points(24)),
+                                                ),
+                                        ]),
+                                    ]),
+                            ]),
+                    ]),
+            )
+            .build()
+            .expect("nested scroll tree");
+        let layout =
+            layout_with_input_state(&tree, Size::new(100, 100), &UiInputState::default())
+                .expect("layout");
+        let inner = layout
+            .bounds(WidgetId::from_key("inner"))
+            .expect("inner bounds");
+        let outer_clip = layout
+            .clip(WidgetId::from_key("outer"))
+            .expect("outer clip");
+        assert_eq!(
+            super::text_clip_rect(&layout, WidgetId::from_key("nested")),
+            Some(TextClipRect::new(
+                inner.origin.x,
+                inner.origin.y,
+                inner.size.width,
+                inner.size.height,
+            ))
+        );
+        assert_eq!(
+            layout.clip(WidgetId::from_key("nested")),
+            layout.clip(WidgetId::from_key("inner"))
+        );
+        assert_eq!(outer_clip.size, Size::new(100, 60));
+        assert!(inner.size.width > 0 && inner.size.height > 0);
+        assert!(
+            layout
+                .clip(WidgetId::from_key("nested"))
+                .is_some_and(|clip| {
+                    clip.origin.x >= outer_clip.origin.x
+                        && clip.origin.y >= outer_clip.origin.y
+                        && clip.origin.x + i32::try_from(clip.size.width).unwrap_or(i32::MAX)
+                            <= outer_clip.origin.x
+                                + i32::try_from(outer_clip.size.width).unwrap_or(i32::MAX)
+                        && clip.origin.y + i32::try_from(clip.size.height).unwrap_or(i32::MAX)
+                            <= outer_clip.origin.y
+                                + i32::try_from(outer_clip.size.height).unwrap_or(i32::MAX)
+                })
         );
     }
 }

@@ -200,7 +200,7 @@ fn register_capabilities(registry: &mut AuthoringRegistry) -> Result<(), Registr
         capability(
             ids::GAMEPLAY_INTERACTIONS,
             "Gameplay interactions",
-            CoverageStatus::Unavailable,
+            CoverageStatus::Visual,
             "yuyib.gameplay",
             "crates/yuyib-gameplay/src/lib.rs",
         ),
@@ -220,7 +220,7 @@ fn register_capabilities(registry: &mut AuthoringRegistry) -> Result<(), Registr
 #[allow(clippy::too_many_lines)]
 fn register_component_schemas(registry: &mut AuthoringRegistry) -> Result<(), RegistrationError> {
     for descriptor in [
-        transform3d_component(ids::TRANSFORM_3D, ids::TRANSFORM_3D, false),
+        transform3d_component(ids::TRANSFORM_3D, ids::TRANSFORM_3D, true),
         transform3d_component(ids::LOCAL_TRANSFORM_3D, ids::LOCAL_TRANSFORM_3D, true),
         component(
             ids::LOCAL_MATRIX_TRANSFORM_3D,
@@ -340,15 +340,38 @@ fn register_component_schemas(registry: &mut AuthoringRegistry) -> Result<(), Re
                 widget: "yuyib.widget.kinematic-controller2d".to_owned(),
             },
         )),
-        component("yuyib.interactable", ids::GAMEPLAY_INTERACTIONS).with_field(
-            FieldDescriptor::new(
+        component("yuyib.interactable", ids::GAMEPLAY_INTERACTIONS)
+            .with_field(FieldDescriptor::new(
                 "interaction",
                 "Interaction",
-                FieldKind::Specialized {
-                    widget: "yuyib.widget.interaction".to_owned(),
-                },
-            ),
-        ),
+                FieldKind::String,
+            ))
+            .with_field(FieldDescriptor::new(
+                "enabled",
+                "Enabled",
+                FieldKind::Bool,
+            ))
+            .with_field(FieldDescriptor::new(
+                "max_distance",
+                "Max distance",
+                FieldKind::F32,
+            )),
+        component("yuyib.trigger", ids::GAMEPLAY_INTERACTIONS)
+            .with_field(FieldDescriptor::new(
+                "trigger",
+                "Trigger",
+                FieldKind::String,
+            ))
+            .with_field(FieldDescriptor::new(
+                "enabled",
+                "Enabled",
+                FieldKind::Bool,
+            ))
+            .with_field(FieldDescriptor::new(
+                "radius",
+                "Radius",
+                FieldKind::F32,
+            )),
     ] {
         registry.register_component(descriptor)?;
     }
@@ -674,7 +697,7 @@ mod tests {
             transform
                 .fields()
                 .iter()
-                .all(|field| !field.applies_play_changes())
+                .all(FieldDescriptor::applies_play_changes)
         );
         let local = registry
             .component(&component_id(ids::LOCAL_TRANSFORM_3D))

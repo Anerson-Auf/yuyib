@@ -61,7 +61,24 @@ impl Color {
             alpha: u8::MAX,
         }
     }
+
+    /// Creates a colour with an explicit alpha channel.
+    #[must_use]
+    pub const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+        }
+    }
 }
+
+/// Default vertical scrollbar thumb thickness in logical pixels.
+pub const SCROLL_THUMB_THICKNESS: u32 = 4;
+
+/// Minimum thumb height so a tiny overflow remains visible.
+const SCROLL_THUMB_MIN_HEIGHT: u32 = 8;
 
 /// Semantic colour role retained by widgets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1033,6 +1050,54 @@ pub fn handle_scroll_input(
     })
 }
 
+/// Computes the vertical scrollbar thumb inside a scroll viewport.
+///
+/// Returns [`None`] when content does not overflow the viewport. `scroll_offset`
+/// is clamped to the same overflow range as [`handle_scroll_input`]. This is a
+/// pure geometry helper for renderers; it does not hit-test or mutate input.
+#[must_use]
+pub fn vertical_scroll_thumb_bounds(
+    viewport: Rect,
+    content_height: u32,
+    scroll_offset: u32,
+    thickness: u32,
+) -> Option<Rect> {
+    if thickness == 0 || viewport.size.width == 0 || viewport.size.height == 0 {
+        return None;
+    }
+    let overflow = content_height.saturating_sub(viewport.size.height);
+    if overflow == 0 {
+        return None;
+    }
+    let thumb_height = ((u64::from(viewport.size.height) * u64::from(viewport.size.height))
+        / u64::from(content_height.max(1)))
+    .clamp(
+        u64::from(SCROLL_THUMB_MIN_HEIGHT.min(viewport.size.height)),
+        u64::from(viewport.size.height),
+    );
+    let thumb_height = u32::try_from(thumb_height).unwrap_or(viewport.size.height);
+    let travel = viewport.size.height.saturating_sub(thumb_height);
+    let offset = scroll_offset.min(overflow);
+    let thumb_y = if travel == 0 || overflow == 0 {
+        0
+    } else {
+        u32::try_from((u64::from(offset) * u64::from(travel)) / u64::from(overflow))
+            .unwrap_or(travel)
+            .min(travel)
+    };
+    let thickness = thickness.min(viewport.size.width);
+    Some(Rect {
+        origin: Point::new(
+            viewport
+                .origin
+                .x
+                .saturating_add(to_i32(viewport.size.width.saturating_sub(thickness))),
+            viewport.origin.y.saturating_add(to_i32(thumb_y)),
+        ),
+        size: Size::new(thickness, thumb_height),
+    })
+}
+
 /// Handles one platform-normalised keyboard command.
 ///
 /// Focus traversal follows [`UiLayout::focus_order`] and wraps in either
@@ -1945,5 +2010,51 @@ mod tests {
                 .build(),
             Err(UiError::InvalidScrollView(_))
         ));
+    }
+
+    #[test]
+    fn vertical_scroll_thumb_absent_without_overflow() {
+        let viewport = Rect {
+            origin: Point::new(10, 20),
+            size: Size::new(100, 40),
+        };
+        assert_eq!(
+            vertical_scroll_thumb_bounds(viewport, 40, 0, SCROLL_THUMB_THICKNESS),
+            None
+        );
+        assert_eq!(
+            vertical_scroll_thumb_bounds(viewport, 20, 0, SCROLL_THUMB_THICKNESS),
+            None
+        );
+    }
+
+    #[test]
+    fn vertical_scroll_thumb_tracks_offset_within_viewport() {
+        let viewport = Rect {
+            origin: Point::new(0, 0),
+            size: Size::new(100, 40),
+        };
+        let top = vertical_scroll_thumb_bounds(viewport, 120, 0, SCROLL_THUMB_THICKNESS)
+            .expect("overflow");
+        let bottom = vertical_scroll_thumb_bounds(viewport, 120, 80, SCROLL_THUMB_THICKNESS)
+            .expect("overflow");
+        let mid = vertical_scroll_thumb_bounds(viewport, 120, 40, SCROLL_THUMB_THICKNESS)
+            .expect("overflow");
+        let clamped = vertical_scroll_thumb_bounds(viewport, 120, 500, SCROLL_THUMB_THICKNESS)
+            .expect("overflow");
+
+        assert_eq!(top.origin.x, 96);
+        assert_eq!(top.origin.y, 0);
+        assert_eq!(top.size.width, SCROLL_THUMB_THICKNESS);
+        assert!(top.size.height >= SCROLL_THUMB_MIN_HEIGHT);
+        assert!(top.size.height <= 40);
+
+        assert_eq!(
+            bottom.origin.y,
+            to_i32(40_u32.saturating_sub(bottom.size.height))
+        );
+        assert_eq!(clamped, bottom);
+        assert!(mid.origin.y > top.origin.y && mid.origin.y < bottom.origin.y);
+        assert_eq!(mid.size, top.size);
     }
 }

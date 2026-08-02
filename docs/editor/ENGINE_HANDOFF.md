@@ -4,8 +4,9 @@
 Нормативный contract — [`ENGINE_INTEGRATION.md`](ENGINE_INTEGRATION.md);
 форматы — [`SCENE_FORMAT.md`](SCENE_FORMAT.md); policy coverage —
 [`CAPABILITY_COVERAGE.md`](CAPABILITY_COVERAGE.md).
+**Как пользоваться (API + payloads):** [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).
 
-Актуально на 2026-08-02.
+Актуально на 2026-08-03.
 
 ## Dependency direction
 
@@ -48,6 +49,8 @@ owning capability или в companion crate.
 | Safe file I/O | `yuyib-editor-core` (`document`) | Confinement, revisions, atomic replace |
 | Play / Cargo | `yuyib-editor-core` (`process`) | Process groups, bounded logs, timeouts |
 | Scene session | `yuyib-editor` (`scene_authoring`) | Open/create/save, undo/redo |
+| Scene ↔ `.rs` projection | `yuyib-scene-projection` | Export/parse/diff view over `.yscene` |
+| Script ↔ object Intent Bridge | `yuyib-scene-interaction` | `SceneInteractionIntent` + Editor/Play adapters |
 | Host bridge | `yuyib-editor` (`bridge`, `app`) | Typed endpoints, WGPU viewport |
 | Scoped viewport | `yuyib-render` | DPI-safe rect, private viewport depth |
 | UI shell | `editor-ui/` | Hierarchy, Inspector, Monaco 0.55.1 |
@@ -67,9 +70,25 @@ owning capability или в companion crate.
 - Visual: `Transform3d`, `LocalTransform3d`, `Parent3d`, `Model3d`,
   `DirectionalLight3d` — Inspector + materialization + viewport/Play.
 - Transform gizmo (Move / Rotate / Scale).
+- Scene ↔ Rust projection (vertical #1): `.yscene` remains persistence SoT;
+  human-editable `src/scenes/<slug>/entities/*.rs` via Sync Code / Apply Code /
+  file watch; one undoable `CommandTransaction` + viewport rematerialize.
+- Scene interaction Intent Bridge (foundation + engine wiring): scripts talk to
+  objects by `EntityGuid`. Neutral crate: intents, capabilities, batch result,
+  quest/trigger signal parse helpers. Editor → undoable commands. Play →
+  `PlayInteractionHost` (GUID map, pending queue, frame drain) + `QuestBook`
+  consumer + typed `Model3d` / `DirectionalLight3d` field writes + **E / game.use**
+  Interactable raycast (materialize `yuyib.interactable` → sphere query →
+  `EmitSignal` → QuestBook). Authoring `yuyib.trigger` → sphere volumes via
+  `overlap_spheres_3d` → `trigger.*` intents. `TriggerOverlapTracker` maps Rapier
+  sensor pairs for hosts that compose Rapier beside CharacterController — no
+  physics-mode switch. Persist Play→`.yscene` remains Apply whitelist. Next:
+  Play AddComponent; optional live Rapier world in default Play.
 - Asset (incremental): `yuyib.gltf-import` / `yuyib.gltf-preview` через
   production `GltfSceneLoad`; Bounds/Collision/Normals/Tangents/UV overlays; mesh + material
-  selection; preview cache invalidation; non-destructive reimport.
+  + animation clip selection; preview cache invalidation; non-destructive reimport.
+- Session/disk cook: same-root reopen keeps import/GPU residency; editor glTF import uses
+  `.yuyib_cook`.
 - Play slice: Player motor, mesh collider, authored light, dark PBR fallback.
 - Scene и Asset Preview на отдельных `Game3dScene` (изоляция GPU residency).
 
@@ -77,11 +96,14 @@ owning capability или в companion crate.
 
 | Тема | Статус |
 |---|---|
-| glTF preview remainder | animation clip selection |
-| Apply Play Mode Changes | выключен до adapter whitelist |
-| rust-analyzer / LSP | не подключён |
-| Coverage CI (GitHub Actions) | foundation workflows в `.github/workflows/` |
+| glTF preview remainder | material factor + texture remap closed (base/MR/emissive/normal slots from model inventory) |
+| Apply Play Mode Changes | closed for Transform3d + LocalTransform3d whitelist (`play.apply_changes` + undoable transaction) |
+| Scene ↔ `.rs` projection | vertical #1 closed (known 3D schemas + watch); freeform Rust / entity create-delete from files / behavior scripts — open |
+| Script ↔ object Intent Bridge | foundation + QuestBook + Play model/light + Interactable use (E) + authored `yuyib.trigger` + Play AddComponent (transform/local/light) + Inspector Interactable/Trigger Visual closed; Play model/parent AddComponent / live Rapier world in default Play — open |
+| rust-analyzer / LSP | diagnostics-only closed (`host.lsp.status` / `host.lsp.diagnostics` → Monaco markers); completion/hover/rename open |
+| Coverage CI (GitHub Actions) | foundation gate + `editor-coverage-manifest` artifact upload closed (incremental) |
 | Field mutation без typed adapter | host блокирует edit |
+| System/source navigation | closed incremental: coverage systems list + open runtime/authoring/`source.file` (workspace-ancestor resolve, read-only external) |
 | Project creation wizard / cook export | нет |
 | Full multi-entry host preview artifact store | thin |
 
@@ -125,9 +147,9 @@ passes используют `Load`.
 | M1 playable 3D (street-city smoke) | Closed |
 | M2 rendering baseline (IBL, shadows, bloom, FXAA, SSAO, grade, diagnostics) | Usable MVP |
 | M3.1 / M3.2 cook cache (glTF + external dep fingerprints) | Usable MVP |
-| M4 physics facade (mature backend) | M4.1–M4.9 usable MVP (map trimesh + one-way character→prop push; mesh motor unchanged) |
-| M5 high-level profiles | Planned |
-| M6 native UI completion | Early partial (`ScrollView`) |
+| M4 physics facade (mature backend) | M4.1–M4.13 usable MVP + `PlatformerController2d` (Rapier KCC); open: editor physics polish |
+| M5 high-level profiles | 3D M5.2 closed; Deep 2D A: PlayableLoop2d + CameraFollow2d |
+| M6 native UI completion | Early partial (`ScrollView` + glyph clip + thumb) |
 | Editor E1 remainder | Asset overlays / LSP / Actions CI |
 
 Порядок и Definition of Done — [`ROADMAP.md`](../architecture/ROADMAP.md).

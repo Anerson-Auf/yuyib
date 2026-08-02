@@ -1,5 +1,4 @@
 pub mod playable_character;
-pub mod playable_dynamics;
 pub mod street_city;
 
 use yuyib::{

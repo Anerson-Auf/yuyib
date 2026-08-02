@@ -11,11 +11,14 @@ description = "Deterministic lightweight 2D and 3D physics foundations for Yuyib
 default = []
 # Mature 3D dynamics backend (M4 facade). Static mesh queries stay available without it.
 rapier = ["dep:rapier3d"]
+# Mature 2D dynamics backend (M4.13 facade). Lightweight Body2d prototypes stay available without it.
+rapier2d = ["dep:rapier2d"]
 
 [dependencies]
 bevy_ecs.workspace = true
 yuyib-ecs = { path = "../yuyib-ecs" }
 rapier3d = { workspace = true, optional = true }
+rapier2d = { workspace = true, optional = true }
 
 [lints]
 workspace = true

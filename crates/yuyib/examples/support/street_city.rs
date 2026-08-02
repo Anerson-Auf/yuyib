@@ -16,15 +16,17 @@ use yuyib::{
     character_3d::{CharacterSpawnOptions3d, CharacterSpawnSurfaceSelection3d},
     model::ModelMaterialPolicy,
     physics::Vec2,
+    profile_3d::EnvironmentPreset,
     render_3d::{
-        GgxCookConfig, Game3dLighting, Game3dScene, Game3dSceneConfig, Game3dShading,
-        GltfSceneColliderLayer3d, GltfSceneColliderLayerId3d, GltfSceneCollisionConfig3d,
-        GltfSceneCollisionConfigError3d, GltfSceneCollisionNameMatch3d,
+        Game3dScene, GltfSceneColliderLayer3d, GltfSceneColliderLayerId3d,
+        GltfSceneCollisionConfig3d, GltfSceneCollisionConfigError3d, GltfSceneCollisionNameMatch3d,
         GltfSceneCollisionPredicate3d, GltfSceneCollisionSelector3d, GltfSceneLoad,
-        GltfSceneLoadConfig, GltfSceneLoadStage, LambertLighting3d, LoadedGltfScene, PbrLighting3d,
-        PreparedEquirectEnvironment3d, cook_ggx_specular_ibl,
+        GltfSceneLoadConfig, GltfSceneLoadStage, LambertLighting3d, LoadedGltfScene,
+        PreparedEquirectEnvironment3d,
     },
 };
+
+pub use yuyib::profile_3d::OUTDOOR_PROBE_HDR;
 
 /// Active playable map under `for_tests/`.
 pub const MAP_FILE: &str = "sci-fi_lab.glb";
@@ -175,10 +177,21 @@ pub fn spawn_options_for_street(street: &yuyib::physics::TriangleMesh3d) -> Char
     spawn_options_near(street_horizontal_centroid(street))
 }
 
-/// Outdoor Radiance HDR probe under `for_tests/` (preferred over synthetic).
-pub const OUTDOOR_PROBE_HDR: &str = "outdoor_probe.hdr";
+/// Daytime map renderer: overhead key + tiny fill + cooked outdoor IBL/sky + shadows.
+///
+/// Delegates to [`EnvironmentPreset::street_city`] so the engine owns the look;
+/// this helper remains for M1 smoke anti-drift.
+///
+/// # Errors
+///
+/// Returns lighting, GGX cook, or scene construction failures.
+pub fn create_renderer(asset_root: &Path) -> Result<Game3dScene, Box<dyn Error>> {
+    Ok(EnvironmentPreset::street_city()?.build_scene(asset_root)?)
+}
 
 /// Loads `outdoor_probe.hdr` when present; otherwise the synthetic sky/ground probe.
+///
+/// Prefer [`EnvironmentPreset`] for new code. Kept for GGX smoke / diagnostics.
 ///
 /// # Errors
 ///
@@ -208,41 +221,6 @@ pub fn load_outdoor_equirect(
         }
         Err(error) => Err(error.into()),
     }
-}
-
-/// Daytime map renderer: overhead key + tiny fill + cooked outdoor IBL/sky + shadows.
-///
-/// Auto-fill / bright SH / rainbow synthetic faces were removed so the map
-/// stops reading as flat-lit. A small ambient keeps surfaces readable; specular
-/// and skybox come from a CPU GGX cook of
-/// [`OUTDOOR_PROBE_HDR`] when present, else
-/// [`PreparedEquirectEnvironment3d::synthetic_outdoor_probe`].
-///
-/// # Errors
-///
-/// Returns lighting, GGX cook, or scene construction failures.
-pub fn create_renderer(asset_root: &Path) -> Result<Game3dScene, Box<dyn Error>> {
-    // Mostly from above, slight south bias so verticals get a little key.
-    // Ambient is intentionally low — IBL supplies the rest of the fill.
-    let direct = LambertLighting3d::artistic(
-        [-0.15, -1.0, -0.35],
-        [1.0, 0.98, 0.94],
-        1.35,
-        [0.06, 0.07, 0.09],
-    )?;
-    let lighting = PbrLighting3d::from(direct).with_specular_ibl_strength(0.35);
-    let equirect = load_outdoor_equirect(asset_root)?;
-    // Smoke cook keeps playable/smoke startup cheap; bump to `quality()` for labs.
-    let specular = cook_ggx_specular_ibl(&equirect, GgxCookConfig::smoke())?;
-    Ok(Game3dScene::new(
-        asset_root,
-        Game3dSceneConfig::default()
-            .with_shading(Game3dShading::Pbr)
-            .with_lighting(Game3dLighting::FixedPbr(lighting)),
-    )?
-    .with_environment(specular)?
-    .with_directional_shadow(yuyib::render_3d::DirectionalShadowPolicy::street_city())
-    .with_ssao(yuyib::render_3d::SsaoPolicy::street_city()))
 }
 
 /// Flat view-independent exposure for the playable character.

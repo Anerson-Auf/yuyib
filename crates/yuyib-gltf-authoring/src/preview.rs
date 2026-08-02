@@ -17,9 +17,7 @@ use yuyib_authoring::{
 };
 use yuyib_render_3d::{GltfSceneLoad, GltfSceneLoadConfig, GltfSceneLoadStage};
 
-use crate::import_settings::{
-    GLTF_IMPORT_SETTINGS_SCHEMA, parse_import_settings,
-};
+use crate::import_settings::{parse_import_settings, GLTF_IMPORT_SETTINGS_SCHEMA};
 
 const PREVIEW_CAPABILITY: &str = "yuyib.gltf-preview";
 const MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
@@ -39,6 +37,8 @@ impl GltfPreviewAdapter {
             shared_render_presets: true,
             mesh_selection: true,
             material_selection: true,
+            material_override: true,
+            animation_selection: true,
             overlays: BTreeSet::from([
                 PreviewOverlay::Bounds,
                 PreviewOverlay::Collision,
@@ -46,7 +46,6 @@ impl GltfPreviewAdapter {
                 PreviewOverlay::Tangents,
                 PreviewOverlay::Uv,
             ]),
-            ..PreviewFeatures::default()
         };
         let budgets = PreviewBudgets {
             max_cpu_bytes: NonZeroU64::new(512 * 1024 * 1024).expect("budget"),
@@ -119,12 +118,9 @@ impl PreviewAdapter for GltfPreviewAdapter {
         }
         if let Some(selection) = &request.selection {
             match selection {
-                PreviewSelection::Mesh(_) | PreviewSelection::Material(_) => {}
-                PreviewSelection::AnimationClip(_) => {
-                    return Err(PreviewJobError::new(
-                        "glTF preview animation selection is not registered yet (Mesh/Material are supported)",
-                    ));
-                }
+                PreviewSelection::Mesh(_)
+                | PreviewSelection::Material(_)
+                | PreviewSelection::AnimationClip(_) => {}
             }
         }
 
@@ -252,9 +248,10 @@ impl PreviewJob for GltfPreviewJob {
                 "glTF preview artifact was already taken",
             ));
         }
-        let artifact = self.artifact.take().ok_or_else(|| {
-            PreviewJobError::new("glTF preview artifact is not ready")
-        })?;
+        let artifact = self
+            .artifact
+            .take()
+            .ok_or_else(|| PreviewJobError::new("glTF preview artifact is not ready"))?;
         self.taken = true;
         Ok(artifact)
     }
@@ -277,9 +274,7 @@ fn map_diagnostics(source: &[ImportDiagnostic], max: u32) -> Vec<PreviewDiagnost
 }
 
 fn estimate_cpu_bytes(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .map(|meta| meta.len())
-        .unwrap_or(0)
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 /// Registers [`GltfPreviewAdapter`] on an Asset-covered `yuyib.gltf-preview`.
@@ -368,6 +363,7 @@ mod tests {
         let adapter = GltfPreviewAdapter::new();
         assert!(adapter.descriptor().features().mesh_selection);
         assert!(adapter.descriptor().features().material_selection);
+        assert!(adapter.descriptor().features().material_override);
     }
 
     #[test]
@@ -419,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn start_rejects_animation_selection() {
+    fn start_accepts_animation_selection() {
         let adapter = GltfPreviewAdapter::new();
         let request = PreviewRequest {
             asset: AssetGuid::new(),
@@ -436,49 +432,43 @@ mod tests {
             cancellation: PreviewCancellation::default(),
         };
         let Err(error) = adapter.start(request) else {
-            panic!("animation selection must reject start");
+            panic!("missing file must still reject after AnimationClip is accepted");
         };
-        assert!(error.message().contains("animation selection"));
+        assert!(error.message().contains("not a file"));
+        assert!(!error.message().contains("selection is not registered"));
     }
 
     #[test]
     fn descriptor_advertises_bounds_overlay() {
         let adapter = GltfPreviewAdapter::new();
-        assert!(
-            adapter
-                .descriptor()
-                .features()
-                .overlays
-                .contains(&PreviewOverlay::Bounds)
-        );
-        assert!(
-            adapter
-                .descriptor()
-                .features()
-                .overlays
-                .contains(&PreviewOverlay::Collision)
-        );
-        assert!(
-            adapter
-                .descriptor()
-                .features()
-                .overlays
-                .contains(&PreviewOverlay::Normals)
-        );
-        assert!(
-            adapter
-                .descriptor()
-                .features()
-                .overlays
-                .contains(&PreviewOverlay::Tangents)
-        );
-        assert!(
-            adapter
-                .descriptor()
-                .features()
-                .overlays
-                .contains(&PreviewOverlay::Uv)
-        );
+        assert!(adapter
+            .descriptor()
+            .features()
+            .overlays
+            .contains(&PreviewOverlay::Bounds));
+        assert!(adapter
+            .descriptor()
+            .features()
+            .overlays
+            .contains(&PreviewOverlay::Collision));
+        assert!(adapter
+            .descriptor()
+            .features()
+            .overlays
+            .contains(&PreviewOverlay::Normals));
+        assert!(adapter
+            .descriptor()
+            .features()
+            .overlays
+            .contains(&PreviewOverlay::Tangents));
+        assert!(adapter
+            .descriptor()
+            .features()
+            .overlays
+            .contains(&PreviewOverlay::Uv));
+        assert!(adapter.descriptor().features().animation_selection);
+        assert!(adapter.descriptor().features().mesh_selection);
+        assert!(adapter.descriptor().features().material_selection);
     }
 
     #[test]
@@ -488,9 +478,7 @@ mod tests {
         let base = PreviewRequest {
             asset,
             source: "assets/a.glb".to_owned(),
-            content_hash: Some(
-                yuyib_authoring::ContentHash::new("blake3:aa").expect("hash"),
-            ),
+            content_hash: Some(yuyib_authoring::ContentHash::new("blake3:aa").expect("hash")),
             import_settings_schema: ImportSettingsSchemaId::new(GLTF_IMPORT_SETTINGS_SCHEMA)
                 .expect("schema"),
             import_settings_version: SchemaVersion::new(1).expect("version"),
@@ -502,8 +490,7 @@ mod tests {
             cancellation: PreviewCancellation::default(),
         };
         let mut changed = base.clone();
-        changed.content_hash =
-            Some(yuyib_authoring::ContentHash::new("blake3:bb").expect("hash"));
+        changed.content_hash = Some(yuyib_authoring::ContentHash::new("blake3:bb").expect("hash"));
         assert_ne!(adapter.cache_key(&base), adapter.cache_key(&changed));
     }
 

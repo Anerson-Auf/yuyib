@@ -2871,6 +2871,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "parry2d"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "507bd11718e90f9cac3862bea64ddae5565b78c4f130771a71f03d27727df449"
+dependencies = [
+ "approx",
+ "arrayvec",
+ "bitflags 2.13.1",
+ "downcast-rs 2.0.2",
+ "either",
+ "ena",
+ "foldhash",
+ "glamx",
+ "hashbrown 0.17.1",
+ "log",
+ "num-derive",
+ "num-traits",
+ "ordered-float",
+ "simba",
+ "slab",
+ "smallvec",
+ "spade",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "parry3d"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3209,6 +3235,27 @@ name = "rangemap"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
+
+[[package]]
+name = "rapier2d"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "691626cdcb70312199acd86322b57ddabea6da4f4399b4b1ddad0f2ff140dd71"
+dependencies = [
+ "approx",
+ "bitflags 2.13.1",
+ "glamx",
+ "log",
+ "nalgebra",
+ "num-traits",
+ "parry2d",
+ "profiling",
+ "serde",
+ "simba",
+ "static_assertions",
+ "thiserror 2.0.19",
+ "wide",
+]
 
 [[package]]
 name = "rapier3d"
@@ -5438,6 +5485,7 @@ dependencies = [
  "yuyib-app",
  "yuyib-assets",
  "yuyib-audio",
+ "yuyib-character-2d",
  "yuyib-character-3d",
  "yuyib-core",
  "yuyib-ecs",
@@ -5453,6 +5501,8 @@ dependencies = [
  "yuyib-net",
  "yuyib-physics",
  "yuyib-platform",
+ "yuyib-profile-2d",
+ "yuyib-profile-3d",
  "yuyib-render",
  "yuyib-render-2d",
  "yuyib-render-3d",
@@ -5533,6 +5583,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yuyib-character-2d"
+version = "0.1.0"
+dependencies = [
+ "yuyib-physics",
+]
+
+[[package]]
 name = "yuyib-character-3d"
 version = "0.1.0"
 dependencies = [
@@ -5576,6 +5633,8 @@ dependencies = [
  "yuyib-render",
  "yuyib-render-3d",
  "yuyib-scene",
+ "yuyib-scene-interaction",
+ "yuyib-scene-projection",
  "yuyib-webview",
 ]
 
@@ -5729,6 +5788,7 @@ name = "yuyib-physics"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "rapier2d",
  "rapier3d",
  "yuyib-ecs",
 ]
@@ -5753,10 +5813,45 @@ dependencies = [
  "yuyib-ecs",
  "yuyib-game-3d",
  "yuyib-game-3d-authoring",
+ "yuyib-gameplay",
  "yuyib-gltf",
  "yuyib-model",
+ "yuyib-physics",
  "yuyib-platform",
  "yuyib-scene",
+ "yuyib-scene-interaction",
+]
+
+[[package]]
+name = "yuyib-profile-2d"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "yuyib-2d",
+ "yuyib-ecs",
+ "yuyib-game-2d",
+ "yuyib-image",
+ "yuyib-platform",
+ "yuyib-render",
+ "yuyib-render-2d",
+]
+
+[[package]]
+name = "yuyib-profile-3d"
+version = "0.1.0"
+dependencies = [
+ "yuyib-assets",
+ "yuyib-character-3d",
+ "yuyib-game-3d",
+ "yuyib-gltf",
+ "yuyib-input",
+ "yuyib-model",
+ "yuyib-model-assets",
+ "yuyib-physics",
+ "yuyib-platform",
+ "yuyib-render",
+ "yuyib-render-3d",
+ "yuyib-tasks",
 ]
 
 [[package]]
@@ -5819,6 +5914,23 @@ dependencies = [
  "yuyib-game-3d",
  "yuyib-gltf",
  "yuyib-model",
+]
+
+[[package]]
+name = "yuyib-scene-interaction"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "yuyib-authoring",
+]
+
+[[package]]
+name = "yuyib-scene-projection"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "yuyib-authoring",
 ]
 
 [[package]]

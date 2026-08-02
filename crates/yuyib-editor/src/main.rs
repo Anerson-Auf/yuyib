@@ -4,7 +4,9 @@ mod app;
 mod bridge;
 mod editor_gizmo;
 mod gltf_preview;
+mod lsp_ra;
 mod scene_authoring;
+mod scene_interaction;
 mod viewport_gizmo;
 mod viewport_picking;
 

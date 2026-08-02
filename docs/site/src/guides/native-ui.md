@@ -91,9 +91,12 @@ let ui = ApplicationUi::new(tree).with_text(
 constraint column. `layout_with_input_state` применяет retained offset из
 `UiInputState`; `handle_scroll_input` ограничивает его диапазоном
 `0..=max(0, content_h - viewport_h)`. Потомки получают clip viewport: они не
-попадают в pointer hit-test вне него, а `yuyib-ui-render` передаёт этот clip в
-CPU intersection и WGPU scissor. Вложенные scroll views, scrollbar, inertia и
-virtualization пока отсутствуют.
+попадают в pointer hit-test вне него; `yuyib-ui-render` передаёт этот clip в
+CPU intersection и WGPU scissor; `ApplicationUi::with_text` применяет тот же
+`UiLayout::clip` к glyph pass через `TextClipRect`. При overflow input-aware
+extract рисует вертикальный thumb (`UiVisualStyle::scroll_thumb`, геометрия
+`vertical_scroll_thumb_bounds`) — без drag и inertia. Вложенные `ScrollView`
+пересекают clip на layout path. Virtualization пока отсутствует.
 
 Клавиатурная поддержка пока семантическая: нет ввода текста/IME, перевода
 раскладки, политики повторов или системной доступности.
@@ -119,9 +122,10 @@ UI поверх результата. Для собственной полити
 задать `UiRectangle::clip`; рендерер ограничит его поверхностью до вызова
 WGPU, поэтому отрицательные, пустые и внешние значения не приводят к panic.
 
-Это сознательно ещё не состояние прокрутки, иерархия вложенного отсечения или
-текстовый GPU-проход. У прямоугольного моста пока нет скруглений, иконок,
+Это сознательно ещё не scrollbar drag/inertia, иерархия доступности или полный
+текстовый input/IME. У прямоугольного моста пока нет скруглений, иконок,
 изображений, постоянного объединения вызовов и рендеринга для доступности.
+Glyph overlay и scroll thumb в `ApplicationUi` уже уважают scroll viewport.
 
 `UiVisualStyle` добавляет необязательные внутренние границы и контрастный
 контур клавиатурного фокуса. Если это нужно, используйте

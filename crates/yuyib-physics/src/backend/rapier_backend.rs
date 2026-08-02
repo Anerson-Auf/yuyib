@@ -409,6 +409,22 @@ impl RapierDynamicsWorld3d {
         pairs
     }
 
+    /// Wakes a sleeping rigid body so upcoming contacts are simulated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DynamicsBackendError3d`] for unknown bodies.
+    pub fn wake_up(&mut self, body: BodyId3d) -> Result<(), DynamicsBackendError3d> {
+        let handle =
+            handle_from_body_id(body).ok_or(DynamicsBackendError3d::UnknownBody(body))?;
+        let rigid = self
+            .bodies
+            .get_mut(handle)
+            .ok_or(DynamicsBackendError3d::UnknownBody(body))?;
+        rigid.wake_up(true);
+        Ok(())
+    }
+
     /// Sets Rapier collision membership/filter on every collider attached to `body`.
     ///
     /// # Errors

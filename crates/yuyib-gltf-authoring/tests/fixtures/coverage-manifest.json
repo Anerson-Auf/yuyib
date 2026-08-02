@@ -116,7 +116,7 @@
       "id": "yuyib.gameplay-interactions",
       "title": "Gameplay interactions",
       "surfaces": [
-        "unavailable"
+        "visual"
       ],
       "owner": "yuyib.gameplay",
       "documentation": "crates/yuyib-gameplay/src/lib.rs",
@@ -125,8 +125,8 @@
         "line": null,
         "column": null
       },
-      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
-      "target_milestone": "typed-adapter-and-coverage-gate"
+      "unavailable_reason": null,
+      "target_milestone": null
     },
     {
       "id": "yuyib.gltf-import",
@@ -474,10 +474,31 @@
           "path": "interaction",
           "title": "Interaction",
           "kind": {
-            "kind": "specialized",
-            "options": {
-              "widget": "yuyib.widget.interaction"
-            }
+            "kind": "string"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "enabled",
+          "title": "Enabled",
+          "kind": {
+            "kind": "bool"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "max_distance",
+          "title": "Max distance",
+          "kind": {
+            "kind": "f32"
           },
           "unit": null,
           "read_only": false,
@@ -936,7 +957,7 @@
           },
           "unit": "units",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -948,7 +969,7 @@
           },
           "unit": "units",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -960,7 +981,7 @@
           },
           "unit": "units",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -972,7 +993,7 @@
           },
           "unit": "quaternion",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -984,7 +1005,7 @@
           },
           "unit": "quaternion",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -996,7 +1017,7 @@
           },
           "unit": "quaternion",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -1008,7 +1029,7 @@
           },
           "unit": "quaternion",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -1020,7 +1041,7 @@
           },
           "unit": "ratio",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -1032,7 +1053,7 @@
           },
           "unit": "ratio",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         },
@@ -1044,13 +1065,62 @@
           },
           "unit": "ratio",
           "read_only": false,
-          "apply_play_changes": false,
+          "apply_play_changes": true,
           "documentation": null,
           "source": null
         }
       ],
       "runtime_source": {
         "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.trigger",
+      "capability": "yuyib.gameplay-interactions",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "trigger",
+          "title": "Trigger",
+          "kind": {
+            "kind": "string"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "enabled",
+          "title": "Enabled",
+          "kind": {
+            "kind": "bool"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "radius",
+          "title": "Radius",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-gameplay/src/lib.rs",
         "line": null,
         "column": null
       },
@@ -1169,7 +1239,7 @@
       "features": {
         "mesh_selection": true,
         "material_selection": true,
-        "animation_selection": false,
+        "animation_selection": true,
         "overlays": [
           "collision",
           "normals",
@@ -1177,7 +1247,7 @@
           "uv",
           "bounds"
         ],
-        "material_override": false,
+        "material_override": true,
         "shared_render_presets": true,
         "non_destructive_reimport": true
       },

@@ -137,9 +137,11 @@ game frame; it has no mouse/gamepad/text/IME/touch/rebinding persistence.
 `yuyib-character-3d` is a fixed-step kinematic prototype, not a rigid-body
 controller. `CharacterMotor3d` resolves only against an infinite ground plane;
 `CharacterController3d` also resolves its sphere against a static triangle
-mesh or a caller-provided collision hook. Dynamic bodies, moving platforms,
-steps/slopes policy, CCD, built-in broad phase, camera-relative controls and
-multiplayer authority are intentionally outside the API.
+mesh or a caller-provided collision hook, with a configurable max walkable
+slope (`max_walkable_slope_radians`) and optional kinematic platform carry
+(`step_on_triangle_mesh_with_platform`). Dynamic bodies, step-offset climbing,
+CCD, built-in broad phase, camera-relative controls and multiplayer authority
+are intentionally outside the API.
 
 `QuestBook` supplies in-memory deterministic definition/progress state and a
 detached snapshot. Save encoding, schema migration, quest content loading,

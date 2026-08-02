@@ -74,16 +74,20 @@ use crate::{
     bridge::{
         AssetOpenRequest, AssetReimportRequest, AssetRenameRequest, AssetTrackRequest,
         AssetImportSettingsSaveRequest, BridgeBinding, CargoCheckRequest, CommandQueue,
-        EditorCommand, MigrateSceneModelRefsRequest, PreviewOverlayRequest,
-        PreviewSelectionRequest, ProjectCreateRequest, ProjectOpenRequest, SceneCommandRequest,
-        SceneCreateRequest, SceneEditRequest, SceneOpenRequest, SceneSaveRequest, SelectionRequest,
-        SourceRequest, SourceSaveRequest, ViewportBoundsRequest, ViewportPointerKind,
+        EditorCommand, MigrateSceneModelRefsRequest, PreviewMaterialOverrideRequest,
+        PreviewOverlayRequest, PreviewSelectionRequest, ProjectCreateRequest, ProjectOpenRequest,
+        SceneCommandRequest, SceneCreateRequest, SceneEditRequest, SceneOpenRequest,
+        SceneInteractionApplyRequest, SceneSaveRequest,
+        SelectionRequest, SourceChangeRequest, SourceRequest, SourceSaveRequest,
+        ViewportBoundsRequest, ViewportPointerKind,
         ViewportPointerModifiers, ViewportPointerRequest, ViewportTool, WindowControlAction,
         WindowControlRequest, WorkspaceMode, create_bridge,
     },
     editor_gizmo::{self, GizmoLayout, GizmoState, GizmoUnlitPass},
     gltf_preview::{GltfPreviewFrame, GltfPreviewReimport, GltfPreviewSession},
+    lsp_ra::{LspDiagnostic, LspStatus, RustAnalyzerSession},
     scene_authoring::{SceneMutationError, SceneSession, SceneSessionError},
+    scene_interaction::EditorDocumentBridge,
     viewport_gizmo::{GizmoAxis, GizmoToolKind, apply_axis_scale, axis_parameter, rotate_quat},
     viewport_picking::{
         FOUNDATION_CUBE_SELECTION, PROXY_CUBE_HALF_EXTENT, ViewportRay, entity_model_matrix,
@@ -166,6 +170,8 @@ pub struct EditorApp {
     play: Option<ManagedProcess>,
     /// Last Play pin echoed on stop/timeout/exit (`path` + history + file revision).
     play_pin: Option<Value>,
+    /// Pending Apply Play report JSON (validated against pin on Play exit).
+    pending_play_apply: Option<Value>,
     /// When true, a successful cargo build should launch the Play binary next.
     play_launch_after_build: bool,
     pending_play_args: Option<(Vec<String>, Option<Value>)>,
@@ -179,6 +185,16 @@ pub struct EditorApp {
     watch_asset_revision: Option<u64>,
     /// One-shot external scene conflict dialog until reload/save clears it.
     watch_scene_conflict_active: bool,
+    /// Debounced export of scene → `src/scenes/<slug>/*.rs` projection tree.
+    projection_export_due: Option<Instant>,
+    /// Debounced apply of watched entity projection files → scene document.
+    projection_apply_due: Option<Instant>,
+    /// Last known content revisions for open-scene entity `.rs` files.
+    projection_watch_revisions: HashMap<String, DocumentRevision>,
+    /// Diagnostics-only rust-analyzer sidecar (Code workspace).
+    rust_analyzer: Option<RustAnalyzerSession>,
+    /// Absolute path last opened in RA (for didClose on switch).
+    lsp_open_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -437,6 +453,7 @@ impl EditorApp {
             preview_overlay_uv: false,
             play: None,
             play_pin: None,
+            pending_play_apply: None,
             play_launch_after_build: false,
             pending_play_args: None,
             cargo_check: None,
@@ -446,6 +463,11 @@ impl EditorApp {
             watch_last_poll: None,
             watch_asset_revision: None,
             watch_scene_conflict_active: false,
+            projection_export_due: None,
+            projection_apply_due: None,
+            projection_watch_revisions: HashMap::new(),
+            rust_analyzer: None,
+            lsp_open_path: None,
         })
     }
 
@@ -580,8 +602,11 @@ impl EditorApp {
                 EditorCommand::WindowControl(request) => self.handle_window_control(request),
                 EditorCommand::StartPlay => self.start_play(),
                 EditorCommand::StopPlay => self.stop_play(),
+                EditorCommand::ApplyPlayChanges => self.apply_play_changes(),
                 EditorCommand::CargoCheck(request) => self.start_cargo_check(&request),
                 EditorCommand::ReadSource(request) => self.read_source(&request),
+                EditorCommand::ChangeSource(request) => self.change_source(&request),
+                EditorCommand::ListSources => self.publish_source_tree(),
                 EditorCommand::SaveSource(request) => self.save_source(&request),
                 EditorCommand::SetSelection(selection) => {
                     // Selection only moves the gizmo — rematerializing every click
@@ -592,6 +617,13 @@ impl EditorApp {
                 EditorCommand::CreateScene(request) => self.create_scene(request),
                 EditorCommand::SaveScene(request) => self.save_scene(request),
                 EditorCommand::EditScene(request) => self.edit_scene(request),
+                EditorCommand::ExportSceneProjection => self.export_scene_projection(true),
+                EditorCommand::ApplySceneProjection(request) => {
+                    self.apply_scene_projection(request.expected_revision, false)
+                }
+                EditorCommand::ApplySceneInteraction(request) => {
+                    self.apply_scene_interaction(request)
+                }
                 EditorCommand::BrowseOpenProject => self.browse_open_project(),
                 EditorCommand::CreateProjectInteractive(request) => {
                     self.create_project_interactive(request)
@@ -610,6 +642,9 @@ impl EditorApp {
                 }
                 EditorCommand::SetPreviewOverlay(request) => self.set_preview_overlay(request),
                 EditorCommand::SetPreviewSelection(request) => self.set_preview_selection(request),
+                EditorCommand::SetPreviewMaterialOverride(request) => {
+                    self.set_preview_material_override(request)
+                }
             }
         }
         self.observe_command_overflow();
@@ -619,6 +654,10 @@ impl EditorApp {
         eprintln!("yuyib-editor: ui.ready acknowledged");
         self.ui_ready = true;
         self.publish_project_session(true);
+        if self.project.is_some() {
+            self.restart_rust_analyzer();
+            self.publish_source_tree();
+        }
         if let Some(error) = self.pending_startup_error.take() {
             self.publish_diagnostic("error", "project.open", &error);
         }
@@ -665,6 +704,7 @@ impl EditorApp {
                 "projectRoot": self.project_root.to_string_lossy(),
                 "hasProject": self.project.is_some(),
                 "components": component_coverage,
+                "systems": self.coverage.get("systems").cloned().unwrap_or(json!([])),
                 "available_components": available_components(),
                 "preview": {
                     "foundationViewport": true,
@@ -851,6 +891,8 @@ impl EditorApp {
                     stop_process_async(process, "cargo", self.process_sender.clone());
                 }
                 self.publish_project_session(true);
+                self.restart_rust_analyzer();
+                self.publish_source_tree();
                 self.publish_diagnostic(
                     "info",
                     "project",
@@ -1831,16 +1873,53 @@ impl EditorApp {
             );
             return;
         };
+        let normalized = relative_path.replace('\\', "/");
+        if let Some(session) = self.gltf_preview.as_ref() {
+            let current = session.relative_path().replace('\\', "/");
+            if current == normalized {
+                if session.is_loading() {
+                    // Same asset already importing — ignore spam clicks.
+                    self.emit_value(
+                        "host.process",
+                        json!({
+                            "kind": "preview",
+                            "status": "progress",
+                            "stage": "already_loading",
+                            "path": normalized,
+                            "completed": 0.0
+                        }),
+                    );
+                    return;
+                }
+                if session.is_cpu_ready() {
+                    // Already previewing this asset — just ensure Preview mode + redraw.
+                    if self.mode != WorkspaceMode::Preview {
+                        self.set_workspace_mode(WorkspaceMode::Preview);
+                    }
+                    self.emit_preview_mesh_state();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+            } else if session.is_loading() {
+                // Switching assets mid-import replaces the session (explicit user intent).
+                eprintln!(
+                    "yuyib-editor: glTF preview replace while loading {} → {normalized}",
+                    session.relative_path()
+                );
+            }
+        }
         let asset_root = project.asset_root.clone();
         // New import targets preview_scene only — Scene residency stays warm.
         self.preview_scene.clear_model_caches();
         let settings = self
-            .resolve_gltf_import_settings(relative_path)
+            .resolve_gltf_import_settings(&normalized)
             .unwrap_or_else(default_settings_json);
         match GltfPreviewSession::start_with_settings(
             &self.project_root,
             &asset_root,
-            relative_path,
+            &normalized,
             &settings,
         ) {
             Ok(session) => {
@@ -1855,7 +1934,7 @@ impl EditorApp {
                         "kind": "preview",
                         "status": "progress",
                         "stage": "queued",
-                        "path": relative_path,
+                        "path": normalized,
                         "completed": 0.0
                     }),
                 );
@@ -1878,31 +1957,35 @@ impl EditorApp {
         let Some(session) = &mut self.gltf_preview else {
             return;
         };
-        if session.is_gpu_ready() {
-            return;
-        }
-        if session.is_cpu_ready() {
-            if let Some(gpu) = session.last_gpu() {
-                let path = session.relative_path().to_owned();
-                let total = gpu.total_primitives.max(1) as f64;
-                let completed = (gpu.completed_primitives as f64 / total).clamp(0.0, 0.99);
-                self.emit_value(
-                    "host.process",
-                    json!({
-                        "kind": "preview",
-                        "status": "progress",
-                        "stage": "gpu_upload",
-                        "path": path,
-                        "completed": completed,
-                        "primitive_count": gpu.total_primitives,
-                        "gpu_bytes": gpu.total_geometry_bytes
-                    }),
-                );
+        // Active reimport (material override / settings) must keep polling even
+        // while last-good CPU/GPU scene remains drawable.
+        if !session.is_loading() {
+            if session.is_gpu_ready() {
+                return;
             }
-            if let Some(window) = &self.window {
-                window.request_redraw();
+            if session.is_cpu_ready() {
+                if let Some(gpu) = session.last_gpu() {
+                    let path = session.relative_path().to_owned();
+                    let total = gpu.total_primitives.max(1) as f64;
+                    let completed = (gpu.completed_primitives as f64 / total).clamp(0.0, 0.99);
+                    self.emit_value(
+                        "host.process",
+                        json!({
+                            "kind": "preview",
+                            "status": "progress",
+                            "stage": "gpu_upload",
+                            "path": path,
+                            "completed": completed,
+                            "primitive_count": gpu.total_primitives,
+                            "gpu_bytes": gpu.total_geometry_bytes
+                        }),
+                    );
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return;
             }
-            return;
         }
         let poll = session.poll();
         if let Some(error) = poll.failed {
@@ -1930,6 +2013,8 @@ impl EditorApp {
                 );
                 self.apply_orbit_camera();
             }
+            // Fresh CPU scene (including override reimport) needs a clean GPU cache.
+            self.preview_scene.clear_model_caches();
             self.emit_value(
                 "host.process",
                 json!({
@@ -2019,12 +2104,13 @@ impl EditorApp {
         let result = match request.kind.as_str() {
             "mesh" => session.set_mesh_selection(request.index),
             "material" => session.set_material_selection(request.index),
+            "animation" => session.set_animation_selection(request.index),
             other => {
                 self.publish_diagnostic(
                     "warning",
                     "preview.selection.set",
                     &format!(
-                        "preview selection kind `{other}` is not supported yet (mesh/material are available)"
+                        "preview selection kind `{other}` is not supported (mesh/material/animation)"
                     ),
                 );
                 return;
@@ -2043,16 +2129,51 @@ impl EditorApp {
         }
     }
 
+    fn set_preview_material_override(&mut self, request: PreviewMaterialOverrideRequest) {
+        let Some(session) = self.gltf_preview.as_mut() else {
+            self.publish_diagnostic(
+                "warning",
+                "preview.material_override.set",
+                "Open a glTF in Asset Preview before overriding material factors",
+            );
+            return;
+        };
+        let override_ = request
+            .parameters
+            .filter(|parameters| !parameters.is_empty())
+            .map(|parameters| yuyib_authoring::PreviewMaterialOverride { parameters });
+        match session.set_material_override(request.material_index, override_) {
+            Ok(()) => {
+                self.emit_preview_mesh_state();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            Err(error) => {
+                self.publish_diagnostic(
+                    "warning",
+                    "preview.material_override.set",
+                    &error.to_string(),
+                );
+            }
+        }
+    }
+
     fn emit_preview_mesh_state(&mut self) {
         let Some(session) = &self.gltf_preview else {
             return;
         };
         let meshes = session.mesh_inventory();
         let materials = session.material_inventory();
+        let animations = session.animation_inventory();
+        let textures = session.texture_inventory();
         if meshes.is_empty()
             && materials.is_empty()
+            && animations.is_empty()
+            && textures.is_empty()
             && session.selected_mesh().is_none()
             && session.selected_material().is_none()
+            && session.selected_animation().is_none()
         {
             return;
         }
@@ -2064,17 +2185,21 @@ impl EditorApp {
                 "path": session.relative_path(),
                 "selected_mesh": session.selected_mesh(),
                 "selected_material": session.selected_material(),
+                "selected_animation": session.selected_animation(),
                 "meshes": meshes,
                 "materials": materials,
+                "animations": animations,
+                "textures": textures,
             }),
         );
     }
 
     fn set_viewport_bounds(&mut self, bounds: ViewportBoundsRequest) {
-        // Ignore transient 0×0 reports from ResizeObserver while Asset Preview
-        // is active — they hide the HWND and stall GPU upload mid-import.
+        // Ignore transient 0×0 reports while Preview is active — they hide the
+        // HWND mid Scene→Preview transition (before gltf_preview exists) and
+        // stall GPU upload on the first asset click.
         if bounds.width <= 0.0 || bounds.height <= 0.0 {
-            if self.gltf_preview.is_some() && matches!(self.mode, WorkspaceMode::Preview) {
+            if matches!(self.mode, WorkspaceMode::Preview) {
                 return;
             }
             self.logical_viewport = None;
@@ -2232,6 +2357,7 @@ impl EditorApp {
                 // Live drag already updated ECS transforms — rematerializing
                 // would reimport every glTF and freeze the window.
                 self.refresh_gizmo();
+                self.schedule_projection_export();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -2769,11 +2895,20 @@ impl EditorApp {
     }
 
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+        let previous = self.mode;
         self.mode = mode;
         // Scene and Preview use separate Game3dScene facades — no full cache flush.
         if mode != WorkspaceMode::Scene {
             self.orbit.dragging = false;
             self.clear_viewport_tool_drag();
+        }
+        // Entering Preview with Scene hole bounds paints the HWND over the wrong
+        // panel. Clear until Preview-stage reports non-zero rect.
+        if mode == WorkspaceMode::Preview && previous != WorkspaceMode::Preview {
+            self.logical_viewport = None;
+        }
+        if mode == WorkspaceMode::Code {
+            self.publish_source_tree();
         }
         if let Err(error) = self.apply_layout() {
             self.publish_diagnostic("error", "layout", &error.to_string());
@@ -2830,24 +2965,139 @@ impl EditorApp {
 
     fn read_source(&mut self, request: &SourceRequest) {
         match self.documents.load_text(&request.path) {
-            Ok(snapshot) => self.emit_value(
-                "host.source",
-                json!({
-                    "path": request.path,
-                    "content": snapshot.value,
-                    "revision": snapshot.revision.to_string(),
-                    "saved": false,
-                    "display_name": Path::new(&request.path).file_name().map_or_else(
-                        || request.path.clone(),
-                        |name| name.to_string_lossy().into_owned()
-                    ),
-                    "language": "rust",
-                    "uri": format!("yuyib://project/{}", request.path.replace('\\', "/")),
-                    "read_only": false
-                }),
-            ),
-            Err(error) => self.publish_diagnostic("error", "source.read", &error.to_string()),
+            Ok(snapshot) => {
+                self.emit_value(
+                    "host.source",
+                    json!({
+                        "path": request.path,
+                        "content": snapshot.value,
+                        "revision": snapshot.revision.to_string(),
+                        "saved": false,
+                        "display_name": Path::new(&request.path).file_name().map_or_else(
+                            || request.path.clone(),
+                            |name| name.to_string_lossy().into_owned()
+                        ),
+                        "language": "rust",
+                        "uri": format!("yuyib://project/{}", request.path.replace('\\', "/")),
+                        "read_only": false
+                    }),
+                );
+                self.lsp_open_source(&request.path, &snapshot.value);
+            }
+            Err(_) => match self.read_navigable_source(&request.path) {
+                Ok((absolute, content)) => {
+                    let display = Path::new(&request.path)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| request.path.clone());
+                    self.emit_value(
+                        "host.source",
+                        json!({
+                            "path": request.path,
+                            "content": content,
+                            "revision": format!("{:x}", {
+                                let mut hash: u64 = 0xcbf29ce484222325;
+                                for byte in content.as_bytes() {
+                                    hash ^= u64::from(*byte);
+                                    hash = hash.wrapping_mul(0x100000001b3);
+                                }
+                                hash
+                            }),
+                            "saved": false,
+                            "display_name": display,
+                            "language": "rust",
+                            "uri": format!("yuyib://nav/{}", request.path.replace('\\', "/")),
+                            "read_only": true,
+                            "external": true,
+                            "absolute_path": absolute.to_string_lossy(),
+                        }),
+                    );
+                    // RA session is project-rooted; still notify so diagnostics can attach.
+                    self.lsp_open_absolute(&absolute, &content);
+                }
+                Err(error) => self.publish_diagnostic("error", "source.read", &error),
+            },
         }
+    }
+
+    /// Opens workspace-relative engine sources (e.g. `crates/yuyib-game-3d/src/lib.rs`)
+    /// by walking ancestors of the project root.
+    fn read_navigable_source(&self, path: &str) -> Result<(PathBuf, String), String> {
+        let cleaned = path.replace('\\', "/");
+        if cleaned.is_empty() || Path::new(&cleaned).is_absolute() {
+            return Err(format!("source path `{path}` is not navigable"));
+        }
+        let mut cursor = Some(self.project_root.as_path());
+        for _ in 0..10 {
+            let Some(root) = cursor else {
+                break;
+            };
+            let candidate = root.join(&cleaned);
+            if candidate.is_file() {
+                let bytes = fs::read(&candidate).map_err(|error| error.to_string())?;
+                if bytes.len() > DOCUMENT_BYTE_LIMIT {
+                    return Err(format!(
+                        "source `{}` exceeds editor byte limit",
+                        candidate.display()
+                    ));
+                }
+                let text = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+                return Ok((candidate, text));
+            }
+            cursor = root.parent();
+        }
+        Err(format!(
+            "source `{path}` not found under project or ancestor workspace roots"
+        ))
+    }
+
+    fn lsp_open_absolute(&mut self, absolute: &Path, text: &str) {
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            if let Some(previous) = self.lsp_open_path.as_ref()
+                && previous != absolute
+            {
+                session.did_close(previous);
+            }
+            session.did_open(absolute, text);
+        }
+        self.lsp_open_path = Some(absolute.to_path_buf());
+    }
+
+    fn change_source(&mut self, request: &SourceChangeRequest) {
+        self.lsp_change_source(&request.path, &request.content);
+    }
+
+    fn publish_source_tree(&mut self) {
+        if self.project.is_none() {
+            self.emit_value(
+                "host.source.tree",
+                json!({ "root": serde_json::Value::Null, "files": [] }),
+            );
+            return;
+        }
+        let code_root = self
+            .project
+            .as_ref()
+            .map(|project| project.code_root.as_str())
+            .unwrap_or(".");
+        let scan_root = if code_root == "." || code_root.is_empty() {
+            self.project_root.clone()
+        } else {
+            self.project_root.join(code_root)
+        };
+        let mut files = Vec::new();
+        collect_rust_sources(&self.project_root, &scan_root, &mut files, 0);
+        files.sort();
+        let preferred = preferred_source_path(&files);
+        self.emit_value(
+            "host.source.tree",
+            json!({
+                "root": self.project_root.to_string_lossy(),
+                "code_root": code_root,
+                "files": files,
+                "preferred": preferred,
+            }),
+        );
     }
 
     fn save_source(&mut self, request: &SourceSaveRequest) {
@@ -2865,15 +3115,18 @@ impl EditorApp {
             .documents
             .save_text(&request.path, &request.content, expected)
         {
-            Ok(revision) => self.emit_value(
-                "host.source",
-                json!({
-                    "path": request.path,
-                    "content": request.content,
-                    "revision": revision.to_string(),
-                    "saved": true
-                }),
-            ),
+            Ok(revision) => {
+                self.emit_value(
+                    "host.source",
+                    json!({
+                        "path": request.path,
+                        "content": request.content,
+                        "revision": revision.to_string(),
+                        "saved": true
+                    }),
+                );
+                self.lsp_change_source(&request.path, &request.content);
+            }
             Err(DocumentError::Conflict(conflict)) => self.emit_value(
                 "host.sourceConflict",
                 json!({
@@ -2884,6 +3137,106 @@ impl EditorApp {
                 }),
             ),
             Err(error) => self.publish_diagnostic("error", "source.save", &error.to_string()),
+        }
+    }
+
+    fn restart_rust_analyzer(&mut self) {
+        self.rust_analyzer = None;
+        self.lsp_open_path = None;
+        if self.project.is_none() {
+            self.emit_value(
+                "host.lsp.status",
+                json!({ "status": "unavailable", "message": "No project open" }),
+            );
+            return;
+        }
+        let session = RustAnalyzerSession::start(&self.project_root);
+        self.emit_lsp_status(session.status());
+        self.rust_analyzer = Some(session);
+    }
+
+    fn resolve_project_source_path(&self, relative: &str) -> PathBuf {
+        let cleaned = relative.replace('/', std::path::MAIN_SEPARATOR_STR);
+        self.project_root.join(cleaned)
+    }
+
+    fn lsp_open_source(&mut self, relative: &str, text: &str) {
+        let absolute = self.resolve_project_source_path(relative);
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            if let Some(previous) = self.lsp_open_path.as_ref()
+                && previous != &absolute
+            {
+                session.did_close(previous);
+            }
+            session.did_open(&absolute, text);
+        }
+        self.lsp_open_path = Some(absolute);
+    }
+
+    fn lsp_change_source(&mut self, relative: &str, text: &str) {
+        let absolute = self.resolve_project_source_path(relative);
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            if self.lsp_open_path.as_ref() != Some(&absolute) {
+                session.did_open(&absolute, text);
+                self.lsp_open_path = Some(absolute);
+            } else {
+                session.did_change(&absolute, text);
+            }
+        }
+    }
+
+    fn emit_lsp_status(&mut self, status: &LspStatus) {
+        let payload = match status {
+            LspStatus::Starting => json!({ "status": "starting" }),
+            LspStatus::Ready => json!({ "status": "ready" }),
+            LspStatus::Unavailable(message) => {
+                json!({ "status": "unavailable", "message": message })
+            }
+            LspStatus::Error(message) => json!({ "status": "error", "message": message }),
+        };
+        self.emit_value("host.lsp.status", payload);
+    }
+
+    fn publish_lsp_diagnostics(&mut self, path: String, diagnostics: Vec<LspDiagnostic>) {
+        let items: Vec<Value> = diagnostics
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "path": item.path,
+                    "severity": item.severity,
+                    "message": item.message,
+                    "start_line": item.start_line,
+                    "start_column": item.start_column,
+                    "end_line": item.end_line,
+                    "end_column": item.end_column,
+                    "source": item.source,
+                })
+            })
+            .collect();
+        self.emit_value(
+            "host.lsp.diagnostics",
+            json!({
+                "path": path,
+                "diagnostics": items,
+            }),
+        );
+    }
+
+    fn poll_rust_analyzer(&mut self) {
+        let Some(session) = self.rust_analyzer.as_mut() else {
+            return;
+        };
+        let mut status_updates = Vec::new();
+        let mut diagnostic_updates = Vec::new();
+        session.poll(
+            |status| status_updates.push(status),
+            |path, diagnostics| diagnostic_updates.push((path, diagnostics)),
+        );
+        for status in status_updates {
+            self.emit_lsp_status(&status);
+        }
+        for (path, diagnostics) in diagnostic_updates {
+            self.publish_lsp_diagnostics(path, diagnostics);
         }
     }
 
@@ -2899,11 +3252,15 @@ impl EditorApp {
         match SceneSession::open(&self.documents, request.path) {
             Ok(scene) => {
                 self.authored_scene = Some(scene);
+                self.projection_export_due = None;
+                self.projection_apply_due = None;
+                self.projection_watch_revisions.clear();
                 if self.mode != WorkspaceMode::Scene {
                     self.set_workspace_mode(WorkspaceMode::Scene);
                 }
                 self.publish_scene_state();
                 self.frame_orbit_to_authored_content();
+                self.refresh_projection_watch_fingerprints();
             }
             Err(error) => self.publish_diagnostic("error", "scene.open", &error.to_string()),
         }
@@ -2922,11 +3279,15 @@ impl EditorApp {
                     self.publish_diagnostic("warning", "scene.create", &error.to_string());
                 }
                 self.authored_scene = Some(scene);
+                self.projection_export_due = None;
+                self.projection_apply_due = None;
+                self.projection_watch_revisions.clear();
                 if self.mode != WorkspaceMode::Scene {
                     self.set_workspace_mode(WorkspaceMode::Scene);
                 }
                 self.publish_scene_state();
                 self.frame_orbit_to_authored_content();
+                self.schedule_projection_export();
             }
             Err(error) => self.publish_diagnostic("error", "scene.create", &error.to_string()),
         }
@@ -2964,6 +3325,7 @@ impl EditorApp {
             Ok(_) => {
                 self.watch_scene_conflict_active = false;
                 self.publish_scene_state();
+                self.export_scene_projection(true);
             }
             Err(SceneSessionError::Document(DocumentError::Conflict(conflict))) => {
                 self.watch_scene_conflict_active = true;
@@ -3070,6 +3432,7 @@ impl EditorApp {
                 self.publish_scene_document(Some(&transaction_id));
                 self.publish_scene_history_with_transaction(Some(&transaction_id));
                 self.apply_preview_refresh(preview);
+                self.schedule_projection_export();
             }
             Err(SceneMutationError::Transaction(TransactionError::RevisionConflict {
                 expected,
@@ -3819,8 +4182,607 @@ impl EditorApp {
         let Some(scene) = &self.authored_scene else {
             return;
         };
-        let payload = scene_document_payload(scene, transaction_id);
+        let code_root = self
+            .project
+            .as_ref()
+            .map(|project| project.code_root.as_str())
+            .unwrap_or(".");
+        let payload = scene_document_payload(scene, transaction_id, code_root);
         self.emit_value("host.scene.document", payload);
+    }
+
+    fn schedule_projection_export(&mut self) {
+        self.projection_export_due =
+            Some(Instant::now() + std::time::Duration::from_millis(300));
+    }
+
+    fn poll_projection_export_debounce(&mut self) {
+        let Some(due) = self.projection_export_due else {
+            return;
+        };
+        if Instant::now() < due {
+            return;
+        }
+        self.projection_export_due = None;
+        self.export_scene_projection(false);
+    }
+
+    fn poll_projection_apply_debounce(&mut self) {
+        let Some(due) = self.projection_apply_due else {
+            return;
+        };
+        if Instant::now() < due {
+            return;
+        }
+        self.projection_apply_due = None;
+        self.apply_scene_projection(None, true);
+    }
+
+    fn poll_projection_file_watch(&mut self) {
+        if self.authored_scene.is_none() || self.project.is_none() {
+            return;
+        }
+        let Some(dir) = self.projection_entities_dir_abs() else {
+            return;
+        };
+        if !dir.is_dir() {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        let mut changed = false;
+        let mut seen = HashSet::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .to_owned();
+            if name == "mod.rs" || name.is_empty() {
+                continue;
+            }
+            let Some(store_path) = self.projection_entity_store_path(&name) else {
+                continue;
+            };
+            seen.insert(store_path.clone());
+            match self.documents.peek_revision(&store_path) {
+                Ok(Some(revision)) => {
+                    match self.projection_watch_revisions.get(&store_path) {
+                        Some(previous) if previous == &revision => {}
+                        _ => {
+                            changed = true;
+                            self.projection_watch_revisions
+                                .insert(store_path, revision);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    if self.projection_watch_revisions.remove(&store_path).is_some() {
+                        changed = true;
+                    }
+                }
+                Err(error) => {
+                    self.publish_diagnostic("warning", "watch.projection", &error.to_string());
+                }
+            }
+        }
+        let stale: Vec<_> = self
+            .projection_watch_revisions
+            .keys()
+            .filter(|path| !seen.contains(*path))
+            .cloned()
+            .collect();
+        for path in stale {
+            self.projection_watch_revisions.remove(&path);
+            changed = true;
+        }
+        if changed {
+            // External code edit — prefer apply over a pending SoT export rewrite.
+            self.projection_export_due = None;
+            self.projection_apply_due =
+                Some(Instant::now() + std::time::Duration::from_millis(300));
+        }
+    }
+
+    fn export_scene_projection(&mut self, force_tree_refresh: bool) {
+        self.projection_export_due = None;
+        if self.project.is_none() {
+            if force_tree_refresh {
+                self.publish_diagnostic(
+                    "warning",
+                    "scene.projection.export",
+                    "Open a project before exporting scene projection code.",
+                );
+            }
+            return;
+        }
+        let Some(scene) = &self.authored_scene else {
+            if force_tree_refresh {
+                self.publish_diagnostic(
+                    "warning",
+                    "scene.projection.export",
+                    "No authored scene is open.",
+                );
+            }
+            return;
+        };
+        if scene.is_read_only() {
+            if force_tree_refresh {
+                self.publish_diagnostic(
+                    "warning",
+                    "scene.projection.export",
+                    "Read-only scene cannot export projection code.",
+                );
+            }
+            return;
+        }
+        let tree = yuyib_scene_projection::export_scene(scene.document(), scene.path());
+        let mut wrote = 0usize;
+        for file in &tree.files {
+            let store_path = self.code_root_join(&file.relative_path);
+            if let Err(error) = self.ensure_parent_dir(&store_path) {
+                self.publish_diagnostic("error", "scene.projection.export", &error);
+                return;
+            }
+            // Force rewrite from SoT — skip optimistic conflict (projection is a view).
+            match self.documents.save_text(&store_path, &file.contents, None) {
+                Ok(_) => wrote += 1,
+                Err(DocumentError::Conflict(_)) => {
+                    // File exists: rewrite with current revision expectation.
+                    match self.documents.peek_revision(&store_path) {
+                        Ok(expected) => {
+                            match self
+                                .documents
+                                .save_text(&store_path, &file.contents, expected)
+                            {
+                                Ok(_) => wrote += 1,
+                                Err(error) => {
+                                    self.publish_diagnostic(
+                                        "error",
+                                        "scene.projection.export",
+                                        &error.to_string(),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            self.publish_diagnostic(
+                                "error",
+                                "scene.projection.export",
+                                &error.to_string(),
+                            );
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.publish_diagnostic(
+                        "error",
+                        "scene.projection.export",
+                        &error.to_string(),
+                    );
+                    return;
+                }
+            }
+        }
+        self.refresh_projection_watch_fingerprints();
+        if force_tree_refresh {
+            self.publish_source_tree();
+            self.publish_diagnostic(
+                "info",
+                "scene.projection.export",
+                &format!(
+                    "Exported {} projection file(s) under {}.",
+                    wrote, tree.root_relative
+                ),
+            );
+        }
+    }
+
+    fn apply_scene_projection(&mut self, expected_revision: Option<u64>, from_watch: bool) {
+        self.projection_apply_due = None;
+        if self.project.is_none() {
+            if !from_watch {
+                self.publish_diagnostic(
+                    "warning",
+                    "scene.projection.apply",
+                    "Open a project before applying scene projection code.",
+                );
+            }
+            return;
+        }
+        let Some(scene) = &self.authored_scene else {
+            if !from_watch {
+                self.publish_diagnostic(
+                    "warning",
+                    "scene.projection.apply",
+                    "No authored scene is open.",
+                );
+            }
+            return;
+        };
+        if scene.is_read_only() {
+            if !from_watch {
+                self.publish_diagnostic(
+                    "warning",
+                    "scene.projection.apply",
+                    "Read-only scene cannot apply projection code.",
+                );
+            }
+            return;
+        }
+        let scene_path = scene.path().to_owned();
+        let scene_guid = scene.document().scene_guid.to_string();
+        let base_revision = expected_revision.unwrap_or_else(|| scene.history_revision().get());
+        if expected_revision.is_some_and(|expected| expected != scene.history_revision().get()) {
+            self.emit_value(
+                "host.scene.conflict",
+                json!({
+                    "path": scene_path,
+                    "expected_revision": expected_revision,
+                    "actual_revision": scene.history_revision().get(),
+                    "message": "Projection apply targeted a stale authoring revision."
+                }),
+            );
+            self.publish_scene_history();
+            return;
+        }
+
+        let entities_dir = format!(
+            "{}/entities",
+            yuyib_scene_projection::projection_dir_relative(&scene_path)
+        );
+        let store_dir = self.code_root_join(&entities_dir);
+        let abs_dir = self.project_root.join(&store_dir);
+        if !abs_dir.is_dir() {
+            if !from_watch {
+                self.publish_diagnostic(
+                    "warning",
+                    "scene.projection.apply",
+                    &format!("No projection directory at {store_dir}; Sync Code first."),
+                );
+            }
+            return;
+        }
+        let Ok(entries) = fs::read_dir(&abs_dir) else {
+            self.publish_diagnostic(
+                "error",
+                "scene.projection.apply",
+                &format!("Failed to read projection directory {store_dir}"),
+            );
+            return;
+        };
+        let mut parsed = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name == "mod.rs" || name.is_empty() {
+                continue;
+            }
+            let store_path = self.code_root_join(&format!("{entities_dir}/{name}"));
+            let snapshot = match self.documents.load_text(&store_path) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.publish_diagnostic(
+                        "error",
+                        "scene.projection.apply",
+                        &format!("{store_path}: {error}"),
+                    );
+                    return;
+                }
+            };
+            if !snapshot.value.contains("yuyib_entity!") {
+                continue;
+            }
+            match yuyib_scene_projection::parse_entity_file(&snapshot.value) {
+                Ok(entity) => {
+                    if entity.scene_guid != scene_guid {
+                        self.publish_diagnostic(
+                            "error",
+                            "scene.projection.apply",
+                            &format!(
+                                "{store_path}: scene_guid {} does not match open scene {scene_guid}",
+                                entity.scene_guid
+                            ),
+                        );
+                        return;
+                    }
+                    parsed.push(entity);
+                }
+                Err(error) => {
+                    self.publish_diagnostic(
+                        "error",
+                        "scene.projection.apply",
+                        &format!("{store_path}: {error}"),
+                    );
+                    return;
+                }
+            }
+        }
+
+        let edits = {
+            let Some(scene) = &self.authored_scene else {
+                return;
+            };
+            match yuyib_scene_projection::diff_projection(scene.document(), &parsed) {
+                Ok(edits) => edits,
+                Err(error) => {
+                    self.publish_diagnostic("error", "scene.projection.apply", &error);
+                    return;
+                }
+            }
+        };
+        if edits.is_empty() {
+            self.refresh_projection_watch_fingerprints();
+            if !from_watch {
+                self.publish_diagnostic(
+                    "info",
+                    "scene.projection.apply",
+                    "Projection code matches the open scene (no edits).",
+                );
+            }
+            return;
+        }
+
+        let result = {
+            let Some(scene) = &mut self.authored_scene else {
+                return;
+            };
+            scene.apply_projection_edits(base_revision, &edits)
+        };
+        match result {
+            Ok(_) => {
+                self.publish_scene_document(None);
+                self.publish_scene_history();
+                self.apply_preview_refresh(PreviewRefresh::Full);
+                self.schedule_projection_export();
+                self.refresh_projection_watch_fingerprints();
+                if !from_watch {
+                    self.publish_diagnostic(
+                        "info",
+                        "scene.projection.apply",
+                        &format!("Applied {} projection edit(s).", edits.len()),
+                    );
+                }
+            }
+            Err(SceneMutationError::Transaction(TransactionError::RevisionConflict {
+                expected,
+                actual,
+            })) => {
+                self.emit_value(
+                    "host.scene.conflict",
+                    json!({
+                        "path": scene_path,
+                        "expected_revision": expected.get(),
+                        "actual_revision": actual.get(),
+                        "message": "Projection apply hit a stale authoring revision."
+                    }),
+                );
+                self.publish_scene_history();
+            }
+            Err(error) => {
+                self.publish_diagnostic("error", "scene.projection.apply", &error.to_string());
+                self.publish_scene_history();
+            }
+        }
+    }
+
+    fn apply_scene_interaction(&mut self, request: SceneInteractionApplyRequest) {
+        let Some(scene) = &self.authored_scene else {
+            self.publish_diagnostic(
+                "warning",
+                "scene.interaction.apply",
+                "No authored scene is open.",
+            );
+            return;
+        };
+        if scene.is_read_only() {
+            self.publish_diagnostic(
+                "warning",
+                "scene.interaction.apply",
+                "Read-only scene cannot apply interaction intents.",
+            );
+            return;
+        }
+        let base_revision = request
+            .expected_revision
+            .unwrap_or_else(|| scene.history_revision().get());
+        if request
+            .expected_revision
+            .is_some_and(|expected| expected != scene.history_revision().get())
+        {
+            self.emit_value(
+                "host.scene.conflict",
+                json!({
+                    "path": scene.path(),
+                    "expected_revision": request.expected_revision,
+                    "actual_revision": scene.history_revision().get(),
+                    "message": "Interaction apply targeted a stale authoring revision."
+                }),
+            );
+            self.publish_scene_history();
+            return;
+        }
+        if request.intents.is_empty() {
+            self.publish_diagnostic(
+                "info",
+                "scene.interaction.apply",
+                "No interaction intents to apply.",
+            );
+            return;
+        }
+
+        let scene = self
+            .authored_scene
+            .as_mut()
+            .expect("scene checked above");
+        let mut bridge = EditorDocumentBridge::new(scene, base_revision);
+        match yuyib_scene_interaction::SceneInteractionBridge::apply_intents(
+            &mut bridge,
+            &request.intents,
+        ) {
+            Ok(batch) => {
+                self.publish_scene_document(None);
+                self.publish_scene_history();
+                self.apply_preview_refresh(PreviewRefresh::Full);
+                self.schedule_projection_export();
+                for signal in &batch.signals {
+                    self.emit_value(
+                        "host.scene.interaction.signal",
+                        json!({
+                            "name": signal.name,
+                            "payload": signal.payload,
+                            "quest_progress": yuyib_scene_interaction::try_parse_quest_progress_signal(
+                                &signal.name,
+                                &signal.payload
+                            ).map(|parsed| json!({
+                                "event": parsed.event,
+                                "amount": parsed.amount
+                            })),
+                        }),
+                    );
+                }
+                self.publish_diagnostic(
+                    "info",
+                    "scene.interaction.apply",
+                    &format!(
+                        "Interaction batch: submitted={}, applied={}, signals={}.",
+                        batch.submitted,
+                        batch.applied,
+                        batch.signals.len()
+                    ),
+                );
+            }
+            Err(SceneMutationError::Transaction(TransactionError::RevisionConflict {
+                expected,
+                actual,
+            })) => {
+                let path = self
+                    .authored_scene
+                    .as_ref()
+                    .map(|scene| scene.path().to_owned())
+                    .unwrap_or_default();
+                self.emit_value(
+                    "host.scene.conflict",
+                    json!({
+                        "path": path,
+                        "expected_revision": expected.get(),
+                        "actual_revision": actual.get(),
+                        "message": "Interaction apply hit a stale authoring revision."
+                    }),
+                );
+                self.publish_scene_history();
+            }
+            Err(error) => {
+                self.publish_diagnostic(
+                    "error",
+                    "scene.interaction.apply",
+                    &error.to_string(),
+                );
+                self.publish_scene_history();
+            }
+        }
+    }
+
+    fn code_root_join(&self, relative_to_code_root: &str) -> String {
+        let normalized = relative_to_code_root.replace('\\', "/");
+        let code_root = self
+            .project
+            .as_ref()
+            .map(|project| project.code_root.as_str())
+            .unwrap_or(".");
+        if code_root.is_empty() || code_root == "." {
+            normalized
+        } else {
+            format!(
+                "{}/{}",
+                code_root.trim_end_matches(['/', '\\']),
+                normalized.trim_start_matches('/')
+            )
+        }
+    }
+
+    fn ensure_parent_dir(&self, store_relative: &str) -> Result<(), String> {
+        let absolute = self.project_root.join(store_relative);
+        let parent = absolute
+            .parent()
+            .ok_or_else(|| format!("invalid projection path {store_relative}"))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("failed to create projection directory {}: {error}", parent.display())
+        })?;
+        let canonical_root = self
+            .project_root
+            .canonicalize()
+            .map_err(|error| format!("project root: {error}"))?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|error| format!("projection parent: {error}"))?;
+        if !canonical_parent.starts_with(&canonical_root) {
+            return Err(format!(
+                "projection path escapes project root: {store_relative}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn projection_entities_dir_abs(&self) -> Option<PathBuf> {
+        let scene = self.authored_scene.as_ref()?;
+        let relative = format!(
+            "{}/entities",
+            yuyib_scene_projection::projection_dir_relative(scene.path())
+        );
+        Some(self.project_root.join(self.code_root_join(&relative)))
+    }
+
+    fn projection_entity_store_path(&self, file_name: &str) -> Option<String> {
+        let scene = self.authored_scene.as_ref()?;
+        let relative = format!(
+            "{}/entities/{file_name}",
+            yuyib_scene_projection::projection_dir_relative(scene.path())
+        );
+        Some(self.code_root_join(&relative))
+    }
+
+    fn refresh_projection_watch_fingerprints(&mut self) {
+        self.projection_watch_revisions.clear();
+        let Some(dir) = self.projection_entities_dir_abs() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name == "mod.rs" || name.is_empty() {
+                continue;
+            }
+            let Some(store_path) = self.projection_entity_store_path(name) else {
+                continue;
+            };
+            if let Ok(Some(revision)) = self.documents.peek_revision(&store_path) {
+                self.projection_watch_revisions
+                    .insert(store_path, revision);
+            }
+        }
     }
 
     fn publish_scene_history(&mut self) {
@@ -3940,6 +4902,18 @@ impl EditorApp {
             strip_flag_pair(&mut arguments, "--project");
             arguments.insert(0, "--project".to_owned());
             arguments.insert(1, self.project_root.to_string_lossy().into_owned());
+            let report_path = self.project_root.join(".yuyib").join("play-apply-report.json");
+            if let Err(error) = fs::create_dir_all(report_path.parent().expect("report has parent")) {
+                self.publish_diagnostic(
+                    "warning",
+                    "play",
+                    &format!("Could not prepare Apply Play report directory: {error}"),
+                );
+            } else {
+                strip_flag_pair(&mut arguments, "--apply-report");
+                arguments.push("--apply-report".to_owned());
+                arguments.push(report_path.to_string_lossy().into_owned());
+            }
             if !arguments.iter().any(|argument| argument == "--scene") {
                 if let Some(scene) = &self.authored_scene {
                     arguments.push("--scene".to_owned());
@@ -4022,6 +4996,8 @@ impl EditorApp {
             return;
         };
         let pin = self.play_pin.take();
+        // User abort — discard any previous pending apply.
+        self.pending_play_apply = None;
         self.emit_value(
             "host.process",
             json!({
@@ -4035,6 +5011,151 @@ impl EditorApp {
             }),
         );
         stop_process_async(process, "play", self.process_sender.clone());
+    }
+
+    fn apply_play_changes(&mut self) {
+        let Some(report) = self.pending_play_apply.take() else {
+            self.publish_diagnostic(
+                "warning",
+                "play.apply",
+                "No pending Apply Play Changes report. Exit Play cleanly first.",
+            );
+            return;
+        };
+        let Some(scene) = self.authored_scene.as_ref() else {
+            self.pending_play_apply = Some(report);
+            self.publish_diagnostic("warning", "play.apply", "No authored scene is open.");
+            return;
+        };
+        let scene_path = scene.path().to_owned();
+        let history_revision = scene.history_revision().get();
+        if report
+            .get("scene_path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path != scene_path)
+        {
+            self.pending_play_apply = Some(report);
+            self.publish_diagnostic(
+                "warning",
+                "play.apply",
+                "Apply Play report scene path does not match the open scene.",
+            );
+            return;
+        }
+        if let Some(expected) = report.get("history_revision").and_then(Value::as_u64)
+            && expected != history_revision
+        {
+            self.pending_play_apply = Some(report);
+            self.publish_diagnostic(
+                "warning",
+                "play.apply",
+                &format!(
+                    "Apply Play report is stale (report revision {expected}, scene {history_revision})."
+                ),
+            );
+            return;
+        }
+        let Some(changes_value) = report.get("changes").and_then(Value::as_array) else {
+            self.publish_diagnostic("warning", "play.apply", "Apply Play report has no changes.");
+            return;
+        };
+        let mut changes = Vec::new();
+        for change in changes_value {
+            let Some(entity) = change.get("entity").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(component) = change.get("component").and_then(Value::as_str) else {
+                continue;
+            };
+            if !matches!(component, "yuyib.transform3d" | "yuyib.local-transform3d") {
+                continue;
+            }
+            let Some(fields_obj) = change.get("fields").and_then(Value::as_object) else {
+                continue;
+            };
+            let fields: Vec<(String, Value)> = fields_obj
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            changes.push((entity.to_owned(), component.to_owned(), fields));
+        }
+        let Some(scene) = self.authored_scene.as_mut() else {
+            self.pending_play_apply = Some(report);
+            self.publish_diagnostic("warning", "play.apply", "No authored scene is open.");
+            return;
+        };
+        let expected = scene.history_revision().get();
+        match scene.apply_play_transform_report(expected, &changes) {
+            Ok(_) => {
+                let count = changes.len();
+                self.publish_scene_state();
+                self.schedule_projection_export();
+                self.publish_diagnostic(
+                    "info",
+                    "play.apply",
+                    &format!("Applied Play Changes for {count} entit(y/ies)."),
+                );
+                self.emit_value(
+                    "host.process",
+                    json!({
+                        "kind": "play",
+                        "status": "applied",
+                        "apply_play_changes": true,
+                        "applied_entities": count,
+                    }),
+                );
+            }
+            Err(error) => {
+                // Keep report so the user can retry after fixing conflicts.
+                self.pending_play_apply = Some(report);
+                self.publish_diagnostic("error", "play.apply", &error.to_string());
+            }
+        }
+    }
+
+    fn ingest_play_apply_report(&mut self, pin: &Value) -> Option<(usize, PathBuf)> {
+        let report_path = self.project_root.join(".yuyib").join("play-apply-report.json");
+        if !report_path.is_file() {
+            return None;
+        }
+        let bytes = fs::read(&report_path).ok()?;
+        let report: Value = serde_json::from_slice(&bytes).ok()?;
+        if report.get("schema").and_then(Value::as_str) != Some("yuyib.play-apply-report@1") {
+            return None;
+        }
+        let report_scene = report.get("scene_path").and_then(Value::as_str)?;
+        let pin_path = pin.get("path").and_then(Value::as_str)?;
+        if report_scene != pin_path {
+            return None;
+        }
+        if let (Some(report_rev), Some(pin_rev)) = (
+            report.get("history_revision").and_then(Value::as_u64),
+            pin.get("revision").and_then(Value::as_u64),
+        ) && report_rev != pin_rev
+        {
+            return None;
+        }
+        let count = report
+            .get("changes")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        if count == 0 {
+            return None;
+        }
+        // Open scene must still match the pin.
+        let open_ok = self.authored_scene.as_ref().is_some_and(|scene| {
+            scene.path() == pin_path
+                && pin
+                    .get("revision")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|revision| revision == scene.history_revision().get())
+        });
+        if !open_ok {
+            return None;
+        }
+        self.pending_play_apply = Some(report);
+        Some((count, report_path))
     }
 
     fn start_cargo_check(&mut self, request: &CargoCheckRequest) {
@@ -4179,15 +5300,33 @@ impl EditorApp {
     ) {
         match result {
             Ok(status) => {
+                let mut apply_play_changes = false;
+                let mut apply_count = 0_usize;
+                let pin = if kind == "play" {
+                    self.play_pin.take()
+                } else {
+                    None
+                };
+                if kind == "play" && status.success() {
+                    if let Some(pin_value) = pin.as_ref()
+                        && let Some((count, _)) = self.ingest_play_apply_report(pin_value)
+                    {
+                        apply_play_changes = true;
+                        apply_count = count;
+                    }
+                } else if kind == "play" {
+                    self.pending_play_apply = None;
+                }
                 let mut payload = json!({
                     "kind": kind,
                     "status": "stopped",
                     "success": status.success(),
                     "code": status.code(),
-                    "apply_play_changes": false
+                    "apply_play_changes": apply_play_changes,
+                    "apply_change_count": apply_count,
                 });
                 if kind == "play" {
-                    payload["pinned_scene"] = self.play_pin.take().unwrap_or(Value::Null);
+                    payload["pinned_scene"] = pin.unwrap_or(Value::Null);
                     payload["reason"] = json!(if status.success() {
                         "exited"
                     } else {
@@ -4199,6 +5338,7 @@ impl EditorApp {
             Err(error) => {
                 if kind == "play" {
                     let pin = self.play_pin.take();
+                    self.pending_play_apply = None;
                     self.emit_value(
                         "host.process",
                         json!({
@@ -4224,6 +5364,10 @@ impl EditorApp {
         if self.project.is_none() {
             return;
         }
+        // Projection export/apply use a ~300ms debounce and must not wait on the
+        // coarser asset/scene watch interval.
+        self.poll_projection_export_debounce();
+        self.poll_projection_apply_debounce();
         let now = Instant::now();
         if self
             .watch_last_poll
@@ -4234,6 +5378,7 @@ impl EditorApp {
         self.watch_last_poll = Some(now);
         self.poll_open_scene_external_change();
         self.poll_asset_index_drift();
+        self.poll_projection_file_watch();
     }
 
     fn poll_open_scene_external_change(&mut self) {
@@ -4354,7 +5499,12 @@ impl EditorApp {
         {
             return;
         }
-        self.last_frame = Instant::now();
+        let now = Instant::now();
+        let delta_seconds = now
+            .saturating_duration_since(self.last_frame)
+            .as_secs_f32()
+            .min(0.1);
+        self.last_frame = now;
         self.apply_orbit_camera();
         if matches!(self.mode, WorkspaceMode::Scene) {
             self.sync_authored_lights();
@@ -4393,7 +5543,7 @@ impl EditorApp {
                     WorkspaceMode::Preview => match preview.as_mut() {
                         None => Ok(()),
                         Some(session) if !session.is_cpu_ready() => Ok(()),
-                        Some(session) => match session.render(frame, preview_scene) {
+                        Some(session) => match session.render(frame, preview_scene, delta_seconds) {
                             Ok(Some(GltfPreviewFrame::Drawn { .. })) => {
                                 let mut result = Ok(());
                                 let overlay_camera = *preview_scene.camera_mut();
@@ -4547,18 +5697,20 @@ impl EditorApp {
                 );
                 self.apply_orbit_camera();
             }
-            let (meshes, materials, selected_mesh, selected_material) = self
-                .gltf_preview
-                .as_ref()
-                .map(|session| {
-                    (
-                        session.mesh_inventory(),
-                        session.material_inventory(),
-                        session.selected_mesh(),
-                        session.selected_material(),
-                    )
-                })
-                .unwrap_or_default();
+            let (meshes, materials, animations, selected_mesh, selected_material, selected_animation) =
+                self.gltf_preview
+                    .as_ref()
+                    .map(|session| {
+                        (
+                            session.mesh_inventory(),
+                            session.material_inventory(),
+                            session.animation_inventory(),
+                            session.selected_mesh(),
+                            session.selected_material(),
+                            session.selected_animation(),
+                        )
+                    })
+                    .unwrap_or_default();
             self.emit_value(
                 "host.process",
                 json!({
@@ -4572,10 +5724,21 @@ impl EditorApp {
                     "cache": "production",
                     "meshes": meshes,
                     "materials": materials,
+                    "animations": animations,
                     "selected_mesh": selected_mesh,
                     "selected_material": selected_material,
+                    "selected_animation": selected_animation,
                 }),
             );
+        }
+        if self
+            .gltf_preview
+            .as_ref()
+            .is_some_and(|session| session.selected_animation().is_some())
+            && matches!(self.mode, WorkspaceMode::Preview)
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
         }
         let error = match surface_result {
             Err(error) => Some(error.to_string()),
@@ -4659,6 +5822,8 @@ impl EditorApp {
         if let Some(process) = self.cargo_check.take() {
             stop_process_async(process, "cargo.check", self.process_sender.clone());
         }
+        self.rust_analyzer = None;
+        self.lsp_open_path = None;
         self.ui_ready = false;
         self.close_requested = false;
         self.command_queue = None;
@@ -4720,6 +5885,7 @@ impl ApplicationHandler for EditorApp {
                     self.drain_editor_jobs();
                     self.drain_process_output();
                     self.poll_processes();
+                    self.poll_rust_analyzer();
                     self.render_preview();
                     self.flush_events();
                 }
@@ -4742,6 +5908,7 @@ impl ApplicationHandler for EditorApp {
         self.drain_editor_jobs();
         self.drain_process_output();
         self.poll_processes();
+        self.poll_rust_analyzer();
         self.poll_project_watch();
         self.flush_events();
         if matches!(self.mode, WorkspaceMode::Scene | WorkspaceMode::Preview) && !self.occluded {
@@ -4753,6 +5920,14 @@ impl ApplicationHandler for EditorApp {
             || self.cargo_check.is_some()
             || self.gltf_preview.is_some()
             || !self.gltf_import_inflight.is_empty()
+            || self.projection_export_due.is_some()
+            || self.projection_apply_due.is_some()
+            || (self.rust_analyzer.is_some()
+                && matches!(self.mode, WorkspaceMode::Code))
+            || self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Starting))
         {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + std::time::Duration::from_millis(50),
@@ -4978,6 +6153,8 @@ fn normalized_component_coverage(coverage: &Value) -> Value {
                     "surfaces": surfaces,
                     "schema_version": component["current_version"],
                     "fields": fields,
+                    "runtime_source": component.get("runtime_source").cloned(),
+                    "authoring_source": component.get("authoring_source").cloned(),
                     "source": {
                         "component": component["runtime_source"]["file"],
                         "adapter": component["authoring_source"]["file"]
@@ -4988,7 +6165,11 @@ fn normalized_component_coverage(coverage: &Value) -> Value {
     )
 }
 
-fn scene_document_payload(scene: &SceneSession, transaction_id: Option<&str>) -> Value {
+fn scene_document_payload(
+    scene: &SceneSession,
+    transaction_id: Option<&str>,
+    code_root: &str,
+) -> Value {
     let document = scene.document();
     let entity_guids: HashSet<String> = document
         .entities
@@ -5038,12 +6219,24 @@ fn scene_document_payload(scene: &SceneSession, transaction_id: Option<&str>) ->
                     })
                 })
                 .collect();
+            let projection_rel =
+                yuyib_scene_projection::entity_projection_relative(scene.path(), entity);
+            let projection_path = if code_root.is_empty() || code_root == "." {
+                projection_rel
+            } else {
+                format!(
+                    "{}/{}",
+                    code_root.trim_end_matches(['/', '\\']),
+                    projection_rel.trim_start_matches('/')
+                )
+            };
             json!({
                 "guid": guid,
                 "name": entity.name,
                 "parent_guid": parents.get(&guid),
                 "children": children.get(&guid).cloned().unwrap_or_default(),
-                "components": components
+                "components": components,
+                "projection_path": projection_path
             })
         })
         .collect();
@@ -5058,6 +6251,10 @@ fn scene_document_payload(scene: &SceneSession, transaction_id: Option<&str>) ->
         "dirty": scene.is_dirty(),
         "read_only": scene.is_read_only(),
         "transaction_id": transaction_id,
+        "projection_root": {
+            "code_root": code_root,
+            "relative": yuyib_scene_projection::projection_dir_relative(scene.path())
+        },
         "document": {
             "schema": document.format,
             "version": document.format_version.get(),
@@ -5576,9 +6773,71 @@ fn validate_component_field_edit(
             validate_directional_light_field(component_id, field_path, value)
                 .map_err(|error| error.to_string())
         }
+        "yuyib.interactable" => validate_interactable_field(field_path, value),
+        "yuyib.trigger" => validate_trigger_field(field_path, value),
         _ => Err(format!(
             "Component editing for {component_id} remains read-only until its typed validation/materialization adapter closes Visual coverage."
         )),
+    }
+}
+
+fn validate_interactable_field(field_path: &str, value: &Value) -> Result<(), String> {
+    match field_path {
+        "interaction" => {
+            let Some(text) = value.as_str() else {
+                return Err("yuyib.interactable.interaction requires a string".to_owned());
+            };
+            if text.trim().is_empty() {
+                return Err("yuyib.interactable.interaction must be non-empty".to_owned());
+            }
+            Ok(())
+        }
+        "enabled" => {
+            if value.as_bool().is_none() {
+                return Err("yuyib.interactable.enabled requires a bool".to_owned());
+            }
+            Ok(())
+        }
+        "max_distance" => {
+            let Some(number) = value.as_f64() else {
+                return Err("yuyib.interactable.max_distance requires a number".to_owned());
+            };
+            if !(number.is_finite() && number > 0.0) {
+                return Err("yuyib.interactable.max_distance must be a finite positive number".to_owned());
+            }
+            Ok(())
+        }
+        _ => Err(format!("unknown yuyib.interactable field `{field_path}`")),
+    }
+}
+
+fn validate_trigger_field(field_path: &str, value: &Value) -> Result<(), String> {
+    match field_path {
+        "trigger" => {
+            let Some(text) = value.as_str() else {
+                return Err("yuyib.trigger.trigger requires a string".to_owned());
+            };
+            if text.trim().is_empty() {
+                return Err("yuyib.trigger.trigger must be non-empty".to_owned());
+            }
+            Ok(())
+        }
+        "enabled" => {
+            if value.as_bool().is_none() {
+                return Err("yuyib.trigger.enabled requires a bool".to_owned());
+            }
+            Ok(())
+        }
+        "radius" => {
+            let Some(number) = value.as_f64() else {
+                return Err("yuyib.trigger.radius requires a number".to_owned());
+            };
+            if !(number.is_finite() && number > 0.0) {
+                return Err("yuyib.trigger.radius must be a finite positive number".to_owned());
+            }
+            Ok(())
+        }
+        _ => Err(format!("unknown yuyib.trigger field `{field_path}`")),
     }
 }
 
@@ -5588,7 +6847,9 @@ fn default_component_allowed(component_id: &str) -> Result<(), String> {
         | "yuyib.local-transform3d"
         | "yuyib.parent3d"
         | "yuyib.model3d"
-        | "yuyib.directional-light3d" => Ok(()),
+        | "yuyib.directional-light3d"
+        | "yuyib.interactable"
+        | "yuyib.trigger" => Ok(()),
         _ => Err(format!(
             "component {component_id} cannot be added until its typed adapter is registered"
         )),
@@ -5602,6 +6863,8 @@ fn available_components() -> Vec<Value> {
         json!({ "id": "yuyib.parent3d", "label": "Parent 3D" }),
         json!({ "id": "yuyib.model3d", "label": "Model 3D" }),
         json!({ "id": "yuyib.directional-light3d", "label": "Directional Light 3D" }),
+        json!({ "id": "yuyib.interactable", "label": "Interactable" }),
+        json!({ "id": "yuyib.trigger", "label": "Trigger Volume" }),
     ]
 }
 
@@ -5655,6 +6918,74 @@ fn extract_model_path(payload: &Value) -> Option<String> {
         );
     }
     None
+}
+
+fn preferred_source_path(files: &[String]) -> Option<String> {
+    const PREFERRED: &[&str] = &[
+        "src/main.rs",
+        "src/lib.rs",
+        "main.rs",
+        "lib.rs",
+    ];
+    for candidate in PREFERRED {
+        if files.iter().any(|path| path == *candidate) {
+            return Some((*candidate).to_owned());
+        }
+        if let Some(found) = files.iter().find(|path| path.ends_with(candidate)) {
+            return Some(found.clone());
+        }
+    }
+    files.first().cloned()
+}
+
+fn collect_rust_sources(
+    project_or_scan_root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    depth: usize,
+) {
+    const MAX_DEPTH: usize = 12;
+    const MAX_FILES: usize = 400;
+    if depth > MAX_DEPTH || out.len() >= MAX_FILES {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if out.len() >= MAX_FILES {
+            break;
+        }
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.')
+            || matches!(
+                name.as_ref(),
+                "target" | "node_modules" | "dist" | "vendor" | ".yuyib" | ".yuyib_cook"
+            )
+        {
+            continue;
+        }
+        if path.is_dir() {
+            collect_rust_sources(project_or_scan_root, &path, out, depth + 1);
+            continue;
+        }
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+        {
+            let relative = path
+                .strip_prefix(project_or_scan_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(relative);
+        }
+    }
 }
 
 fn looks_like_asset_guid(value: &str) -> bool {
@@ -5838,6 +7169,8 @@ mod tests {
                 "yuyib.parent3d",
                 "yuyib.model3d",
                 "yuyib.directional-light3d",
+                "yuyib.interactable",
+                "yuyib.trigger",
             ]
         );
     }

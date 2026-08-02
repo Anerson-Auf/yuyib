@@ -125,6 +125,44 @@ upgrade, а не «исправляется» молча.
 Удаление component-а пользователем является явной command operation. Нельзя
 трактовать отсутствие adapter-а как запрос на удаление.
 
+## Gameplay interaction records (Play)
+
+Практические payloads и Play поведение — [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).
+Кратко:
+
+### `yuyib.interactable`
+
+```json
+{
+  "schema": "yuyib.interactable",
+  "version": 1,
+  "payload": {
+    "interaction": "world.talk_npc",
+    "enabled": true,
+    "max_distance": 3.0
+  }
+}
+```
+
+Optional: `required_action` (default `game.use`). Play: sphere query + **E**.
+
+### `yuyib.trigger`
+
+```json
+{
+  "schema": "yuyib.trigger",
+  "version": 1,
+  "payload": {
+    "trigger": "level.exit",
+    "enabled": true,
+    "radius": 1.5
+  }
+}
+```
+
+Play: `overlap_spheres_3d` vs player → EmitSignal `trigger.<id>` with
+`phase` ∈ `entered` | `stayed` | `exited`.
+
 ## Import settings envelope
 
 Asset metadata хранит identity отдельно от import result:
@@ -214,6 +252,26 @@ Recovery/backup policy должна быть документирована ре
 Command transaction содержит base document revision. Undo/redo и
 `Apply Play Mode Changes` проверяют revision conflicts так же, как Inspector
 mutations.
+
+## Code projection (view, не SoT)
+
+`.yscene` остаётся persistence source of truth. Под `project.code_root` Editor
+может экспортировать declarative Rust projection:
+
+```text
+src/scenes/<scene_slug>/
+  mod.rs
+  entities/
+    <entity_slug>__<short_guid>.rs
+```
+
+Каждый entity-файл — header `yuyib.entity-projection@1` + `yuyib_entity! { … }`.
+Typed pretty-print для известных 3D schemas; остальное — `raw { …json… }`.
+Apply (`scene.projection.apply` / file watch) парсит файлы, diff-ит с открытым
+документом и коммитит **одну** undoable command transaction
+(`entity.rename` / `component.add|remove` / `component.field.set`). Create/delete
+entity из появления/удаления файлов в v1 out of scope. Freeform Rust / `syn`
+rewrite — не projection surface.
 
 ## Materialization
 

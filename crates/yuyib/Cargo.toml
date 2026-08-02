@@ -21,7 +21,17 @@ tasks = ["dep:yuyib-tasks"]
 assets = ["dep:yuyib-assets", "tasks"]
 physics = ["dep:yuyib-physics", "ecs"]
 ## Optional Rapier dynamics backend for M4 (`DynamicsBackend3d`).
-physics-rapier = ["physics", "yuyib-physics/rapier"]
+physics-rapier = ["physics", "yuyib-physics/rapier", "yuyib-profile-3d?/rapier"]
+## Optional Rapier 2D dynamics backend for M4.13 (`DynamicsBackend2d`).
+physics-rapier2d = ["physics", "yuyib-physics/rapier2d"]
+## Rapier-backed 2D platformer controller (separate from top-down sprite kinematic).
+character-2d = ["physics-rapier2d", "dep:yuyib-character-2d"]
+## M5 3D composition profile (`Game3dProfile` / `CharacterGame3d`).
+## Enabled with `three-d`; this alias keeps smoke examples explicit.
+profile-3d = ["three-d"]
+## M5 2D composition profile (`Game2dProfile`).
+## Enabled with `two-d`; this alias keeps smoke examples explicit.
+profile-2d = ["two-d"]
 gameplay = ["dep:yuyib-gameplay", "ecs", "physics"]
 net = ["dep:yuyib-net"]
 audio = ["dep:yuyib-audio"]
@@ -50,6 +60,7 @@ two-d = [
     "dep:yuyib-image",
     "dep:yuyib-render-2d",
     "dep:yuyib-render-texture",
+    "dep:yuyib-profile-2d",
 ]
 three-d = [
     "assets",
@@ -65,6 +76,7 @@ three-d = [
     "dep:yuyib-render-3d",
     "dep:yuyib-scene",
     "dep:yuyib-shader",
+    "dep:yuyib-profile-3d",
 ]
 source1 = [
     "three-d",
@@ -91,6 +103,9 @@ yuyib-game-2d = { path = "../yuyib-game-2d", version = "0.1.0", optional = true 
 yuyib-game-3d = { path = "../yuyib-game-3d", version = "0.1.0", optional = true }
 yuyib-game = { path = "../yuyib-game", version = "0.1.0", optional = true }
 yuyib-character-3d = { path = "../yuyib-character-3d", version = "0.1.0", optional = true }
+yuyib-character-2d = { path = "../yuyib-character-2d", version = "0.1.0", optional = true }
+yuyib-profile-3d = { path = "../yuyib-profile-3d", version = "0.1.0", optional = true }
+yuyib-profile-2d = { path = "../yuyib-profile-2d", version = "0.1.0", optional = true }
 yuyib-image = { path = "../yuyib-image", version = "0.1.0", optional = true }
 yuyib-input = { path = "../yuyib-input", version = "0.1.0", optional = true }
 yuyib-gltf = { path = "../yuyib-gltf", version = "0.1.0", optional = true }
@@ -266,6 +281,46 @@ required-features = ["app", "three-d", "physics-rapier"]
 name = "playable_dynamics_overlay_smoke"
 path = "examples/playable_dynamics_overlay_smoke.rs"
 required-features = ["three-d", "physics-rapier"]
+
+[[example]]
+name = "physics_3d_showcase"
+path = "examples/physics_3d_showcase.rs"
+required-features = ["three-d", "physics-rapier"]
+
+[[example]]
+name = "physics_3d_lowlevel"
+path = "examples/physics_3d_lowlevel.rs"
+required-features = ["three-d", "physics-rapier"]
+
+[[example]]
+name = "physics_rapier2d_smoke"
+path = "examples/physics_rapier2d_smoke.rs"
+required-features = ["physics-rapier2d"]
+
+[[example]]
+name = "physics_platformer2d_smoke"
+path = "examples/physics_platformer2d_smoke.rs"
+required-features = ["character-2d"]
+
+[[example]]
+name = "game3d_profile_smoke"
+path = "examples/game3d_profile_smoke.rs"
+required-features = ["profile-3d"]
+
+[[example]]
+name = "animated_character_smoke"
+path = "examples/animated_character_smoke.rs"
+required-features = ["profile-3d"]
+
+[[example]]
+name = "game2d_profile_smoke"
+path = "examples/game2d_profile_smoke.rs"
+required-features = ["profile-2d"]
+
+[[example]]
+name = "playable_loop_2d_smoke"
+path = "examples/playable_loop_2d_smoke.rs"
+required-features = ["profile-2d"]
 
 [lints]
 workspace = true

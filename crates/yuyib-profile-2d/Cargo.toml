@@ -1,0 +1,21 @@
+[package]
+name = "yuyib-profile-2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "High-level 2D composition profiles for Yuyib (M5)."
+
+[dependencies]
+bevy_ecs.workspace = true
+yuyib-2d = { path = "../yuyib-2d" }
+yuyib-ecs = { path = "../yuyib-ecs" }
+yuyib-game-2d = { path = "../yuyib-game-2d" }
+yuyib-image = { path = "../yuyib-image" }
+yuyib-platform = { path = "../yuyib-platform" }
+yuyib-render = { path = "../yuyib-render" }
+yuyib-render-2d = { path = "../yuyib-render-2d" }
+
+[lints]
+workspace = true

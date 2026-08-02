@@ -1,7 +1,7 @@
 use std::{
     cell::Cell,
     cell::RefCell,
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     error::Error,
     num::NonZeroU128,
     rc::Rc,
@@ -9,7 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use yuyib_platform::Window;
 use yuyib_webview::{BridgeLimits, BridgeRouter, EndpointName, PageSessionId, TypedEndpoint};
 
@@ -51,14 +51,20 @@ pub enum EditorCommand {
     WindowControl(WindowControlRequest),
     StartPlay,
     StopPlay,
+    ApplyPlayChanges,
     CargoCheck(CargoCheckRequest),
     ReadSource(SourceRequest),
+    ChangeSource(SourceChangeRequest),
+    ListSources,
     SaveSource(SourceSaveRequest),
     SetSelection(SelectionRequest),
     OpenScene(SceneOpenRequest),
     CreateScene(SceneCreateRequest),
     SaveScene(SceneSaveRequest),
     EditScene(SceneCommandRequest),
+    ExportSceneProjection,
+    ApplySceneProjection(SceneProjectionApplyRequest),
+    ApplySceneInteraction(SceneInteractionApplyRequest),
     BrowseOpenProject,
     CreateProjectInteractive(ProjectCreateRequest),
     OpenProjectPath(ProjectOpenRequest),
@@ -71,6 +77,7 @@ pub enum EditorCommand {
     SaveAssetImportSettings(AssetImportSettingsSaveRequest),
     SetPreviewOverlay(PreviewOverlayRequest),
     SetPreviewSelection(PreviewSelectionRequest),
+    SetPreviewMaterialOverride(PreviewMaterialOverrideRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,11 +88,19 @@ pub struct PreviewOverlayRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct PreviewSelectionRequest {
-    /// Currently `"mesh"` or `"material"`.
+    /// Currently `"mesh"`, `"material"`, or `"animation"`.
     pub kind: String,
-    /// Mesh/material index, or omit/`null` for the full model.
+    /// Mesh/material/animation index, or omit/`null` for the full model / no clip.
     #[serde(default)]
     pub index: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreviewMaterialOverrideRequest {
+    pub material_index: u32,
+    /// `null` or an empty map resets the preview-only override.
+    #[serde(default)]
+    pub parameters: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +241,14 @@ pub struct SourceRequest {
     pub path: String,
 }
 
+/// Unsaved buffer sync for diagnostics-only rust-analyzer (`textDocument/didChange`).
+#[derive(Debug, Deserialize)]
+pub struct SourceChangeRequest {
+    #[serde(alias = "relativePath")]
+    pub path: String,
+    pub content: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SourceSaveRequest {
     #[serde(alias = "relativePath")]
@@ -260,6 +283,22 @@ pub struct SceneCreateRequest {
 pub struct SceneSaveRequest {
     #[serde(default)]
     pub expected_revision: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct SceneProjectionApplyRequest {
+    /// When set, require matching authoring revision (stale → conflict).
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SceneInteractionApplyRequest {
+    /// When set, require matching authoring revision (stale → conflict).
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+    /// Script intents applied as one undoable transaction.
+    pub intents: Vec<yuyib_scene_interaction::SceneInteractionIntent>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -458,6 +497,14 @@ pub fn create_bridge(window: &Window) -> Result<BridgeBinding, Box<dyn Error>> {
     )?;
     register::<serde_json::Value, _>(
         &mut router,
+        "play.apply_changes",
+        &queue,
+        &dropped_commands,
+        window,
+        |_| EditorCommand::ApplyPlayChanges,
+    )?;
+    register::<serde_json::Value, _>(
+        &mut router,
         "assets.refresh",
         &queue,
         &dropped_commands,
@@ -479,6 +526,14 @@ pub fn create_bridge(window: &Window) -> Result<BridgeBinding, Box<dyn Error>> {
         &dropped_commands,
         window,
         EditorCommand::SetPreviewOverlay,
+    )?;
+    register::<PreviewMaterialOverrideRequest, _>(
+        &mut router,
+        "preview.material_override.set",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::SetPreviewMaterialOverride,
     )?;
     register::<AssetOpenRequest, _>(
         &mut router,
@@ -552,6 +607,22 @@ pub fn create_bridge(window: &Window) -> Result<BridgeBinding, Box<dyn Error>> {
         window,
         EditorCommand::ReadSource,
     )?;
+    register::<SourceChangeRequest, _>(
+        &mut router,
+        "source.change",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::ChangeSource,
+    )?;
+    register::<serde_json::Value, _>(
+        &mut router,
+        "source.list",
+        &queue,
+        &dropped_commands,
+        window,
+        |_| EditorCommand::ListSources,
+    )?;
     register::<SourceSaveRequest, _>(
         &mut router,
         "source.save",
@@ -599,6 +670,30 @@ pub fn create_bridge(window: &Window) -> Result<BridgeBinding, Box<dyn Error>> {
         &dropped_commands,
         window,
         EditorCommand::EditScene,
+    )?;
+    register::<serde_json::Value, _>(
+        &mut router,
+        "scene.projection.export",
+        &queue,
+        &dropped_commands,
+        window,
+        |_| EditorCommand::ExportSceneProjection,
+    )?;
+    register::<SceneProjectionApplyRequest, _>(
+        &mut router,
+        "scene.projection.apply",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::ApplySceneProjection,
+    )?;
+    register::<SceneInteractionApplyRequest, _>(
+        &mut router,
+        "scene.interaction.apply",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::ApplySceneInteraction,
     )?;
     register::<serde_json::Value, _>(
         &mut router,

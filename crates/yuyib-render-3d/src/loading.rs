@@ -21,15 +21,22 @@ use yuyib_gltf::{
 };
 use yuyib_model::{Model, ModelHandle, ModelMaterialPolicy, ModelMaterialPolicyError};
 use yuyib_model_assets::{
-    ModelTextureLoadError, ModelTextureLoader, ModelTextureLoaderInitError, PreparedModelTextures,
+    ModelTextureBindings, ModelTextureLoadError, ModelTextureLoader, ModelTextureLoaderInitError,
+    PreparedModelTextures,
 };
+use yuyib_2d::Texture;
+use yuyib_render_texture::TextureCache;
 use yuyib_scene::{SceneSelection, SceneSpawnError, SpawnedScene, spawn_scene};
 use yuyib_tasks::{TaskPool, TaskPoolConfig, TaskPoolCreateError};
 
 use crate::{
-    Game3dScene, Game3dSceneError, Game3dSceneStats, Game3dShading, ModelUploadBudget3d,
-    ModelUploadProgress3d,
+    Camera3d, DepthLoad, Game3dScene, Game3dSceneError, Game3dSceneStats, Game3dShading,
+    ModelUploadBudget3d, ModelUploadProgress3d, SkeletalTextureResources,
+    TexturedSkeletalSceneRenderError, TexturedSkeletalSceneRenderer3d,
+    TexturedSkeletalSceneUploadError,
 };
+use yuyib_gltf::AnimationSnapshot;
+use yuyib_render::RenderFrame;
 
 /// Policies for one high-level glTF scene load.
 #[derive(Clone, Debug)]
@@ -730,6 +737,23 @@ impl GltfSceneLoad {
                 } else {
                     None
                 };
+                // Second CPU prepare for Asset Preview / skeletal playback so
+                // Game3dScene can consume `prepared_textures` while animation
+                // keeps an independent TextureCache (cyberpunk character path).
+                let skeletal_prepared = if config.prepare_textures
+                    && scene_supports_skeletal_preview(&imported.scene)
+                {
+                    let source = models
+                        .get(model)
+                        .ok_or(GltfSceneLoadError::MissingModel(model))?;
+                    Some(
+                        texture_loader
+                            .prepare(source)
+                            .map_err(GltfSceneLoadError::Textures)?,
+                    )
+                } else {
+                    None
+                };
                 reporter.advance(1);
 
                 Ok(LoadedGltfScene {
@@ -740,6 +764,8 @@ impl GltfSceneLoad {
                     collider,
                     semantic_colliders,
                     prepared_textures,
+                    skeletal_prepared,
+                    imported_scene: imported.scene,
                     diagnostics,
                     gpu_ready: false,
                     publication_started: false,
@@ -961,6 +987,9 @@ pub struct LoadedGltfScene {
     collider: Option<StaticSceneCollider3d>,
     semantic_colliders: Vec<(GltfSceneColliderLayerId3d, StaticSceneCollider3d)>,
     prepared_textures: Option<PreparedModelTextures>,
+    /// Independent worker-prepared textures for skeletal animation preview.
+    skeletal_prepared: Option<PreparedModelTextures>,
+    imported_scene: ImportedScene,
     diagnostics: Vec<ImportDiagnostic>,
     gpu_ready: bool,
     publication_started: bool,
@@ -1160,6 +1189,20 @@ impl LoadedGltfScene {
         &self.spawned
     }
 
+    /// Imported glTF scene graph (skins, animations, morphs) retained for preview.
+    #[must_use]
+    pub const fn imported_scene(&self) -> &ImportedScene {
+        &self.imported_scene
+    }
+
+    /// Takes worker-prepared textures reserved for skeletal animation preview.
+    ///
+    /// Call once after CPU ready; returns `None` when the asset has no skins
+    /// / morphs / animations or texture preparation was disabled.
+    pub fn take_skeletal_prepared(&mut self) -> Option<PreparedModelTextures> {
+        self.skeletal_prepared.take()
+    }
+
     /// Shared model handle used by imported mesh nodes.
     #[must_use]
     pub const fn model(&self) -> ModelHandle {
@@ -1280,6 +1323,204 @@ impl LoadedGltfScene {
         renderer
             .render(frame, &mut self.world, &self.models)
             .map_err(|error| LoadedGltfSceneRenderError::Scene(Box::new(error)))
+    }
+}
+
+fn scene_supports_skeletal_preview(scene: &ImportedScene) -> bool {
+    (!scene.skins().is_empty() || !scene.morph_primitives().is_empty())
+        && !scene.animations().is_empty()
+}
+
+/// Independent GPU residency for textured skeletal / morph animation preview.
+///
+/// Owns a TextureCache separate from [`Game3dScene`] so bind-pose PBR upload and
+/// animated skinning can coexist (same pattern as playable character examples).
+pub struct GltfAnimationPreviewGpu {
+    prepared: Option<PreparedModelTextures>,
+    texture_assets: Assets<Texture>,
+    texture_cache: TextureCache,
+    bindings: Option<ModelTextureBindings>,
+    renderer: Option<TexturedSkeletalSceneRenderer3d>,
+    lighting: Option<crate::LambertLighting3d>,
+}
+
+impl GltfAnimationPreviewGpu {
+    /// Starts from worker-prepared CPU texture slots.
+    #[must_use]
+    pub fn new(prepared: PreparedModelTextures) -> Self {
+        Self {
+            prepared: Some(prepared),
+            texture_assets: Assets::new(),
+            texture_cache: TextureCache::new(),
+            bindings: None,
+            renderer: None,
+            lighting: None,
+        }
+    }
+
+    /// Sets flat key lighting applied when the skeletal renderer is built.
+    #[must_use]
+    pub const fn with_lighting(mut self, lighting: crate::LambertLighting3d) -> Self {
+        self.lighting = Some(lighting);
+        self
+    }
+
+    /// Whether textures and the skeletal renderer are resident.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        self.bindings.is_some() && self.renderer.is_some()
+    }
+
+    /// Uploads textures within a frame budget and builds the skeletal renderer.
+    ///
+    /// # Errors
+    ///
+    /// Returns texture upload or skeletal mesh upload failures.
+    pub fn prepare_for_frame(
+        &mut self,
+        frame: &RenderFrame<'_>,
+        model: &Model,
+        scene: &ImportedScene,
+        budget: ModelUploadBudget3d,
+    ) -> Result<bool, GltfAnimationPreviewGpuError> {
+        if self.bindings.is_none()
+            && let Some(prepared) = &mut self.prepared
+        {
+            prepared
+                .upload_with_budget_for_frame(
+                    frame,
+                    &mut self.texture_assets,
+                    &mut self.texture_cache,
+                    budget.maximum_texture_slots,
+                    budget.target_texture_bytes,
+                )
+                .map_err(GltfAnimationPreviewGpuError::TextureUpload)?;
+            if prepared.remaining() == 0 {
+                let completed = self
+                    .prepared
+                    .take()
+                    .expect("completed preparation remains owned");
+                self.bindings = Some(
+                    completed
+                        .finish()
+                        .map_err(GltfAnimationPreviewGpuError::PreparedIncomplete)?,
+                );
+            }
+        }
+        if self.bindings.is_some() && self.renderer.is_none() {
+            let mut renderer = TexturedSkeletalSceneRenderer3d::new_for_frame(frame, model, scene)
+                .map_err(GltfAnimationPreviewGpuError::Upload)?;
+            if let Some(lighting) = self.lighting {
+                renderer = renderer.with_lighting(lighting);
+            }
+            self.renderer = Some(renderer);
+        }
+        Ok(self.is_ready())
+    }
+
+    /// Draws the sampled skeletal / morph pose.
+    ///
+    /// # Errors
+    ///
+    /// Returns when GPU residency is incomplete or a draw fails.
+    pub fn draw(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        scene: &ImportedScene,
+        pose: &AnimationSnapshot,
+        depth_load: DepthLoad,
+    ) -> Result<(), GltfAnimationPreviewGpuError> {
+        self.draw_with_root_transform(
+            frame,
+            camera,
+            scene,
+            pose,
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            depth_load,
+        )
+    }
+
+    /// Draws the sampled pose under an explicit model-to-world root transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns when GPU residency is incomplete or a draw fails.
+    pub fn draw_with_root_transform(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        scene: &ImportedScene,
+        pose: &AnimationSnapshot,
+        root_transform: [f32; 16],
+        depth_load: DepthLoad,
+    ) -> Result<(), GltfAnimationPreviewGpuError> {
+        let renderer = self
+            .renderer
+            .as_ref()
+            .ok_or(GltfAnimationPreviewGpuError::NotReady)?;
+        let bindings = self
+            .bindings
+            .as_ref()
+            .ok_or(GltfAnimationPreviewGpuError::NotReady)?;
+        renderer
+            .draw_with_root_transform_and_depth_load(
+                frame,
+                camera,
+                scene,
+                pose,
+                SkeletalTextureResources {
+                    bindings,
+                    textures: &self.texture_cache,
+                },
+                root_transform,
+                depth_load,
+            )
+            .map_err(GltfAnimationPreviewGpuError::Draw)?;
+        Ok(())
+    }
+}
+
+/// Failure while preparing or drawing [`GltfAnimationPreviewGpu`].
+#[derive(Debug)]
+pub enum GltfAnimationPreviewGpuError {
+    /// Texture upload / finish failed.
+    TextureUpload(ModelTextureLoadError),
+    /// Prepared slots finished incompletely.
+    PreparedIncomplete(yuyib_model_assets::PreparedModelTexturesIncomplete),
+    /// Skeletal mesh upload failed.
+    Upload(TexturedSkeletalSceneUploadError),
+    /// Skeletal draw failed.
+    Draw(TexturedSkeletalSceneRenderError),
+    /// GPU residency is not complete yet.
+    NotReady,
+}
+
+impl fmt::Display for GltfAnimationPreviewGpuError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TextureUpload(error) => write!(formatter, "animation preview textures: {error}"),
+            Self::PreparedIncomplete(error) => {
+                write!(formatter, "animation preview textures incomplete: {error}")
+            }
+            Self::Upload(error) => write!(formatter, "animation preview upload: {error}"),
+            Self::Draw(error) => write!(formatter, "animation preview draw: {error}"),
+            Self::NotReady => formatter.write_str("animation preview GPU is not ready"),
+        }
+    }
+}
+
+impl Error for GltfAnimationPreviewGpuError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::TextureUpload(error) => Some(error),
+            Self::PreparedIncomplete(error) => Some(error),
+            Self::Upload(error) => Some(error),
+            Self::Draw(error) => Some(error),
+            Self::NotReady => None,
+        }
     }
 }
 

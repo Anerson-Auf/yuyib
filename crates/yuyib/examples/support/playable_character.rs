@@ -38,10 +38,6 @@ pub const CHARACTER_MODEL_SCALE: f32 = 0.3;
 /// Capsule radius paired with the street-city controller.
 pub const CHARACTER_CONTROLLER_RADIUS: f32 = 0.28;
 /// Walk-clip index in the character fixture.
-#[allow(
-    dead_code,
-    reason = "Used by street_city_m1_smoke; shared for anti-drift."
-)]
 pub const CHARACTER_WALK_CLIP: usize = 0;
 /// Headless smoke advances the walk clip by this many seconds.
 #[allow(

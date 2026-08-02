@@ -830,6 +830,13 @@ impl Material {
         self
     }
 
+    /// Clears the base-colour texture binding.
+    #[must_use]
+    pub const fn without_base_color_texture(mut self) -> Self {
+        self.base_color_texture = None;
+        self
+    }
+
     /// Associates an optional linear-space normal map.
     #[must_use]
     pub const fn with_normal_texture(mut self, binding: NormalTextureBinding) -> Self {
@@ -837,10 +844,24 @@ impl Material {
         self
     }
 
+    /// Clears the normal-map texture binding.
+    #[must_use]
+    pub const fn without_normal_texture(mut self) -> Self {
+        self.normal_texture = None;
+        self
+    }
+
     /// Associates a linear metallic-roughness texture.
     #[must_use]
     pub const fn with_metallic_roughness_texture(mut self, binding: TextureBinding) -> Self {
         self.metallic_roughness_texture = Some(binding);
+        self
+    }
+
+    /// Clears the metallic-roughness texture binding.
+    #[must_use]
+    pub const fn without_metallic_roughness_texture(mut self) -> Self {
+        self.metallic_roughness_texture = None;
         self
     }
 
@@ -855,6 +876,13 @@ impl Material {
     #[must_use]
     pub const fn with_emissive_texture(mut self, binding: TextureBinding) -> Self {
         self.emissive_texture = Some(binding);
+        self
+    }
+
+    /// Clears the emissive texture binding.
+    #[must_use]
+    pub const fn without_emissive_texture(mut self) -> Self {
+        self.emissive_texture = None;
         self
     }
 

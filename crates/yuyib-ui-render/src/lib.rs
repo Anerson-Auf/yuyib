@@ -1,12 +1,13 @@
 //! First WGPU bridge for retained Yuyib native UI.
 //!
 //! This backend converts yuyib-ui layout and semantic styles into ordered
-//! coloured rectangle fills, optional rectangular borders, and a keyboard-focus
-//! outline, then records a colour-only pass through yuyib-render. An optional
-//! rectangular clip performs CPU geometry intersection and a bounded WGPU
-//! scissor pass. It deliberately does not provide text glyphs, fonts, nested
-//! clipping, scrolling, rounded corners, images, accessibility, windows,
-//! Winit integration, HTML, CSS, `WebView`, or a UI application loop.
+//! coloured rectangle fills, optional rectangular borders, a keyboard-focus
+//! outline, and an optional vertical `ScrollView` thumb indicator, then records
+//! a colour-only pass through yuyib-render. An optional rectangular clip
+//! performs CPU geometry intersection and a bounded WGPU scissor pass. It
+//! deliberately does not provide text glyphs, fonts, scrollbar drag/inertia,
+//! rounded corners, images, accessibility, windows, Winit integration, HTML,
+//! CSS, `WebView`, or a UI application loop.
 
 #![forbid(unsafe_code)]
 
@@ -15,7 +16,10 @@ use std::{error::Error, fmt, mem::size_of};
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use yuyib_render::{RenderFrame, Renderer, wgpu};
-use yuyib_ui::{Color, UiInputState, UiLayout, UiTokens, Widget, WidgetId};
+use yuyib_ui::{
+    Color, SCROLL_THUMB_THICKNESS, UiInputState, UiLayout, UiTokens, Widget, WidgetId, WidgetKind,
+    vertical_scroll_thumb_bounds,
+};
 
 /// An explicit logical-pixel clipping rectangle for one UI render pass.
 ///
@@ -123,15 +127,17 @@ impl Error for UiBorderError {}
 pub struct UiVisualStyle {
     widget_border: Option<UiBorder>,
     focus_outline: Option<UiBorder>,
+    scroll_thumb: Option<Color>,
 }
 
 impl UiVisualStyle {
-    /// Returns no borders and no focus visual.
+    /// Returns no borders, focus visual, or scroll thumb.
     #[must_use]
     pub const fn none() -> Self {
         Self {
             widget_border: None,
             focus_outline: None,
+            scroll_thumb: None,
         }
     }
 
@@ -149,6 +155,16 @@ impl UiVisualStyle {
         self
     }
 
+    /// Sets the optional vertical `ScrollView` thumb indicator colour.
+    ///
+    /// `None` disables the thumb even when content overflows. The default style
+    /// enables a translucent text-coloured thumb.
+    #[must_use]
+    pub const fn with_scroll_thumb(mut self, color: Option<Color>) -> Self {
+        self.scroll_thumb = color;
+        self
+    }
+
     /// Returns the background-widget border configuration.
     #[must_use]
     pub const fn widget_border(self) -> Option<UiBorder> {
@@ -160,6 +176,12 @@ impl UiVisualStyle {
     pub const fn focus_outline(self) -> Option<UiBorder> {
         self.focus_outline
     }
+
+    /// Returns the scroll thumb colour when overflow indicators are enabled.
+    #[must_use]
+    pub const fn scroll_thumb(self) -> Option<Color> {
+        self.scroll_thumb
+    }
 }
 
 impl Default for UiVisualStyle {
@@ -170,6 +192,7 @@ impl Default for UiVisualStyle {
                 color: Color::rgb(250, 204, 21),
                 thickness: 2,
             }),
+            scroll_thumb: Some(Color::rgba(239, 242, 247, 140)),
         }
     }
 }
@@ -363,12 +386,13 @@ pub fn extract_draw_list_clipped(
     )
 }
 
-/// Extracts retained widget fills, optional borders, and keyboard focus visual.
+/// Extracts retained widget fills, optional borders, scroll thumbs, and
+/// keyboard focus visual.
 ///
-/// Fills and widget borders remain in depth-first retained-tree painter order.
-/// A focused button outline is appended last so it remains visible; a stale
-/// focus identifier simply produces no outline, matching the input model's
-/// stale-focus behavior.
+/// Fills, widget borders, and scroll thumbs remain in depth-first retained-tree
+/// painter order. A focused button outline is appended last so it remains
+/// visible; a stale focus identifier simply produces no outline, matching the
+/// input model's stale-focus behavior.
 ///
 /// # Errors
 ///
@@ -388,10 +412,11 @@ pub fn extract_draw_list_with_input(
 
 /// Extracts retained fills and input decorations with an optional pass clip.
 ///
-/// CPU clipping applies uniformly to backgrounds, widget borders, and the
-/// focus outline. The result keeps one explicit clip per rectangle for a
-/// later bounded WGPU scissor. This is a single pass clip, not a scrolling or
-/// nested clip-stack API.
+/// CPU clipping applies uniformly to backgrounds, widget borders, scroll
+/// thumbs, and the focus outline. The result keeps one explicit clip per
+/// rectangle for a later bounded WGPU scissor. Nested scroll viewport clips
+/// still come from [`UiLayout::clip`]; this argument is an additional pass
+/// clip, not a full clip-stack API.
 ///
 /// # Errors
 ///
@@ -411,6 +436,8 @@ pub fn extract_draw_list_with_input_clipped(
         let mut context = ExtractionContext {
             tokens,
             widget_border: visuals.widget_border,
+            scroll_thumb: visuals.scroll_thumb,
+            input,
             focused: input.focused(),
             limits,
             clip,
@@ -505,9 +532,11 @@ impl UiRenderer {
     /// Extracts input-aware decorations, uploads them, and records one overlay pass.
     ///
     /// The focused widget from `UiInputState` receives the configured visual
-    /// outline after normal tree painter order. Configure an explicit single
-    /// pass clip with [`UiInputRenderOptions::with_clip`]. This method still
-    /// has no text, scrolling, image, or window-loop responsibilities.
+    /// outline after normal tree painter order. Overflowing `ScrollView`
+    /// widgets emit a vertical thumb when [`UiVisualStyle::scroll_thumb`] is
+    /// set. Configure an explicit single pass clip with
+    /// [`UiInputRenderOptions::with_clip`]. This method still has no text,
+    /// scrollbar drag, image, or window-loop responsibilities.
     ///
     /// # Errors
     ///
@@ -656,6 +685,8 @@ impl UiRenderer {
 struct ExtractionContext<'a> {
     tokens: UiTokens,
     widget_border: Option<UiBorder>,
+    scroll_thumb: Option<Color>,
+    input: &'a UiInputState,
     focused: Option<WidgetId>,
     limits: UiRenderLimits,
     clip: Option<UiClipRect>,
@@ -706,7 +737,48 @@ fn extract_widget(
     for child in widget.children() {
         extract_widget(child, layout, context)?;
     }
+    if matches!(widget.kind(), WidgetKind::ScrollView)
+        && let Some(color) = context.scroll_thumb
+    {
+        append_scroll_thumb(widget, layout, color, clip, context)?;
+    }
     Ok(())
+}
+
+fn append_scroll_thumb(
+    widget: &Widget,
+    layout: &UiLayout,
+    color: Color,
+    clip: Option<UiClipRect>,
+    context: &mut ExtractionContext<'_>,
+) -> Result<(), UiRenderError> {
+    let Some(content) = widget.children().first() else {
+        return Ok(());
+    };
+    let viewport = layout
+        .bounds(widget.id())
+        .ok_or(UiRenderError::MissingLayoutBounds(widget.id()))?;
+    let content_bounds = layout
+        .bounds(content.id())
+        .ok_or(UiRenderError::MissingLayoutBounds(content.id()))?;
+    let Some(thumb) = vertical_scroll_thumb_bounds(
+        viewport,
+        content_bounds.size.height,
+        context.input.scroll_offset(widget.id()),
+        SCROLL_THUMB_THICKNESS,
+    ) else {
+        return Ok(());
+    };
+    push_rectangle(
+        UiRectangle {
+            widget: widget.id(),
+            bounds: thumb,
+            color,
+            clip,
+        },
+        context.limits,
+        context.rectangles,
+    )
 }
 
 fn merge_clips(first: Option<UiClipRect>, second: Option<UiClipRect>) -> Option<UiClipRect> {
@@ -1353,6 +1425,122 @@ mod tests {
                 layout.bounds(id("scroll")).expect("viewport")
             ))
         );
+    }
+
+    fn overflow_scroll_tree() -> yuyib_ui::UiTree {
+        UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(
+                Widget::scroll_view(id("scroll"))
+                    .with_constraints(
+                        yuyib_ui::LayoutConstraints::auto()
+                            .with_width(yuyib_ui::Dimension::Points(100))
+                            .with_height(yuyib_ui::Dimension::Points(40)),
+                    )
+                    .with_children(vec![
+                        Widget::container(id("content"), LayoutKind::Column)
+                            .with_constraints(
+                                yuyib_ui::LayoutConstraints::auto()
+                                    .with_width(yuyib_ui::Dimension::Points(100))
+                                    .with_height(yuyib_ui::Dimension::Points(120)),
+                            )
+                            .with_children(vec![Widget::button(id("item"), "Item")]),
+                    ]),
+            )
+            .build()
+            .expect("overflow scroll tree")
+    }
+
+    #[test]
+    fn scroll_view_thumb_emitted_for_overflow_on_input_extract() {
+        let tree = overflow_scroll_tree();
+        let mut state = UiInputState::default();
+        let layout = layout_with_input_state(&tree, Size::new(100, 100), &state).expect("layout");
+        yuyib_ui::handle_scroll_input(&tree, &layout, &mut state, yuyib_ui::Point::new(2, 2), -40)
+            .expect("scroll");
+        let layout = layout_with_input_state(&tree, Size::new(100, 100), &state).expect("scrolled");
+        let list = extract_draw_list_with_input(
+            tree.root(),
+            &layout,
+            UiTokens::default(),
+            &state,
+            UiVisualStyle::default(),
+            UiRenderLimits::default(),
+        )
+        .expect("draw list");
+        let thumb_color = UiVisualStyle::default().scroll_thumb().expect("default thumb");
+        let thumb = list
+            .rectangles()
+            .iter()
+            .find(|rectangle| rectangle.widget == id("scroll") && rectangle.color == thumb_color)
+            .expect("scroll thumb");
+        let viewport = layout.bounds(id("scroll")).expect("viewport");
+        let expected = vertical_scroll_thumb_bounds(
+            viewport,
+            layout.bounds(id("content")).expect("content").size.height,
+            state.scroll_offset(id("scroll")),
+            SCROLL_THUMB_THICKNESS,
+        )
+        .expect("thumb geometry");
+        assert_eq!(thumb.bounds, expected);
+        assert_eq!(thumb.clip, Some(UiClipRect::new(viewport)));
+    }
+
+    #[test]
+    fn scroll_view_thumb_can_be_disabled_and_absent_without_overflow() {
+        let tree = overflow_scroll_tree();
+        let state = UiInputState::default();
+        let layout = layout_with_input_state(&tree, Size::new(100, 100), &state).expect("layout");
+        let disabled = extract_draw_list_with_input(
+            tree.root(),
+            &layout,
+            UiTokens::default(),
+            &state,
+            UiVisualStyle::default().with_scroll_thumb(None),
+            UiRenderLimits::default(),
+        )
+        .expect("disabled");
+        assert!(
+            disabled
+                .rectangles()
+                .iter()
+                .all(|rectangle| rectangle.widget != id("scroll")
+                    || rectangle.color != Color::rgba(239, 242, 247, 140))
+        );
+
+        let no_overflow = UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(
+                Widget::scroll_view(id("scroll"))
+                    .with_constraints(
+                        yuyib_ui::LayoutConstraints::auto()
+                            .with_width(yuyib_ui::Dimension::Points(100))
+                            .with_height(yuyib_ui::Dimension::Points(40)),
+                    )
+                    .with_children(vec![
+                        Widget::container(id("content"), LayoutKind::Column)
+                            .with_constraints(
+                                yuyib_ui::LayoutConstraints::auto()
+                                    .with_height(yuyib_ui::Dimension::Points(20)),
+                            )
+                            .with_children(vec![Widget::button(id("item"), "Item")]),
+                    ]),
+            )
+            .build()
+            .expect("fit tree");
+        let fit_layout =
+            layout_with_input_state(&no_overflow, Size::new(100, 100), &state).expect("fit");
+        let fit = extract_draw_list_with_input(
+            no_overflow.root(),
+            &fit_layout,
+            UiTokens::default(),
+            &state,
+            UiVisualStyle::default(),
+            UiRenderLimits::default(),
+        )
+        .expect("fit list");
+        assert!(fit.rectangles().iter().all(|rectangle| {
+            rectangle.widget != id("scroll")
+                || rectangle.color != UiVisualStyle::default().scroll_thumb().unwrap()
+        }));
     }
 
     #[test]

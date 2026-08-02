@@ -1,0 +1,16 @@
+[package]
+name = "yuyib-scene-interaction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Intent bridge between full Rust scripts and authored/runtime scene objects."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+yuyib-authoring = { path = "../yuyib-authoring", version = "0.1.0" }
+
+[lints]
+workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "yuyib-profile-3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "High-level 3D composition profiles for Yuyib (M5)."
+
+[features]
+default = []
+## Opt-in Rapier dynamics overlay (`DynamicsOverlay3d` active path).
+rapier = ["yuyib-physics/rapier"]
+
+[dependencies]
+yuyib-assets = { path = "../yuyib-assets" }
+yuyib-character-3d = { path = "../yuyib-character-3d" }
+yuyib-game-3d = { path = "../yuyib-game-3d" }
+yuyib-gltf = { path = "../yuyib-gltf" }
+yuyib-input = { path = "../yuyib-input" }
+yuyib-model = { path = "../yuyib-model" }
+yuyib-model-assets = { path = "../yuyib-model-assets" }
+yuyib-physics = { path = "../yuyib-physics" }
+yuyib-platform = { path = "../yuyib-platform" }
+yuyib-render = { path = "../yuyib-render" }
+yuyib-render-3d = { path = "../yuyib-render-3d" }
+yuyib-tasks = { path = "../yuyib-tasks" }
+
+[lints]
+workspace = true

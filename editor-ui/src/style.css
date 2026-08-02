@@ -901,9 +901,17 @@ body.hosted-mode .preview-summary { background: #0e131b; }
 .code-tree-row { display: flex; align-items: center; gap: 5px; width: 100%; height: 23px; padding: 0 7px; color: #8b96a6; text-align: left; font-size: 9px; }
 .code-tree-row:hover { background: #151b25; color: #d3dae4; }
 .code-tree-row.is-selected { background: #192330; color: #e2e8ef; }
-.code-tree-row svg { width: 11px; height: 11px; color: #566276; }
+.code-tree-row svg { width: 11px; height: 11px; color: #566276; flex-shrink: 0; }
 .code-tree-row.is-open svg { transform: rotate(90deg); }
-.code-depth-1 { padding-left: 22px; }
+.code-tree-row .rust-file-icon { flex-shrink: 0; }
+.code-tree-group { display: block; }
+.code-tree-children { display: none; }
+.code-tree-group.is-expanded > .code-tree-children { display: block; }
+/* Fallback depth classes if a row is rendered flat. */
+.code-depth-1 { padding-left: 21px; }
+.code-depth-2 { padding-left: 35px; }
+.code-depth-3 { padding-left: 49px; }
+.code-depth-4 { padding-left: 63px; }
 .rust-file-icon { color: #d49a60; font-family: "Cascadia Code", monospace; font-size: 8px; font-weight: 700; }
 .scene-file-icon { color: #65d7ef; font-family: "Cascadia Code", monospace; font-size: 8px; font-weight: 700; }
 .code-dirty-dot { margin-left: auto; color: var(--orange); font-size: 6px; }

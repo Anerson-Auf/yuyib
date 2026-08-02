@@ -5,6 +5,8 @@ members = [
     "crates/yuyib-ecs",
     "crates/yuyib-authoring",
     "crates/yuyib-authoring-yuyib",
+    "crates/yuyib-scene-projection",
+    "crates/yuyib-scene-interaction",
     "crates/yuyib-editor-core",
     "crates/yuyib-editor",
     "crates/yuyib-play",
@@ -28,6 +30,9 @@ members = [
     "crates/yuyib-game-3d-authoring",
     "crates/yuyib-gltf-authoring",
     "crates/yuyib-character-3d",
+    "crates/yuyib-character-2d",
+    "crates/yuyib-profile-2d",
+    "crates/yuyib-profile-3d",
     "crates/yuyib-gameplay",
     "crates/yuyib-input",
     "crates/yuyib-vmf",
@@ -61,6 +66,7 @@ repository = "https://github.com/Anerson-Auf/yuyib"
 bevy_ecs = "0.19.0"
 pollster = "0.4.0"
 rapier3d = "0.34.0"
+rapier2d = "0.34.0"
 wgpu = "30.0.0"
 winit = "0.30.12"
 

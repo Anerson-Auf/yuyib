@@ -16,8 +16,9 @@
 //! It remains detection-only: response and trigger semantics belong to the
 //! caller.
 //!
-//! Dynamic rigid bodies ship behind the M4 [`backend`] facade (`rapier` feature).
-//! Playable character motion continues to use [`TriangleMesh3d`] static queries.
+//! Dynamic rigid bodies ship behind the M4 [`backend`] facade (`rapier` / `rapier2d`
+//! features). Playable 3D character motion continues to use [`TriangleMesh3d`]
+//! static queries.
 //!
 //! ```
 //! use yuyib_physics::{Body2d, Circle, Vec2, collide_circles};
@@ -33,12 +34,17 @@
 mod backend;
 
 pub use backend::{
-    BodyId3d, CollisionGroups3d, ContactPair3d, DynamicsBackend3d, DynamicsBackendError3d,
-    DynamicsFixedStepper3d, DynamicsWorldConfig3d, JointId3d,
+    BodyId2d, BodyId3d, CharacterMoveConfig2d, CharacterMoveResult2d, CollisionGroups2d,
+    CollisionGroups3d, ContactPair2d, ContactPair3d, DynamicsBackend2d, DynamicsBackend3d,
+    DynamicsBackendError2d, DynamicsBackendError3d, DynamicsFixedStepper2d, DynamicsFixedStepper3d,
+    DynamicsWorldConfig2d, DynamicsWorldConfig3d, JointId2d, JointId3d,
 };
 
 #[cfg(feature = "rapier")]
 pub use backend::RapierDynamicsWorld3d;
+
+#[cfg(feature = "rapier2d")]
+pub use backend::RapierDynamicsWorld2d;
 
 use std::fmt;
 
@@ -436,18 +442,45 @@ impl TriangleMesh3d {
     /// movement. This is discrete penetration resolution, not CCD: callers
     /// must keep a character's fixed time step and speed bounded.
     ///
+    /// Walkable ground uses [`default_max_walkable_slope_radians`]. Prefer
+    /// [`Self::resolve_sphere_with_slope`] when the game needs a custom max
+    /// slope.
+    ///
     /// # Errors
     ///
-    /// Returns [`PhysicsConfigError`] for a non-finite position or invalid
-    /// radius, and [`TriangleMeshQueryError`] for an invalid iteration budget.
+    /// Returns [`TriangleMeshQueryError`] for a non-finite position, invalid
+    /// radius, or an invalid iteration budget.
     pub fn resolve_sphere(
         &self,
         position: Vec3,
         radius: f32,
         iterations: usize,
     ) -> Result<SphereMeshResolution3d, TriangleMeshQueryError> {
+        self.resolve_sphere_with_slope(
+            position,
+            radius,
+            iterations,
+            default_max_walkable_slope_radians(),
+        )
+    }
+
+    /// Like [`Self::resolve_sphere`], but treats contacts as walkable ground
+    /// only when the contact normal is within `max_slope_radians` of world up
+    /// (`normal.y >= cos(max_slope_radians)`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TriangleMeshQueryError`] for invalid sphere input, a zero
+    /// iteration budget, or an invalid slope angle.
+    pub fn resolve_sphere_with_slope(
+        &self,
+        position: Vec3,
+        radius: f32,
+        iterations: usize,
+        max_slope_radians: f32,
+    ) -> Result<SphereMeshResolution3d, TriangleMeshQueryError> {
         Ok(self
-            .resolve_sphere_with_stats(position, radius, iterations)?
+            .resolve_sphere_with_slope_and_stats(position, radius, iterations, max_slope_radians)?
             .resolution)
     }
 
@@ -466,6 +499,27 @@ impl TriangleMesh3d {
         radius: f32,
         iterations: usize,
     ) -> Result<TriangleMeshSphereResolutionResult3d, TriangleMeshQueryError> {
+        self.resolve_sphere_with_slope_and_stats(
+            position,
+            radius,
+            iterations,
+            default_max_walkable_slope_radians(),
+        )
+    }
+
+    /// Like [`Self::resolve_sphere_with_stats`] with an explicit max walkable slope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TriangleMeshQueryError`] under the same conditions as
+    /// [`Self::resolve_sphere_with_slope`].
+    pub fn resolve_sphere_with_slope_and_stats(
+        &self,
+        position: Vec3,
+        radius: f32,
+        iterations: usize,
+        max_slope_radians: f32,
+    ) -> Result<TriangleMeshSphereResolutionResult3d, TriangleMeshQueryError> {
         if !finite_vec3(position) {
             return Err(TriangleMeshQueryError::NonFinitePosition);
         }
@@ -475,6 +529,7 @@ impl TriangleMesh3d {
         if iterations == 0 {
             return Err(TriangleMeshQueryError::InvalidIterations);
         }
+        let min_walkable_normal_y = min_walkable_normal_y_from_slope(max_slope_radians)?;
         let mut resolved = position;
         let mut ground_contact = false;
         let mut contacts = 0;
@@ -518,7 +573,7 @@ impl TriangleMesh3d {
                             };
                             let distance = distance_squared.sqrt();
                             resolved = resolved + normal * (radius - distance + 0.0005);
-                            ground_contact |= normal.y > 0.55;
+                            ground_contact |= normal.y >= min_walkable_normal_y;
                             contacts += 1;
                             changed = true;
                         }
@@ -677,6 +732,19 @@ impl fmt::Display for TriangleMeshError {
 }
 impl std::error::Error for TriangleMeshError {}
 
+/// Historical walkable normal threshold (`normal.y`) used before configurable slope.
+///
+/// Corresponds to a maximum walkable slope of about 56.6° from world up
+/// (`acos(0.55)`). Kept as the default so existing corridor playables stay
+/// behaviour-compatible.
+pub const DEFAULT_MIN_WALKABLE_NORMAL_Y: f32 = 0.55;
+
+/// Default max walkable slope matching [`DEFAULT_MIN_WALKABLE_NORMAL_Y`].
+#[must_use]
+pub fn default_max_walkable_slope_radians() -> f32 {
+    DEFAULT_MIN_WALKABLE_NORMAL_Y.acos()
+}
+
 /// Result of resolving a character-sized sphere against [`TriangleMesh3d`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphereMeshResolution3d {
@@ -697,6 +765,8 @@ pub enum TriangleMeshQueryError {
     InvalidRadius(f32),
     /// Requested contact-resolution iteration count was zero.
     InvalidIterations,
+    /// Max walkable slope was non-finite, non-positive, or greater than `π/2`.
+    InvalidMaxWalkableSlope(f32),
 }
 impl fmt::Display for TriangleMeshQueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -706,6 +776,10 @@ impl fmt::Display for TriangleMeshQueryError {
                 write!(f, "sphere radius must be finite and positive, got {radius}")
             }
             Self::InvalidIterations => f.write_str("collision iterations must be positive"),
+            Self::InvalidMaxWalkableSlope(slope) => write!(
+                f,
+                "max walkable slope must be finite and in (0, π/2], got {slope}"
+            ),
         }
     }
 }
@@ -2908,6 +2982,20 @@ fn finite_vec3(value: Vec3) -> bool {
     value.x.is_finite() && value.y.is_finite() && value.z.is_finite()
 }
 
+fn min_walkable_normal_y_from_slope(
+    max_slope_radians: f32,
+) -> Result<f32, TriangleMeshQueryError> {
+    if !max_slope_radians.is_finite()
+        || max_slope_radians <= 0.0
+        || max_slope_radians > std::f32::consts::FRAC_PI_2
+    {
+        return Err(TriangleMeshQueryError::InvalidMaxWalkableSlope(
+            max_slope_radians,
+        ));
+    }
+    Ok(max_slope_radians.cos())
+}
+
 impl TriangleAabb3d {
     fn from_face([first, second, third]: [Vec3; 3]) -> Self {
         Self {
@@ -3606,6 +3694,7 @@ mod tests {
         radius: f32,
         iterations: usize,
     ) -> SphereMeshResolution3d {
+        let min_walkable_normal_y = DEFAULT_MIN_WALKABLE_NORMAL_Y;
         let mut resolved = position;
         let mut ground_contact = false;
         let mut contacts = 0;
@@ -3628,7 +3717,7 @@ mod tests {
                 };
                 let distance = distance_squared.sqrt();
                 resolved = resolved + normal * (radius - distance + 0.0005);
-                ground_contact |= normal.y > 0.55;
+                ground_contact |= normal.y >= min_walkable_normal_y;
                 contacts += 1;
                 changed = true;
             }
@@ -3641,6 +3730,88 @@ mod tests {
             ground_contact,
             contacts,
         }
+    }
+
+    #[test]
+    fn resolve_sphere_slope_floor_wall_and_ramp() {
+        let floor = TriangleMesh3d::from_indexed(
+            &[
+                Vec3::new(-2.0, 0.0, -2.0),
+                Vec3::new(2.0, 0.0, -2.0),
+                Vec3::new(2.0, 0.0, 2.0),
+                Vec3::new(-2.0, 0.0, 2.0),
+            ],
+            &[0, 2, 1, 0, 3, 2],
+        )
+        .expect("floor");
+        let wall = TriangleMesh3d::from_indexed(
+            &[
+                Vec3::new(1.0, 0.0, -2.0),
+                Vec3::new(1.0, 3.0, -2.0),
+                Vec3::new(1.0, 3.0, 2.0),
+                Vec3::new(1.0, 0.0, 2.0),
+            ],
+            &[0, 1, 2, 0, 2, 3],
+        )
+        .expect("wall");
+        // 30° ramp: rise/run = tan(30°), normal.y = cos(30°) ≈ 0.866.
+        let ramp_angle = 30.0_f32.to_radians();
+        let run = 4.0_f32;
+        let rise = run * ramp_angle.tan();
+        let ramp = TriangleMesh3d::from_indexed(
+            &[
+                Vec3::new(-2.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(2.0, rise, run),
+                Vec3::new(-2.0, rise, run),
+            ],
+            // Winding must face upward so contact normals count as walkable.
+            &[0, 2, 1, 0, 3, 2],
+        )
+        .expect("ramp");
+
+        let on_floor = floor
+            .resolve_sphere_with_slope(Vec3::new(0.0, 0.1, 0.0), 0.5, 4, 45.0_f32.to_radians())
+            .expect("floor query");
+        assert!(on_floor.ground_contact, "flat floor must be walkable");
+
+        let against_wall = wall
+            .resolve_sphere_with_slope(Vec3::new(0.7, 1.0, 0.0), 0.5, 4, 60.0_f32.to_radians())
+            .expect("wall query");
+        assert!(against_wall.contacts > 0, "wall should push the sphere");
+        assert!(
+            !against_wall.ground_contact,
+            "vertical wall must not count as ground"
+        );
+
+        let steep_limit = 20.0_f32.to_radians();
+        let walkable_limit = 35.0_f32.to_radians();
+        // Centre slightly above the ramp surface at z=1 so contact normals face up.
+        let surface_y = 1.0 * ramp_angle.tan();
+        let ramp_probe = Vec3::new(0.0, surface_y + 0.15, 1.0);
+        let on_ramp_steep = ramp
+            .resolve_sphere_with_slope(ramp_probe, 0.4, 6, steep_limit)
+            .expect("ramp steep");
+        let on_ramp_ok = ramp
+            .resolve_sphere_with_slope(ramp_probe, 0.4, 6, walkable_limit)
+            .expect("ramp ok");
+        assert!(
+            on_ramp_steep.contacts > 0 && !on_ramp_steep.ground_contact,
+            "30° ramp must not be walkable at 20° max slope (contacts={}, grounded={})",
+            on_ramp_steep.contacts,
+            on_ramp_steep.ground_contact
+        );
+        assert!(
+            on_ramp_ok.ground_contact,
+            "30° ramp must be walkable at 35° max slope"
+        );
+        assert!(
+            matches!(
+                floor.resolve_sphere_with_slope(Vec3::ZERO, 0.5, 4, 0.0),
+                Err(TriangleMeshQueryError::InvalidMaxWalkableSlope(_))
+            ),
+            "zero slope must be rejected"
+        );
     }
 
     #[test]

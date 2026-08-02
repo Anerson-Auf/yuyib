@@ -87,6 +87,20 @@ impl MaterialFactorPatch {
         self
     }
 
+    /// Overrides only the metallic multiplier.
+    #[must_use]
+    pub const fn with_metallic_factor(mut self, metallic: f32) -> Self {
+        self.metallic_factor = Some(metallic);
+        self
+    }
+
+    /// Overrides only the roughness multiplier.
+    #[must_use]
+    pub const fn with_roughness_factor(mut self, roughness: f32) -> Self {
+        self.roughness_factor = Some(roughness);
+        self
+    }
+
     /// Overrides the linear emissive RGB multiplier.
     #[must_use]
     pub const fn with_emissive_factor(mut self, factor: Vec3) -> Self {
@@ -101,7 +115,9 @@ impl MaterialFactorPatch {
         self
     }
 
-    fn apply(self, material: Material) -> Material {
+    /// Applies this factor-only patch to an existing material.
+    #[must_use]
+    pub fn apply_to(self, material: Material) -> Material {
         let mut material = material;
         if let Some(factor) = self.base_color_factor {
             material = material.with_base_color_factor(factor);
@@ -465,175 +481,256 @@ fn apply_in_place(
 ) -> Result<ModelMaterialPolicyReport, ModelMaterialPolicyError> {
     let mut diagnostics = Vec::new();
     for op in &policy.ops {
-        match op {
-            ModelMaterialPolicyOp::PatchNamed {
-                name,
-                patch,
-                optional,
-            } => match material_index_by_name(model, name) {
-                Ok(index) => {
-                    let before = model.materials()[index.get()].clone();
-                    let after = patch.apply(before);
-                    model.replace_material(index, after)?;
-                    diagnostics.push(ImportDiagnostic {
-                        code: "material-policy-patched".to_owned(),
-                        message: format!("patched material `{name}` factors via explicit policy"),
-                        severity: ImportDiagnosticSeverity::Info,
-                    });
-                }
-                Err(ModelMaterialPolicyError::MissingNamedMaterial { name }) if *optional => {
-                    diagnostics.push(ImportDiagnostic {
-                        code: "material-policy-patch-skipped".to_owned(),
-                        message: format!(
-                            "optional material patch skipped: `{name}` not present in import"
-                        ),
-                        severity: ImportDiagnosticSeverity::Warning,
-                    });
-                }
-                Err(error) => return Err(error),
-            },
-            ModelMaterialPolicyOp::RemapToNamed {
-                targets,
-                material_name,
-            } => {
-                let index = material_index_by_name(model, material_name)?;
-                for target in targets {
-                    model.set_primitive_material(target.mesh, target.primitive, index)?;
-                }
-                diagnostics.push(ImportDiagnostic {
-                    code: "material-policy-remapped".to_owned(),
-                    message: format!(
-                        "remapped {} primitive(s) to material `{material_name}`",
-                        targets.len()
-                    ),
-                    severity: ImportDiagnosticSeverity::Info,
-                });
-            }
-            ModelMaterialPolicyOp::RemapUsersOfNamed { from_name, to_name } => {
-                let from = material_index_by_name(model, from_name)?;
-                let to = material_index_by_name(model, to_name)?;
-                let targets = primitives_using_material(model, from);
-                for target in &targets {
-                    model.set_primitive_material(target.mesh, target.primitive, to)?;
-                }
-                diagnostics.push(ImportDiagnostic {
-                    code: "material-policy-remapped-users".to_owned(),
-                    message: format!(
-                        "remapped {} primitive(s) from `{from_name}` to `{to_name}`",
-                        targets.len()
-                    ),
-                    severity: ImportDiagnosticSeverity::Info,
-                });
-            }
-            ModelMaterialPolicyOp::RemapNamedMeshesToNamed {
-                mesh_names,
-                material_name,
-            } => {
-                let index = material_index_by_name(model, material_name)?;
-                let targets = primitives_of_named_meshes(model, mesh_names)?;
-                for target in &targets {
-                    model.set_primitive_material(target.mesh, target.primitive, index)?;
-                }
-                diagnostics.push(ImportDiagnostic {
-                    code: "material-policy-remapped-named-meshes".to_owned(),
-                    message: format!(
-                        "remapped {} primitive(s) on {} named mesh(es) to material `{material_name}`",
-                        targets.len(),
-                        mesh_names.len()
-                    ),
-                    severity: ImportDiagnosticSeverity::Info,
-                });
-            }
-            ModelMaterialPolicyOp::AddAndRemap { material, targets } => {
-                let name = material
-                    .name()
-                    .unwrap_or("unnamed-policy-material")
-                    .to_owned();
-                let index = model.add_material(material.clone())?;
-                for target in targets {
-                    model.set_primitive_material(target.mesh, target.primitive, index)?;
-                }
-                diagnostics.push(ImportDiagnostic {
-                    code: "material-policy-added".to_owned(),
-                    message: format!(
-                        "added material `{name}` and remapped {} primitive(s)",
-                        targets.len()
-                    ),
-                    severity: ImportDiagnosticSeverity::Info,
-                });
-            }
-            ModelMaterialPolicyOp::AddAndRemapUsersOfNamed {
-                from_name,
-                material,
-            } => {
-                let from = material_index_by_name(model, from_name)?;
-                let targets = primitives_using_material(model, from);
-                let name = material
-                    .name()
-                    .unwrap_or("unnamed-policy-material")
-                    .to_owned();
-                let index = model.add_material(material.clone())?;
-                for target in &targets {
-                    model.set_primitive_material(target.mesh, target.primitive, index)?;
-                }
-                diagnostics.push(ImportDiagnostic {
-                    code: "material-policy-added-users".to_owned(),
-                    message: format!(
-                        "added material `{name}` and remapped {} user(s) of `{from_name}`",
-                        targets.len()
-                    ),
-                    severity: ImportDiagnosticSeverity::Info,
-                });
-            }
-            ModelMaterialPolicyOp::AddAndRemapNamedMeshes {
-                material,
-                mesh_names,
-            } => {
-                let targets = primitives_of_named_meshes(model, mesh_names)?;
-                let name = material
-                    .name()
-                    .unwrap_or("unnamed-policy-material")
-                    .to_owned();
-                let index = model.add_material(material.clone())?;
-                for target in &targets {
-                    model.set_primitive_material(target.mesh, target.primitive, index)?;
-                }
-                diagnostics.push(ImportDiagnostic {
-                    code: "material-policy-added-named-meshes".to_owned(),
-                    message: format!(
-                        "added material `{name}` and remapped {} primitive(s) on {} named mesh(es)",
-                        targets.len(),
-                        mesh_names.len()
-                    ),
-                    severity: ImportDiagnosticSeverity::Info,
-                });
-            }
-        }
+        apply_policy_op(op, model, &mut diagnostics)?;
     }
+    apply_unbound_fallback(policy, model, &mut diagnostics)?;
+    Ok(ModelMaterialPolicyReport { diagnostics })
+}
 
-    if let Some(fallback) = &policy.unbound_primitive_fallback {
-        let unbound = unbound_primitives(model);
-        if !unbound.is_empty() {
-            let name = fallback
-                .name()
-                .unwrap_or("unnamed-unbound-fallback")
-                .to_owned();
-            let index = model.add_material(fallback.clone())?;
-            for target in &unbound {
-                model.set_primitive_material(target.mesh, target.primitive, index)?;
-            }
+fn apply_policy_op(
+    op: &ModelMaterialPolicyOp,
+    model: &mut Model,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    match op {
+        ModelMaterialPolicyOp::PatchNamed {
+            name,
+            patch,
+            optional,
+        } => apply_patch_named(model, name, patch, *optional, diagnostics),
+        ModelMaterialPolicyOp::RemapToNamed {
+            targets,
+            material_name,
+        } => apply_remap_to_named(model, targets, material_name, diagnostics),
+        ModelMaterialPolicyOp::RemapUsersOfNamed { from_name, to_name } => {
+            apply_remap_users_of_named(model, from_name, to_name, diagnostics)
+        }
+        ModelMaterialPolicyOp::RemapNamedMeshesToNamed {
+            mesh_names,
+            material_name,
+        } => apply_remap_named_meshes_to_named(model, mesh_names, material_name, diagnostics),
+        ModelMaterialPolicyOp::AddAndRemap { material, targets } => {
+            apply_add_and_remap(model, material, targets, diagnostics)
+        }
+        ModelMaterialPolicyOp::AddAndRemapUsersOfNamed {
+            from_name,
+            material,
+        } => apply_add_and_remap_users_of_named(model, from_name, material, diagnostics),
+        ModelMaterialPolicyOp::AddAndRemapNamedMeshes {
+            material,
+            mesh_names,
+        } => apply_add_and_remap_named_meshes(model, material, mesh_names, diagnostics),
+    }
+}
+
+fn apply_patch_named(
+    model: &mut Model,
+    name: &str,
+    patch: &MaterialFactorPatch,
+    optional: bool,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    match material_index_by_name(model, name) {
+        Ok(index) => {
+            let before = model.materials()[index.get()].clone();
+            let after = patch.apply_to(before);
+            model.replace_material(index, after)?;
             diagnostics.push(ImportDiagnostic {
-                code: "material-policy-unbound-fallback".to_owned(),
+                code: "material-policy-patched".to_owned(),
+                message: format!("patched material `{name}` factors via explicit policy"),
+                severity: ImportDiagnosticSeverity::Info,
+            });
+            Ok(())
+        }
+        Err(ModelMaterialPolicyError::MissingNamedMaterial { name }) if optional => {
+            diagnostics.push(ImportDiagnostic {
+                code: "material-policy-patch-skipped".to_owned(),
                 message: format!(
-                    "assigned explicit fallback `{name}` to {} unbound primitive(s)",
-                    unbound.len()
+                    "optional material patch skipped: `{name}` not present in import"
                 ),
                 severity: ImportDiagnosticSeverity::Warning,
             });
+            Ok(())
         }
+        Err(error) => Err(error),
     }
+}
 
-    Ok(ModelMaterialPolicyReport { diagnostics })
+fn apply_remap_to_named(
+    model: &mut Model,
+    targets: &[MeshPrimitiveRef],
+    material_name: &str,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    let index = material_index_by_name(model, material_name)?;
+    for target in targets {
+        model.set_primitive_material(target.mesh, target.primitive, index)?;
+    }
+    diagnostics.push(ImportDiagnostic {
+        code: "material-policy-remapped".to_owned(),
+        message: format!(
+            "remapped {} primitive(s) to material `{material_name}`",
+            targets.len()
+        ),
+        severity: ImportDiagnosticSeverity::Info,
+    });
+    Ok(())
+}
+
+fn apply_remap_users_of_named(
+    model: &mut Model,
+    from_name: &str,
+    to_name: &str,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    let from = material_index_by_name(model, from_name)?;
+    let to = material_index_by_name(model, to_name)?;
+    let targets = primitives_using_material(model, from);
+    for target in &targets {
+        model.set_primitive_material(target.mesh, target.primitive, to)?;
+    }
+    diagnostics.push(ImportDiagnostic {
+        code: "material-policy-remapped-users".to_owned(),
+        message: format!(
+            "remapped {} primitive(s) from `{from_name}` to `{to_name}`",
+            targets.len()
+        ),
+        severity: ImportDiagnosticSeverity::Info,
+    });
+    Ok(())
+}
+
+fn apply_remap_named_meshes_to_named(
+    model: &mut Model,
+    mesh_names: &[String],
+    material_name: &str,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    let index = material_index_by_name(model, material_name)?;
+    let targets = primitives_of_named_meshes(model, mesh_names)?;
+    for target in &targets {
+        model.set_primitive_material(target.mesh, target.primitive, index)?;
+    }
+    diagnostics.push(ImportDiagnostic {
+        code: "material-policy-remapped-named-meshes".to_owned(),
+        message: format!(
+            "remapped {} primitive(s) on {} named mesh(es) to material `{material_name}`",
+            targets.len(),
+            mesh_names.len()
+        ),
+        severity: ImportDiagnosticSeverity::Info,
+    });
+    Ok(())
+}
+
+fn apply_add_and_remap(
+    model: &mut Model,
+    material: &Material,
+    targets: &[MeshPrimitiveRef],
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    let name = material
+        .name()
+        .unwrap_or("unnamed-policy-material")
+        .to_owned();
+    let index = model.add_material(material.clone())?;
+    for target in targets {
+        model.set_primitive_material(target.mesh, target.primitive, index)?;
+    }
+    diagnostics.push(ImportDiagnostic {
+        code: "material-policy-added".to_owned(),
+        message: format!(
+            "added material `{name}` and remapped {} primitive(s)",
+            targets.len()
+        ),
+        severity: ImportDiagnosticSeverity::Info,
+    });
+    Ok(())
+}
+
+fn apply_add_and_remap_users_of_named(
+    model: &mut Model,
+    from_name: &str,
+    material: &Material,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    let from = material_index_by_name(model, from_name)?;
+    let targets = primitives_using_material(model, from);
+    let name = material
+        .name()
+        .unwrap_or("unnamed-policy-material")
+        .to_owned();
+    let index = model.add_material(material.clone())?;
+    for target in &targets {
+        model.set_primitive_material(target.mesh, target.primitive, index)?;
+    }
+    diagnostics.push(ImportDiagnostic {
+        code: "material-policy-added-users".to_owned(),
+        message: format!(
+            "added material `{name}` and remapped {} user(s) of `{from_name}`",
+            targets.len()
+        ),
+        severity: ImportDiagnosticSeverity::Info,
+    });
+    Ok(())
+}
+
+fn apply_add_and_remap_named_meshes(
+    model: &mut Model,
+    material: &Material,
+    mesh_names: &[String],
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    let targets = primitives_of_named_meshes(model, mesh_names)?;
+    let name = material
+        .name()
+        .unwrap_or("unnamed-policy-material")
+        .to_owned();
+    let index = model.add_material(material.clone())?;
+    for target in &targets {
+        model.set_primitive_material(target.mesh, target.primitive, index)?;
+    }
+    diagnostics.push(ImportDiagnostic {
+        code: "material-policy-added-named-meshes".to_owned(),
+        message: format!(
+            "added material `{name}` and remapped {} primitive(s) on {} named mesh(es)",
+            targets.len(),
+            mesh_names.len()
+        ),
+        severity: ImportDiagnosticSeverity::Info,
+    });
+    Ok(())
+}
+
+fn apply_unbound_fallback(
+    policy: &ModelMaterialPolicy,
+    model: &mut Model,
+    diagnostics: &mut Vec<ImportDiagnostic>,
+) -> Result<(), ModelMaterialPolicyError> {
+    let Some(fallback) = &policy.unbound_primitive_fallback else {
+        return Ok(());
+    };
+    let unbound = unbound_primitives(model);
+    if unbound.is_empty() {
+        return Ok(());
+    }
+    let name = fallback
+        .name()
+        .unwrap_or("unnamed-unbound-fallback")
+        .to_owned();
+    let index = model.add_material(fallback.clone())?;
+    for target in &unbound {
+        model.set_primitive_material(target.mesh, target.primitive, index)?;
+    }
+    diagnostics.push(ImportDiagnostic {
+        code: "material-policy-unbound-fallback".to_owned(),
+        message: format!(
+            "assigned explicit fallback `{name}` to {} unbound primitive(s)",
+            unbound.len()
+        ),
+        severity: ImportDiagnosticSeverity::Warning,
+    });
+    Ok(())
 }
 
 fn material_index_by_name(
@@ -865,12 +962,10 @@ mod tests {
             model.meshes()[1].primitives()[0].material(),
             Some(MaterialIndex::new(3))
         );
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code == "material-policy-unbound-fallback")
-        );
+        assert!(report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "material-policy-unbound-fallback"));
     }
 
     #[test]
@@ -892,12 +987,10 @@ mod tests {
             model.materials()[0].metallic_factor(),
             before.materials()[0].metallic_factor()
         );
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code == "material-policy-patch-skipped")
-        );
+        assert!(report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "material-policy-patch-skipped"));
     }
 
     #[test]
@@ -938,18 +1031,14 @@ mod tests {
             model.meshes()[1].primitives()[0].material(),
             Some(MaterialIndex::new(2))
         );
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code == "material-policy-remapped-named-meshes")
-        );
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code == "material-policy-added-named-meshes")
-        );
+        assert!(report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "material-policy-remapped-named-meshes"));
+        assert!(report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "material-policy-added-named-meshes"));
 
         let before = model.clone();
         let error = ModelMaterialPolicy::new()
@@ -1015,12 +1104,10 @@ mod tests {
             model.meshes()[2].primitives()[0].material(),
             Some(MaterialIndex::new(1))
         );
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code == "material-policy-added-users")
-        );
+        assert!(report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "material-policy-added-users"));
         assert_eq!(
             model
                 .material_usage()

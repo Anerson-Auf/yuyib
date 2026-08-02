@@ -1,27 +1,27 @@
-# Каталог запускаемых примеров
+﻿# РљР°С‚Р°Р»РѕРі Р·Р°РїСѓСЃРєР°РµРјС‹С… РїСЂРёРјРµСЂРѕРІ
 
-> **Статус:** Current examples map  
-> **Расположение:** `crates/yuyib/examples`  
-> **Запуск:** из корня workspace
+> **РЎС‚Р°С‚СѓСЃ:** Current examples map  
+> **Р Р°СЃРїРѕР»РѕР¶РµРЅРёРµ:** `crates/yuyib/examples`  
+> **Р—Р°РїСѓСЃРє:** РёР· РєРѕСЂРЅСЏ workspace
 
-Examples — executable documentation. Выберите ближайший use-case, запустите
-его без изменений, затем переносите минимально нужные части в проект.
+Examples вЂ” executable documentation. Р’С‹Р±РµСЂРёС‚Рµ Р±Р»РёР¶Р°Р№С€РёР№ use-case, Р·Р°РїСѓСЃС‚РёС‚Рµ
+РµРіРѕ Р±РµР· РёР·РјРµРЅРµРЅРёР№, Р·Р°С‚РµРј РїРµСЂРµРЅРѕСЃРёС‚Рµ РјРёРЅРёРјР°Р»СЊРЅРѕ РЅСѓР¶РЅС‹Рµ С‡Р°СЃС‚Рё РІ РїСЂРѕРµРєС‚.
 
 ```powershell
 cargo run -p yuyib --example <name>
 ```
 
-Оконные examples интерактивны. Они не являются CI-тестами; visual behavior и
-управление проверяются пользователем.
+РћРєРѕРЅРЅС‹Рµ examples РёРЅС‚РµСЂР°РєС‚РёРІРЅС‹. РћРЅРё РЅРµ СЏРІР»СЏСЋС‚СЃСЏ CI-С‚РµСЃС‚Р°РјРё; visual behavior Рё
+СѓРїСЂР°РІР»РµРЅРёРµ РїСЂРѕРІРµСЂСЏСЋС‚СЃСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»РµРј.
 
-## Application, UI и infrastructure
+## Application, UI Рё infrastructure
 
-| Example | Что показывает | Feature / ресурсы |
+| Example | Р§С‚Рѕ РїРѕРєР°Р·С‹РІР°РµС‚ | Feature / СЂРµСЃСѓСЂСЃС‹ |
 |---|---|---|
-| `clear_window` | минимальное native WGPU window | default или `app` |
+| `clear_window` | РјРёРЅРёРјР°Р»СЊРЅРѕРµ native WGPU window | default РёР»Рё `app` |
 | `game_plugin_schedule` | `GamePlugin`, startup/update/fixed schedules | `game` |
-| `render_graph_phases` | порядок custom render phases | `app` |
-| `native_ui_gallery` | native widgets, layout, input and text | `ui` + локальный font/assets |
+| `render_graph_phases` | РїРѕСЂСЏРґРѕРє custom render phases | `app` |
+| `native_ui_gallery` | native widgets, layout, input and text | `ui` + Р»РѕРєР°Р»СЊРЅС‹Р№ font/assets |
 | `application_webview` | local WebView page and typed bridge | `webview`, Windows WebView2 |
 | `asset_server_streaming` | background load/publication state | `assets` |
 | `custom_importer` | registration/probe/import diagnostics | `assets` |
@@ -29,15 +29,15 @@ cargo run -p yuyib --example <name>
 
 ## 2D
 
-| Example | Что показывает | Feature / ресурсы |
+| Example | Р§С‚Рѕ РїРѕРєР°Р·С‹РІР°РµС‚ | Feature / СЂРµСЃСѓСЂСЃС‹ |
 |---|---|---|
 | `sprite_atlas_ecs` | atlas, ECS sprite and animation | `two-d` |
 | `offline_sprite_atlas` | typed bounded offline atlas import and runtime binding (headless) | `two-d` |
-| `two_d_tile_playground` | tilemap, camera, animation and kinematic collision | `two-d` + example textures |
+| `two_d_tile_playground` | tilemap + `PlayableLoop2d` (WASD, camera follow, walls) | `two-d` |
 
-## 3D и glTF
+## 3D Рё glTF
 
-| Example | Что показывает | Feature / ресурсы |
+| Example | Р§С‚Рѕ РїРѕРєР°Р·С‹РІР°РµС‚ | Feature / СЂРµСЃСѓСЂСЃС‹ |
 |---|---|---|
 | `game_3d_scene` | procedural model, light and high-level renderer | `app`, `three-d` |
 | `gltf_material_policy` | high-level `ModelMaterialPolicy` on `GltfSceneLoad`, diagnostics summary, left/right repaired panels | `app`, `three-d`, **no external fixtures** |
@@ -55,29 +55,37 @@ cargo run -p yuyib --example <name>
 | `velina_skeletal_preview` | skeletal rendering path | matching character GLB |
 | `playable_vertical` | input + character motor vertical slice | 3D test assets |
 | `cyberpunk_city_playable` | streamed street city + character; optional Rapier props overlay | street city + character GLB; `--features physics-rapier` for overlay |
-| `playable_dynamics_overlay_smoke` | M4.7–M4.9 headless Rapier playable overlay (solid trimesh + props) | `--features "three-d,physics-rapier"` |
+| `playable_dynamics_overlay_smoke` | M5.2 `DynamicsOverlay3d`: solid trimesh + two-way reaction | `--features "three-d,physics-rapier"` |
 | `equirect_hdr_smoke` | CPU Radiance/linear equirect ingest + hemisphere sample check | none (synthetic) |
-| `ggx_ibl_cook_smoke` | CPU GGX cook equirect → cube mips + BRDF LUT + `Game3dScene` probe/sky queue | none (synthetic; needs `for_tests/`) |
+| `ggx_ibl_cook_smoke` | CPU GGX cook equirect в†’ cube mips + BRDF LUT + `Game3dScene` probe/sky queue | none (synthetic; needs `for_tests/`) |
 | `asset_cook_cache_smoke` | M3 disk cook cache: second glTF import is a hit (parse skipped) | none (synthetic) |
 | `physics_rapier_smoke` | M4.1 Rapier facade: dynamic sphere settles on fixed cuboid | `--features physics-rapier` |
 | `physics_rapier_kinematic_smoke` | M4.3 kinematic platform + trigger overlap + CCD | `--features physics-rapier` |
 | `physics_rapier_joints_smoke` | M4.4 fixed/revolute joints + collision groups | `--features physics-rapier` |
 | `physics_rapier_convex_smoke` | M4.5 convex hull + limited prismatic joint | `--features physics-rapier` |
 | `physics_rapier_contacts_smoke` | M4.6 contact pairs + rope + `DynamicsFixedStepper3d` | `--features physics-rapier` |
-| `playable_dynamics_overlay_smoke` | M4.7–M4.9 playable Rapier overlay (solid trimesh + props) | `--features "three-d,physics-rapier"` |
-| `physics_rapier_window` | M4.2–M4.6 Rapier window: full dynamics lab | `--features "app,three-d,physics-rapier"` |
-| `skybox_smoke` | fullscreen cubemap skybox from cooked outdoor mip0 (+Y vs −Y luma) | none (synthetic) |
+| `playable_dynamics_overlay_smoke` | M5.2 `DynamicsOverlay3d`: solid trimesh + two-way reaction | `--features "three-d,physics-rapier"` |
+| `physics_rapier_window` | M4.2вЂ“M4.6 Rapier window: full dynamics lab | `--features "app,three-d,physics-rapier"` |
+| `physics_3d_showcase` | M4 3D high-level tour: mesh character slope+platform + Rapier facade | `--features "three-d,physics-rapier"` |
+| `physics_3d_lowlevel` | M4 3D low-level escapes: one-way `step_with_collision`, mesh queries, groups | `--features "three-d,physics-rapier"` |
+| `physics_rapier2d_smoke` | M4.13 Rapier 2D facade: platformer settle + top-down kinematic/trigger | `--features physics-rapier2d` |
+| `physics_platformer2d_smoke` | M4 platformer controller: land/jump/one-way/wall via Rapier KCC | `--features character-2d` |
+| `game3d_profile_smoke` | M5.1 `Game3dProfile`: shared pool + glTF load to Ready | `--features profile-3d` |
+| `animated_character_smoke` | M5.2 `AnimatedCharacterLoad3d`: skeletal import + walk advance | `--features profile-3d` |
+| `game2d_profile_smoke` | M5.1 `Game2dProfile`: World + Game2dScene shell | `--features profile-2d` |
+| `playable_loop_2d_smoke` | Deep 2D A `PlayableLoop2d`: kinematic step + camera follow | `--features profile-2d` |
+| `skybox_smoke` | fullscreen cubemap skybox from cooked outdoor mip0 (+Y vs в€’Y luma) | none (synthetic) |
 | `directional_shadow_smoke` | orthographic directional shadow map darkens occluded ground (factor PBR) | none |
 | `pbr_alpha_mask_smoke` | PBR `MASK` discards occluder shading + shadow cutout vs opaque | none |
 | `specular_ibl_smoke` | factor-only prefiltered specular IBL probes (headless PNG) | none |
 
-Точные asset paths находятся в начале каждого source file. Если fixture
-отсутствует, example должен завершиться явной import/I/O error, а не молча
-подменить контент.
+РўРѕС‡РЅС‹Рµ asset paths РЅР°С…РѕРґСЏС‚СЃСЏ РІ РЅР°С‡Р°Р»Рµ РєР°Р¶РґРѕРіРѕ source file. Р•СЃР»Рё fixture
+РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚, example РґРѕР»Р¶РµРЅ Р·Р°РІРµСЂС€РёС‚СЊСЃСЏ СЏРІРЅРѕР№ import/I/O error, Р° РЅРµ РјРѕР»С‡Р°
+РїРѕРґРјРµРЅРёС‚СЊ РєРѕРЅС‚РµРЅС‚.
 
-## От задачи к объяснению
+## РћС‚ Р·Р°РґР°С‡Рё Рє РѕР±СЉСЏСЃРЅРµРЅРёСЋ
 
-| После example прочитайте | Guide |
+| РџРѕСЃР»Рµ example РїСЂРѕС‡РёС‚Р°Р№С‚Рµ | Guide |
 |---|---|
 | `clear_window`, `render_graph_phases` | [Application](../guides/application.md), [custom passes](../guides/custom-render-passes.md) |
 | `asset_server_streaming`, `custom_importer` | [Asset loading](../guides/asset-loading.md), [custom importers](../guides/custom-importers.md) |
@@ -98,6 +106,6 @@ cargo run -p yuyib --example <name>
   architecture.
 - Paths and expected diagnostic counts may depend on fixtures in `for_tests`.
 - Default features compile a broad graph; use the [feature map](features.md)
-  when переносите example в минимальный downstream crate.
-- Команды здесь запускают interactive applications. Для compile-only проверки
-  используйте конкретный `--example` с подходящей Cargo check command.
+  when РїРµСЂРµРЅРѕСЃРёС‚Рµ example РІ РјРёРЅРёРјР°Р»СЊРЅС‹Р№ downstream crate.
+- РљРѕРјР°РЅРґС‹ Р·РґРµСЃСЊ Р·Р°РїСѓСЃРєР°СЋС‚ interactive applications. Р”Р»СЏ compile-only РїСЂРѕРІРµСЂРєРё
+  РёСЃРїРѕР»СЊР·СѓР№С‚Рµ РєРѕРЅРєСЂРµС‚РЅС‹Р№ `--example` СЃ РїРѕРґС…РѕРґСЏС‰РµР№ Cargo check command.

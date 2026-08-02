@@ -18,8 +18,9 @@ viewport/chunk CPU culling и bounded collision с tiles. `SpriteRenderer`
 уровень не скрывается: `resolve_kinematic_tilemap_aabb_2d`, collision snapshots
 и `yuyib-physics::resolve_kinematic_aabb_2d` остаются отдельными границами.
 
-Runnable `two_d_tile_playground` проверяет этот вертикальный путь в окне:
-atlas, анимация, WASD/стрелки, camera follow и блокировка стенами.
+Runnable `two_d_tile_playground` проверяет этот вертикальный путь в окне через
+`Game2dProfile` + `PlayableLoop2d`: atlas, анимация, WASD/стрелки, camera follow
+и блокировка стенами.
 
 ## Реализовано
 
@@ -77,29 +78,26 @@ variant → normal-map point lights → optional post-process. Каждый ур
 
 ### Приоритет 4 — физика beyond static AABB tiles
 
-Нынешний controller годится для top-down wall sliding. В нём нет gravity,
-jump, one-way platform, slope, moving platform, dynamic body, circle/capsule
-sweep, trigger dispatch и broadphase cache. Вдобавок collider snapshot
-перестраивается на каждом controller step — это безопасно и прозрачно, но
-плохо для больших maps.
+Top-down `KinematicSpriteController2d` по-прежнему только wall sliding. Отдельный
+platformer controller поверх Rapier 2D (**done**):
+`yuyib-character-2d::PlatformerController2d` — gravity/jump/coyote/buffer, walls,
+one-way platforms через `RapierDynamicsWorld2d::move_kinematic_character`
+(Rapier KCC). Semantics top-down controller не менялись.
 
-Не следует делать один огромный `Physics2d` с десятками флагов. Правильнее:
-
-1. static tile collider cache + chunk broadphase;
-2. отдельный platformer controller (gravity/jump/one-way), не меняющий
-   top-down controller semantics;
-3. dynamic solver/plugin поверх общих queries.
+Остаётся: tile collider cache + chunk broadphase; drop-through input; richer
+moving-platform carry policy; dynamic prop interactions beyond kinematic query.
 
 ### Приоритет 5 — камеры, ввод и взаимодействие
 
-`Camera2d` существует, но camera follow, bounds, zoom/pan/shake и screen↔world
-conversion не объединены в одну policy API. Пример реализует follow локально.
-Keyboard adapter также общий; 2D semantic movement/action mapping ещё не имеет
-готового profile, gamepad/touch virtual controls отсутствуют.
+`Camera2d` существует; high-level `CameraFollow2d` /
+`PlayableLoop2d` (Deep 2D A) закрывают follow + WASD kinematic loop.
+Bounds, zoom/pan/shake и screen↔world conversion ещё не объединены в одну
+расширенную policy API. Keyboard adapter также общий; gamepad/touch virtual
+controls отсутствуют.
 
 2D pointer interaction уже есть, но не связан с render picking, layers и
-camera transform. Нужен простой `CameraController2d` высокого API и явный
-`screen_to_world` низкого API до автоматических click-to-move систем.
+camera transform. Явный `screen_to_world` низкого API нужен до автоматических
+click-to-move систем.
 
 ### Приоритет 6 — карты редакторов
 

@@ -17,6 +17,12 @@ pub use yuyib_assets as assets;
 pub use yuyib_audio as audio;
 #[cfg(feature = "three-d")]
 pub use yuyib_character_3d as character_3d;
+#[cfg(feature = "character-2d")]
+pub use yuyib_character_2d as character_2d;
+#[cfg(feature = "three-d")]
+pub use yuyib_profile_3d as profile_3d;
+#[cfg(feature = "two-d")]
+pub use yuyib_profile_2d as profile_2d;
 #[cfg(feature = "core")]
 pub use yuyib_core as core;
 #[cfg(feature = "ecs")]
@@ -114,10 +120,29 @@ pub mod prelude {
         CharacterCollisionError3d, CharacterCollisionResolution3d, CharacterController3d,
         CharacterControllerConfig3d, CharacterControllerEvent3d, CharacterInput3d,
         CharacterModelPlacement3d, CharacterModelPlacementError3d, CharacterMotor3d,
-        CharacterMotorConfig3d, CharacterMotorEvent3d, CharacterSpawnAnchor3d,
-        CharacterSpawnOptions3d, CharacterSpawnRejectCounts3d, CharacterSpawnRejectReason3d,
-        CharacterSpawnReport3d, CharacterSpawnSelection3d, CharacterSpawnSurfaceSelection3d,
-        step_character_motors_3d,
+        CharacterMotorConfig3d, CharacterMotorEvent3d, CharacterMovingPlatform3d,
+        CharacterSpawnAnchor3d, CharacterSpawnOptions3d, CharacterSpawnRejectCounts3d,
+        CharacterSpawnRejectReason3d, CharacterSpawnReport3d, CharacterSpawnSelection3d,
+        CharacterSpawnSurfaceSelection3d, step_character_motors_3d,
+    };
+    #[cfg(feature = "character-2d")]
+    pub use crate::character_2d::{
+        PlatformerController2d, PlatformerControllerConfig2d, PlatformerControllerError2d,
+        PlatformerControllerEvent2d, PlatformerInput2d, PlatformerStep2d,
+    };
+    #[cfg(feature = "three-d")]
+    pub use crate::profile_3d::{
+        AnimatedCharacter3d, AnimatedCharacterError, AnimatedCharacterLoad3d,
+        AnimatedCharacterStatus, CharacterGame3d, DynamicsOverlay3d, DynamicsOverlayError3d,
+        EnvironmentPreset, EnvironmentPresetError, EnvironmentProbeSource, Game3dPlayableLoad,
+        Game3dPlayableLoadError, Game3dPlayableLoadStatus, Game3dProfile, Game3dProfileConfig,
+        Game3dProfileError, Game3dProfileStatus, OUTDOOR_PROBE_HDR, PlayableDrawStatus,
+        PlayableLoop3d, PlayableLoopDesc3d, PlayableLoopError3d,
+    };
+    #[cfg(feature = "two-d")]
+    pub use crate::profile_2d::{
+        CameraFollow2d, Game2dProfile, Game2dProfileError, PlayableLoop2d, PlayableLoopDesc2d,
+        PlayableLoopError2d,
     };
     #[cfg(feature = "core")]
     pub use crate::core::{FrameEvents, FrameInfo, Runtime, RuntimeEvent};
@@ -207,16 +232,22 @@ pub mod prelude {
     };
     #[cfg(feature = "physics")]
     pub use crate::physics::{
-        Aabb2d, Aabb3d, AabbCollider2d, AabbCollider3d, BodyId3d, Circle, CircleCollider,
-        CollisionGroups3d, ContactPair3d, DynamicsBackend3d, DynamicsBackendError3d,
-        DynamicsFixedStepper3d, DynamicsWorldConfig3d, JointId3d, Position2d, Position3d, Ray2d,
-        Ray3d, SphereCollider3d, SphereMeshResolution3d, StaticAabb2d, StaticAabbBroadphase2d,
-        StaticAabbBroadphaseError2d, StaticAabbBroadphaseLimits2d, StaticRaycastAabbHit2d,
-        TriangleMesh3d, TriangleMeshError, TriangleMeshQueryError, TriangleMeshRayHit3d, Vec2,
-        Vec3, Velocity2d, Velocity3d, resolve_kinematic_aabb_2d,
+        Aabb2d, Aabb3d, AabbCollider2d, AabbCollider3d, BodyId2d, BodyId3d, CharacterMoveConfig2d,
+        CharacterMoveResult2d, Circle, CircleCollider, CollisionGroups2d, CollisionGroups3d,
+        ContactPair2d, ContactPair3d, DynamicsBackend2d, DynamicsBackend3d, DynamicsBackendError2d,
+        DynamicsBackendError3d, DynamicsFixedStepper2d, DynamicsFixedStepper3d,
+        DynamicsWorldConfig2d, DynamicsWorldConfig3d, JointId2d, JointId3d, Position2d, Position3d,
+        Ray2d, Ray3d, SphereCollider3d, SphereMeshResolution3d, StaticAabb2d,
+        StaticAabbBroadphase2d, StaticAabbBroadphaseError2d, StaticAabbBroadphaseLimits2d,
+        StaticRaycastAabbHit2d, TriangleMesh3d, TriangleMeshError, TriangleMeshQueryError,
+        TriangleMeshRayHit3d, Vec2, DEFAULT_MIN_WALKABLE_NORMAL_Y,
+        default_max_walkable_slope_radians, Vec3, Velocity2d, Velocity3d,
+        resolve_kinematic_aabb_2d,
     };
     #[cfg(feature = "physics-rapier")]
     pub use crate::physics::RapierDynamicsWorld3d;
+    #[cfg(feature = "physics-rapier2d")]
+    pub use crate::physics::RapierDynamicsWorld2d;
     #[cfg(feature = "platform")]
     pub use crate::platform::{
         CursorControl, CursorControlOutcome, CursorGrab, Window, WindowConfig, WindowMode,

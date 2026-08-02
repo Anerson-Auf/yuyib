@@ -19,6 +19,9 @@ yuyib-authoring = { path = "../yuyib-authoring", version = "0.1.0" }
 yuyib-ecs = { path = "../yuyib-ecs", version = "0.1.0" }
 yuyib-game-3d = { path = "../yuyib-game-3d", version = "0.1.0" }
 yuyib-game-3d-authoring = { path = "../yuyib-game-3d-authoring", version = "0.1.0" }
+yuyib-scene-interaction = { path = "../yuyib-scene-interaction", version = "0.1.0" }
+yuyib-gameplay = { path = "../yuyib-gameplay", version = "0.1.0" }
+yuyib-physics = { path = "../yuyib-physics", version = "0.1.0" }
 yuyib-gltf = { path = "../yuyib-gltf", version = "0.1.0" }
 yuyib-model = { path = "../yuyib-model", version = "0.1.0" }
 yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }

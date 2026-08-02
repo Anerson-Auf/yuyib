@@ -73,11 +73,12 @@ pub use ibl::{
     GpuSpecularIbl3d, PreparedSpecularIbl3d, SPECULAR_IBL_FACE_COUNT, SpecularIblError,
 };
 pub use loading::{
-    GltfSceneColliderLayer3d, GltfSceneColliderLayerId3d, GltfSceneCollisionConfig3d,
-    GltfSceneCollisionConfigError3d, GltfSceneCollisionLimits3d, GltfSceneCollisionMatchMode3d,
-    GltfSceneCollisionNameMatch3d, GltfSceneCollisionPredicate3d, GltfSceneCollisionSelector3d,
-    GltfSceneGpuProgress, GltfSceneLoad, GltfSceneLoadConfig, GltfSceneLoadError,
-    GltfSceneLoadProgress, GltfSceneLoadStage, GltfSceneLoadStartError, LoadedGltfScene,
+    GltfAnimationPreviewGpu, GltfAnimationPreviewGpuError, GltfSceneColliderLayer3d,
+    GltfSceneColliderLayerId3d, GltfSceneCollisionConfig3d, GltfSceneCollisionConfigError3d,
+    GltfSceneCollisionLimits3d, GltfSceneCollisionMatchMode3d, GltfSceneCollisionNameMatch3d,
+    GltfSceneCollisionPredicate3d, GltfSceneCollisionSelector3d, GltfSceneGpuProgress,
+    GltfSceneLoad, GltfSceneLoadConfig, GltfSceneLoadError, GltfSceneLoadProgress,
+    GltfSceneLoadStage, GltfSceneLoadStartError, LoadedGltfScene,
     LoadedGltfSceneMaterialPolicyError, LoadedGltfSceneRenderError,
 };
 pub use pbr::{

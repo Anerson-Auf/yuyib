@@ -7,23 +7,22 @@
 //! ```
 //!
 //! Управление: WASD или стрелки. Персонаж не проходит через границу комнаты.
-//! Пример использует один встроенный atlas, поэтому не требует файлов рядом с
-//! executable. В настоящей игре замените `decode_demo_atlas` асинхронной
-//! загрузкой через `AssetLoader`.
+//! Input / kinematic step / camera / render идут через
+//! [`yuyib::profile_2d::PlayableLoop2d`]. Пример использует один встроенный
+//! atlas, поэтому не требует файлов рядом с executable.
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use yuyib::{
     app::{Application, RenderLoop},
     assets::Assets,
-    ecs::prelude::{Entity, World},
     game_2d::{
-        AnimatedSprite2d, Game2dScene, KinematicSpriteController2d, Sprite2d, SpriteMoveInput2d,
-        TileCollision2d, TileKinematicAabbLimits2d, TileMap2d, step_kinematic_sprite_controller_2d,
-        step_sprite_animations_2d,
+        AnimatedSprite2d, Game2dSceneConfig, KinematicSpriteController2d, Sprite2d,
+        TileCollision2d, TileMap2d,
     },
     image::{DecodePolicy, DecodedImage, decode_bytes},
-    platform::{WindowConfig, winit},
+    platform::WindowConfig,
+    profile_2d::{Game2dProfile, PlayableLoop2d, PlayableLoopDesc2d},
     render::ClearColor,
     two_d::{PlaybackMode, SpriteSheet, Texture, TextureHandle, TextureSize},
 };
@@ -45,68 +44,20 @@ const PLAYER_SIZE: [f32; 2] = [28.0, 40.0];
 struct Playground {
     _textures: Assets<Texture>,
     texture: TextureHandle,
-    world: World,
-    player: Entity,
-    input: HeldInput,
-}
-
-#[derive(Default)]
-struct HeldInput {
-    horizontal: HeldAxis,
-    vertical: HeldAxis,
-}
-
-#[derive(Default)]
-struct HeldAxis {
-    negative: bool,
-    positive: bool,
-}
-
-impl HeldInput {
-    fn handle(&mut self, event: &winit::event::WindowEvent) {
-        use winit::{
-            event::{ElementState, WindowEvent},
-            keyboard::{KeyCode, PhysicalKey},
-        };
-        let WindowEvent::KeyboardInput { event, .. } = event else {
-            return;
-        };
-        let PhysicalKey::Code(key) = event.physical_key else {
-            return;
-        };
-        let held = event.state == ElementState::Pressed;
-        match key {
-            KeyCode::KeyA | KeyCode::ArrowLeft => self.horizontal.negative = held,
-            KeyCode::KeyD | KeyCode::ArrowRight => self.horizontal.positive = held,
-            KeyCode::KeyW | KeyCode::ArrowUp => self.vertical.negative = held,
-            KeyCode::KeyS | KeyCode::ArrowDown => self.vertical.positive = held,
-            _ => {}
-        }
-    }
-
-    fn movement(&self) -> SpriteMoveInput2d {
-        SpriteMoveInput2d::new([
-            (if self.horizontal.positive { 1.0 } else { 0.0 })
-                - (if self.horizontal.negative { 1.0 } else { 0.0 }),
-            (if self.vertical.positive { 1.0 } else { 0.0 })
-                - (if self.vertical.negative { 1.0 } else { 0.0 }),
-        ])
-        .expect("booleans always produce finite input")
-    }
+    profile: Game2dProfile,
+    playable: PlayableLoop2d,
 }
 
 fn main() -> Result<(), yuyib::app::ApplicationError> {
-    let (playground, image) = create_playground();
-    let mut scene = Game2dScene::default();
-    scene
+    let (mut playground, image) = create_playground();
+    playground
+        .profile
         .queue_texture(playground.texture, image)
         .expect("the scene texture queue has room for the compact atlas");
     let playground = Rc::new(RefCell::new(playground));
     let event_playground = Rc::clone(&playground);
     let update_playground = Rc::clone(&playground);
     let render_playground = Rc::clone(&playground);
-    let scene = Rc::new(RefCell::new(scene));
-    let render_scene = Rc::clone(&scene);
 
     Application::new()
         .window(WindowConfig {
@@ -119,34 +70,28 @@ fn main() -> Result<(), yuyib::app::ApplicationError> {
         .clear_color(ClearColor::linear(0.015, 0.025, 0.045, 1.0))
         .render_loop(RenderLoop::Continuous)
         .on_window_event(move |event, _context| {
-            event_playground.borrow_mut().input.handle(event);
+            event_playground
+                .borrow_mut()
+                .playable
+                .handle_window_event(event);
         })
         .on_frame(move |context| {
             let mut playground = update_playground.borrow_mut();
-            let delta = context.frame().delta.min(Duration::from_millis(50));
-            let input = playground.input.movement();
-            let player = playground.player;
-            step_kinematic_sprite_controller_2d(
-                &mut playground.world,
-                player,
-                input,
-                delta,
-                TileKinematicAabbLimits2d::new(256).expect("fixed positive tile budget"),
-            )
-            .expect("the demo player begins outside solids and map data is valid");
-            let _events = step_sprite_animations_2d(&mut playground.world, delta);
+            let delta = context.frame().delta;
+            let Playground {
+                profile, playable, ..
+            } = &mut *playground;
+            playable
+                .step(profile, delta)
+                .expect("the demo player begins outside solids and map data is valid");
         })
         .on_render(move |frame| {
             let mut playground = render_playground.borrow_mut();
-            let player_position = playground
-                .world
-                .get::<Sprite2d>(playground.player)
-                .expect("player lives for the whole example")
-                .position;
-            let mut scene = render_scene.borrow_mut();
-            scene.camera_mut().position = player_position;
-            let _stats = scene
-                .render(frame, &mut playground.world)
+            let Playground {
+                profile, playable, ..
+            } = &mut *playground;
+            let _stats = playable
+                .render(profile, frame)
                 .expect("authored scene and embedded atlas remain valid");
         })
         .run()
@@ -165,7 +110,7 @@ fn create_playground() -> (Playground, DecodedImage) {
         .animation(Duration::from_millis(140), PlaybackMode::PingPong)
         .expect("four atlas cells make an animation");
     let wall = sheet.region(2).expect("atlas has third cell");
-    let mut world = World::new();
+    let mut profile = Game2dProfile::new(Game2dSceneConfig::default());
 
     let cells = vec![Some(0); (GRID[0] * GRID[1]) as usize];
     let mut solid = vec![false; cells.len()];
@@ -176,13 +121,14 @@ fn create_playground() -> (Playground, DecodedImage) {
             }
         }
     }
-    world.spawn((
+    profile.world_mut().spawn((
         TileMap2d::new(GRID, [TILE, TILE], vec![wall], cells)
             .expect("complete map data")
             .with_layer(0),
         TileCollision2d::new(GRID, solid).expect("collision grid matches tile grid"),
     ));
-    let player = world
+    let player = profile
+        .world_mut()
         .spawn((
             Sprite2d::new(sheet.region(0).expect("atlas frame"))
                 .with_position(MAP_CENTER)
@@ -195,14 +141,16 @@ fn create_playground() -> (Playground, DecodedImage) {
                 .expect("finite controller"),
         ))
         .id();
+    let playable = PlayableLoop2d::new(
+        PlayableLoopDesc2d::new(player, 256).expect("fixed positive tile budget"),
+    );
 
     (
         Playground {
             _textures: textures,
             texture,
-            world,
-            player,
-            input: HeldInput::default(),
+            profile,
+            playable,
         },
         image,
     )

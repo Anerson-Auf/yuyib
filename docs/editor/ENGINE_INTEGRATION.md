@@ -8,8 +8,12 @@ Editor. Сначала прочитайте этот файл, затем тол
 > **Статус:** authoring registry, GUID/schema envelopes, migrations, commands,
 > document/process core, viewport shell, scene bridge и Monaco — foundation.
 > Visual materializers закрыты для TRS / Model / DirectionalLight; glTF Asset
-> preview — incremental (не full DoD). rust-analyzer/LSP и Apply Play — открыты.
+> preview — incremental (не full DoD). Apply Play (TRS whitelist) и rust-analyzer
+> diagnostics-only — closed (E1); texture remap closed; LSP completion/hover —
+> **deferred to end-game**; project wizard / cook export — открыты.
 > Операционный статус: [`ENGINE_HANDOFF.md`](ENGINE_HANDOFF.md).
+> Практический authoring API (interactable / trigger / Intent Bridge wire):
+> [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).
 
 ## Что изменилось концептуально
 
@@ -174,6 +178,41 @@ revision и build/cooked inputs, публикует lifecycle/diagnostics и м�
 - создаёт обычную command transaction с preview diff;
 - проверяет исходную revision и conflicts;
 - никогда автоматически не копирует весь ECS `World` назад.
+
+## Script ↔ object Intent Bridge
+
+Пошаговые payloads и capability table —
+[`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md) (§2–3).
+
+Полноценные `.rs` scripts не мутируют `.yscene` / ECS напрямую. Они шлют
+`SceneInteractionIntent` (`yuyib-scene-interaction`) по `EntityGuid`:
+
+- ops: `set_translation` / `set_component_field` / `add_component` / `emit_signal`;
+- discoverability: `BridgeCapabilities` (`editor_capabilities` /
+  `play_capabilities`) — unsupported → hard error, не silent no-op;
+- batch: `SceneInteractionBatchResult` (submitted / applied / signals);
+- signals: opaque `(name, payload)`; optional
+  `try_parse_quest_progress_signal` → host maps onto `QuestSignal` (crate не
+  зависит от `yuyib-gameplay`);
+- **Editor** (`scene.interaction.apply`, `EditorDocumentBridge`) → одна undoable
+  command transaction + `host.scene.interaction.signal`;
+- **Play** (`PlayInteractionHost` + `PlayWorldBridge`) держит GUID map, pending
+  queue и frame signal drain; TRS + `Model3d`/`DirectionalLight3d` fields;
+  `EmitSignal` → optional host `QuestBook::apply_signal`;
+- **Interactable use**: materialize `yuyib.interactable` → `Position3d` +
+  `SphereCollider3d`; `KeyE` → `request_use_raycast_3d` → local Accept →
+  `EmitSignal(interaction id)` into the same bridge/QuestBook path;
+- **Authoring triggers**: materialize `yuyib.trigger` → gameplay `Trigger` +
+  sphere query; player probe via `overlap_spheres_3d` → `trigger.*` intents
+  (Entered/Stayed/Exited) each frame after locomotion;
+- **Rapier triggers**: `TriggerOverlapTracker` converts
+  `collect_trigger_overlaps` pairs into the same `trigger.*` intents for hosts
+  that compose Rapier beside CharacterController — no physics-mode switch;
+- Play → `.yscene` только через существующий Apply whitelist;
+- **не** смешивать с conflating player authority and Intent Bridge document writes.
+
+Это отдельный слой от gameplay `InteractionRequested` (player interactables) —
+Play use-loop consumes that adapter and feeds the bridge.
 
 Asset и scene edits должны применяться без Rust-компиляции. Изменение Rust-кода
 проходит через build/check и restart runner; dynamic Rust library hot swap не

@@ -135,9 +135,12 @@
             <button id="playButton" class="play-button" title="Play"><svg><use href="#i-play"/></svg></button>
             <button id="pauseButton" class="icon-button" title="Pause"><svg><use href="#i-pause"/></svg></button>
             <button id="stopButton" class="icon-button" title="Stop"><svg><use href="#i-stop"/></svg></button>
+            <button id="applyPlayButton" class="toolbar-action" title="Apply Play Changes" hidden>Apply Play</button>
           </div>
         </div>
         <div class="toolbar-right">
+          <button id="syncCodeButton" class="toolbar-action" title="Export scene entities to Rust projection files">Sync Code</button>
+          <button id="applyCodeButton" class="toolbar-action" title="Apply Rust projection files back to the open scene">Apply Code</button>
           <button id="saveButton" class="toolbar-action"><span class="save-indicator"></span>Save scene <kbd>Ctrl S</kbd></button>
           <button id="buildButton" class="toolbar-action toolbar-action--accent" title="Run scoped Cargo check"><svg><use href="#i-terminal"/></svg>Cargo check</button>
         </div>
@@ -307,6 +310,7 @@
           <section class="source-navigation">
             <div class="source-heading"><span>Code &amp; ownership</span><span class="coverage-chip">Awaiting coverage</span></div>
             <div id="unavailableCapabilities" class="unavailable-capabilities" hidden></div>
+            <button data-open-source="entity.projection"><svg><use href="#i-code"/></svg><span><strong>Open entity projection</strong><small>src/scenes/… entity .rs</small></span><b>↗</b></button>
             <button data-open-source="component"><svg><use href="#i-code"/></svg><span><strong>Open component source</strong><small>Resolved from host coverage</small></span><b>↗</b></button>
             <button data-open-source="adapter"><svg><use href="#i-code"/></svg><span><strong>Open authoring adapter</strong><small>Resolved from host coverage</small></span><b>↗</b></button>
             <button data-open-source="systems.reading"><svg><use href="#i-search"/></svg><span><strong>Find systems using component</strong><small>Resolved from host coverage</small></span><b>→</b></button>
