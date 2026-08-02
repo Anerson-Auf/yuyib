@@ -1,0 +1,29 @@
+[package]
+name = "yuyib-play"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Editor Play Mode runtime: load a project .yscene into a native 3D window."
+
+[[bin]]
+name = "yuyib-play"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = "1.8.2"
+serde_json = "1.0.149"
+yuyib-assets = { path = "../yuyib-assets", version = "0.1.0" }
+yuyib-authoring = { path = "../yuyib-authoring", version = "0.1.0" }
+yuyib-ecs = { path = "../yuyib-ecs", version = "0.1.0" }
+yuyib-game-3d = { path = "../yuyib-game-3d", version = "0.1.0" }
+yuyib-game-3d-authoring = { path = "../yuyib-game-3d-authoring", version = "0.1.0" }
+yuyib-gltf = { path = "../yuyib-gltf", version = "0.1.0" }
+yuyib-model = { path = "../yuyib-model", version = "0.1.0" }
+yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }
+yuyib-scene = { path = "../yuyib-scene", version = "0.1.0" }
+yuyib = { path = "../yuyib", version = "0.1.0", default-features = false, features = ["game", "three-d"] }
+
+[lints]
+workspace = true

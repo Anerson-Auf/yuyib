@@ -1,0 +1,23 @@
+[package]
+name = "yuyib-game-2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "ECS-facing 2D sprite extraction for Yuyib."
+
+[dependencies]
+bevy_ecs.workspace = true
+yuyib-2d = { path = "../yuyib-2d" }
+yuyib-ecs = { path = "../yuyib-ecs" }
+yuyib-image = { path = "../yuyib-image" }
+yuyib-physics = { path = "../yuyib-physics" }
+yuyib-render = { path = "../yuyib-render" }
+yuyib-render-2d = { path = "../yuyib-render-2d" }
+
+[dev-dependencies]
+yuyib-assets = { path = "../yuyib-assets" }
+
+[lints]
+workspace = true

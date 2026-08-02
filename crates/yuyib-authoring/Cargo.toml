@@ -1,0 +1,16 @@
+[package]
+name = "yuyib-authoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Editor-neutral authoring contracts and registries for Yuyib."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+uuid = { version = "1.20.0", features = ["serde", "v4"] }
+
+[lints]
+workspace = true

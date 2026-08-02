@@ -1,0 +1,22 @@
+{
+  "format": "yuyib.project",
+  "format_version": 1,
+  "project_guid": "e0a21917-1ab0-4566-bff9-ed2babac7b08",
+  "name": "prj2",
+  "profile": "game3d",
+  "asset_root": "assets",
+  "code_root": ".",
+  "scenes": [
+    {
+      "guid": "c934b824-d259-4b1e-a1e4-26a72dde349f",
+      "path": "scenes/main.yscene",
+      "name": "Main"
+    }
+  ],
+  "startup_scene": "c934b824-d259-4b1e-a1e4-26a72dde349f",
+  "development": {
+    "cargo_package": "prj2",
+    "play_executable": null,
+    "play_arguments": []
+  }
+}

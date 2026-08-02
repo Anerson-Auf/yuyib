@@ -1,0 +1,23 @@
+[package]
+name = "yuyib-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "High-level ECS game lifecycle facade for Yuyib."
+
+[features]
+ui = ["yuyib-app/ui"]
+ui-text = ["ui", "yuyib-app/ui-text"]
+
+[dependencies]
+bevy_ecs.workspace = true
+yuyib-app = { path = "../yuyib-app", version = "0.1.0" }
+yuyib-core = { path = "../yuyib-core", version = "0.1.0" }
+yuyib-ecs = { path = "../yuyib-ecs", version = "0.1.0" }
+yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }
+yuyib-render = { path = "../yuyib-render", version = "0.1.0" }
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+[package]
+name = "yuyib-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Native visual authoring, preview, diagnostics, and code workspace for Yuyib."
+build = "build.rs"
+
+[dependencies]
+pollster.workspace = true
+rfd = "0.15.4"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+yuyib-assets = { path = "../yuyib-assets", version = "0.1.0" }
+yuyib-authoring = { path = "../yuyib-authoring", version = "0.1.0" }
+yuyib-authoring-yuyib = { path = "../yuyib-authoring-yuyib", version = "0.1.0" }
+yuyib-editor-core = { path = "../yuyib-editor-core", version = "0.1.0" }
+yuyib-ecs = { path = "../yuyib-ecs", version = "0.1.0" }
+yuyib-game-3d = { path = "../yuyib-game-3d", version = "0.1.0" }
+yuyib-game-3d-authoring = { path = "../yuyib-game-3d-authoring", version = "0.1.0" }
+yuyib-gltf = { path = "../yuyib-gltf", version = "0.1.0" }
+yuyib-gltf-authoring = { path = "../yuyib-gltf-authoring", version = "0.1.0" }
+yuyib-model = { path = "../yuyib-model", version = "0.1.0" }
+yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }
+yuyib-render = { path = "../yuyib-render", version = "0.1.0" }
+yuyib-render-3d = { path = "../yuyib-render-3d", version = "0.1.0" }
+yuyib-scene = { path = "../yuyib-scene", version = "0.1.0" }
+yuyib-webview = { path = "../yuyib-webview", version = "0.1.0" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+uuid = { version = "1.20.0", features = ["v4"] }

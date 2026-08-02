@@ -1,0 +1,15 @@
+[package]
+name = "yuyib-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Budgeted CPU image decoding and PNG encode helpers for Yuyib texture assets."
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+yuyib-2d = { path = "../yuyib-2d" }
+
+[lints]
+workspace = true

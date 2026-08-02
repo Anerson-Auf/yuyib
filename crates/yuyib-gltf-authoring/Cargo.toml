@@ -1,0 +1,22 @@
+[package]
+name = "yuyib-gltf-authoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "glTF import-settings mapping and PreviewAdapter over production GltfSceneLoad for Yuyib."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+yuyib-assets = { path = "../yuyib-assets", version = "0.1.0" }
+yuyib-authoring = { path = "../yuyib-authoring", version = "0.1.0" }
+yuyib-gltf = { path = "../yuyib-gltf", version = "0.1.0" }
+yuyib-render-3d = { path = "../yuyib-render-3d", version = "0.1.0" }
+
+[dev-dependencies]
+yuyib-authoring-yuyib = { path = "../yuyib-authoring-yuyib", version = "0.1.0" }
+
+[lints]
+workspace = true

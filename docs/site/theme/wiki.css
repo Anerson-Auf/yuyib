@@ -1,0 +1,26 @@
+/* Dense, wiki-style chrome. Original styling; no external assets or copied branding. */
+:root {
+  --wiki-accent: #e59b2f;
+  --wiki-panel: #171b22;
+  --wiki-border: #39424e;
+  --wiki-muted: #aab3be;
+}
+
+.sidebar { background: #101318; border-right: 1px solid var(--wiki-border); }
+.sidebar .sidebar-scrollbox { padding-top: .45rem; }
+.chapter li.chapter-item { line-height: 1.24; margin: .05rem 0; }
+.chapter li.part-title { color: var(--wiki-accent); font-size: .72em; font-weight: 800; letter-spacing: .09em; margin: 1.15rem 0 .32rem; text-transform: uppercase; }
+.chapter a { border-left: 2px solid transparent; color: #d4dbe3; padding: .23rem .35rem; }
+.chapter a:hover, .chapter .active { background: #252b34; border-left-color: var(--wiki-accent); color: #fff; text-decoration: none; }
+.content main { max-width: 1040px; }
+.content main h1 { border-bottom: 2px solid var(--wiki-accent); font-size: 2em; padding-bottom: .28em; }
+.content main h2 { border-bottom: 1px solid var(--wiki-border); font-size: 1.45em; padding-bottom: .2em; }
+.content main blockquote { background: var(--wiki-panel); border: 1px solid var(--wiki-border); border-left: 4px solid var(--wiki-accent); color: #dce3eb; margin: 1rem 0; padding: .65rem .9rem; }
+.content main blockquote p { margin: 0; }
+.content main table { border: 1px solid var(--wiki-border); display: table; width: 100%; }
+.content main th { background: #252b34; color: #fff; font-size: .9em; }
+.content main td, .content main th { border-color: var(--wiki-border); padding: .46em .6em; vertical-align: top; }
+.content main code { border: 1px solid #3a4350; border-radius: 2px; color: #ffd797; padding: .08em .22em; }
+.content main pre { border: 1px solid var(--wiki-border); border-radius: 3px; box-shadow: none; }
+.menu-bar { border-bottom: 1px solid var(--wiki-border); }
+@media only screen and (max-width: 1080px) { .content main { max-width: 94%; } }

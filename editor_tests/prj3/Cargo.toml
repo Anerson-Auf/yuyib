@@ -1,0 +1,12 @@
+[package]
+name = "prj3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keep this package out of any parent Cargo workspace that nests above it.
+[workspace]
+
+[[bin]]
+name = "prj3"
+path = "src/main.rs"

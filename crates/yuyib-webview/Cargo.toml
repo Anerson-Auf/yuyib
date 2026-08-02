@@ -1,0 +1,24 @@
+[package]
+name = "yuyib-webview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Windows WebView2 hosting for Yuyib windows."
+
+[features]
+default = ["webview2"]
+webview2 = ["dep:url", "dep:wry"]
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+url = { version = "2.5.7", optional = true }
+wry = { version = "0.55.1", default-features = false, features = ["protocol", "devtools"], optional = true }
+
+[lints]
+workspace = true

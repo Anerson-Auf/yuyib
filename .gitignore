@@ -1,0 +1,35 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Editor UI (Node)
+editor-ui/node_modules/
+editor-ui/dist/
+editor-ui/.vite/
+
+# Local cook / caches
+**/.yuyib_cook/
+
+# mdBook output (source of truth: docs/site/src)
+docs/site/book/
+
+# IDE / OS
+/.idea/
+/.vscode/
+*.user
+*.suo
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs / temp
+*.log
+*.tmp

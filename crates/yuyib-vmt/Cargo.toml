@@ -1,0 +1,14 @@
+[package]
+name = "yuyib-vmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Bounded Source 1 VMT KeyValues parser and typed material view for Yuyib."
+
+[dependencies]
+yuyib-vmf = { path = "../yuyib-vmf" }
+
+[lints]
+workspace = true

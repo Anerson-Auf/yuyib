@@ -1,0 +1,17 @@
+[package]
+name = "yuyib-ui-text-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Bounded CPU glyph atlas and draw-list generation for Yuyib native UI text."
+
+[dependencies]
+bytemuck = { version = "1.24.0", features = ["derive"] }
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
+yuyib-render = { path = "../yuyib-render", version = "0.1.0" }
+yuyib-ui-text = { path = "../yuyib-ui-text", version = "0.1.0" }
+
+[lints]
+workspace = true

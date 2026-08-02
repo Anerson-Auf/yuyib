@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "Workspace automation commands for Yuyib."
+
+[dependencies]
+yuyib-gltf = { path = "../crates/yuyib-gltf" }
+yuyib-model = { path = "../crates/yuyib-model" }
+
+[lints]
+workspace = true

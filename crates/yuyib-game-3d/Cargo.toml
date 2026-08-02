@@ -1,0 +1,20 @@
+[package]
+name = "yuyib-game-3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "ECS-facing 3D scene extraction for Yuyib."
+
+[dependencies]
+bevy_ecs.workspace = true
+yuyib-ecs = { path = "../yuyib-ecs" }
+yuyib-assets = { path = "../yuyib-assets" }
+yuyib-model = { path = "../yuyib-model" }
+yuyib-physics = { path = "../yuyib-physics" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

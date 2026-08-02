@@ -1,0 +1,16 @@
+[package]
+name = "yuyib-source1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Bounded Source 1 VMF brush adapter and model compiler for Yuyib."
+
+[dependencies]
+yuyib-model = { path = "../yuyib-model" }
+yuyib-vmf = { path = "../yuyib-vmf" }
+yuyib-vmf-model = { path = "../yuyib-vmf-model" }
+
+[lints]
+workspace = true

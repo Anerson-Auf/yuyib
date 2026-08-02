@@ -1,0 +1,15 @@
+{
+  "format": "yuyib.asset",
+  "format_version": 1,
+  "guid": "29c7a1e0-d972-46bf-8b96-3c6f365e8790",
+  "source": "assets/sci-fi_lab.glb",
+  "content_hash": "blake3:8f09021dd6e5179f22ac264d7516a44e0d02c8d3cb781534d8f8c9b12ac0e283",
+  "importer": "yuyib.gltf-import",
+  "importer_version": 1,
+  "import_settings": {
+    "schema": "yuyib.gltf-import-settings",
+    "version": 1,
+    "payload": {}
+  },
+  "dependencies": []
+}

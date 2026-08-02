@@ -1,0 +1,15 @@
+[package]
+name = "yuyib-physics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Deterministic lightweight 2D and 3D physics foundations for Yuyib."
+
+[dependencies]
+bevy_ecs.workspace = true
+yuyib-ecs = { path = "../yuyib-ecs" }
+
+[lints]
+workspace = true

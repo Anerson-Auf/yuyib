@@ -1,0 +1,15 @@
+[package]
+name = "yuyib-source1-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Safe Source 1 VMT base-texture resolution boundary for Yuyib."
+
+[dependencies]
+yuyib-vmt = { path = "../yuyib-vmt", version = "0.1.0" }
+yuyib-vtf = { path = "../yuyib-vtf", version = "0.1.0" }
+
+[lints]
+workspace = true

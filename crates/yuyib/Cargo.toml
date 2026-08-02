@@ -1,0 +1,234 @@
+[package]
+name = "yuyib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Native-first Rust runtime for Windows applications, games and optional WebViews."
+
+[features]
+default = ["desktop-full"]
+
+# Curated capability sets. `desktop-full` preserves the current out-of-the-box
+# experience, while applications can opt into a substantially smaller graph.
+desktop-full = ["game", "two-d", "three-d", "audio", "net", "source1", "ui", "gameplay"]
+headless = ["core", "ecs", "tasks", "assets", "physics", "gameplay", "net"]
+
+core = ["dep:yuyib-core"]
+ecs = ["dep:yuyib-ecs"]
+tasks = ["dep:yuyib-tasks"]
+assets = ["dep:yuyib-assets", "tasks"]
+physics = ["dep:yuyib-physics", "ecs"]
+gameplay = ["dep:yuyib-gameplay", "ecs", "physics"]
+net = ["dep:yuyib-net"]
+audio = ["dep:yuyib-audio"]
+
+platform = ["dep:yuyib-platform"]
+render = ["dep:yuyib-render", "platform"]
+app = ["dep:yuyib-app", "core", "platform", "render"]
+game = ["dep:yuyib-game", "app", "ecs"]
+
+ui = [
+    "app",
+    "dep:yuyib-ui",
+    "dep:yuyib-ui-render",
+    "dep:yuyib-ui-text",
+    "dep:yuyib-ui-text-render",
+    "yuyib-app/ui-text",
+    "yuyib-game?/ui-text",
+]
+two-d = [
+    "assets",
+    "ecs",
+    "physics",
+    "render",
+    "dep:yuyib-2d",
+    "dep:yuyib-game-2d",
+    "dep:yuyib-image",
+    "dep:yuyib-render-2d",
+    "dep:yuyib-render-texture",
+]
+three-d = [
+    "assets",
+    "ecs",
+    "physics",
+    "render",
+    "dep:yuyib-character-3d",
+    "dep:yuyib-game-3d",
+    "dep:yuyib-gltf",
+    "dep:yuyib-input",
+    "dep:yuyib-model",
+    "dep:yuyib-model-assets",
+    "dep:yuyib-render-3d",
+    "dep:yuyib-scene",
+    "dep:yuyib-shader",
+]
+source1 = [
+    "three-d",
+    "dep:yuyib-source1",
+    "dep:yuyib-source1-assets",
+    "dep:yuyib-source1-scene",
+    "dep:yuyib-vmf",
+    "dep:yuyib-vmf-model",
+    "dep:yuyib-vmt",
+    "dep:yuyib-vtf",
+]
+webview = ["app", "dep:yuyib-webview", "yuyib-app/webview"]
+
+[dependencies]
+yuyib-core = { path = "../yuyib-core", version = "0.1.0", optional = true }
+yuyib-ecs = { path = "../yuyib-ecs", version = "0.1.0", optional = true }
+yuyib-app = { path = "../yuyib-app", version = "0.1.0", optional = true }
+yuyib-2d = { path = "../yuyib-2d", version = "0.1.0", optional = true }
+yuyib-assets = { path = "../yuyib-assets", version = "0.1.0", optional = true }
+yuyib-audio = { path = "../yuyib-audio", version = "0.1.0", optional = true }
+yuyib-gameplay = { path = "../yuyib-gameplay", version = "0.1.0", optional = true }
+yuyib-physics = { path = "../yuyib-physics", version = "0.1.0", optional = true }
+yuyib-game-2d = { path = "../yuyib-game-2d", version = "0.1.0", optional = true }
+yuyib-game-3d = { path = "../yuyib-game-3d", version = "0.1.0", optional = true }
+yuyib-game = { path = "../yuyib-game", version = "0.1.0", optional = true }
+yuyib-character-3d = { path = "../yuyib-character-3d", version = "0.1.0", optional = true }
+yuyib-image = { path = "../yuyib-image", version = "0.1.0", optional = true }
+yuyib-input = { path = "../yuyib-input", version = "0.1.0", optional = true }
+yuyib-gltf = { path = "../yuyib-gltf", version = "0.1.0", optional = true }
+yuyib-model = { path = "../yuyib-model", version = "0.1.0", optional = true }
+yuyib-model-assets = { path = "../yuyib-model-assets", version = "0.1.0", optional = true }
+yuyib-net = { path = "../yuyib-net", version = "0.1.0", optional = true }
+yuyib-platform = { path = "../yuyib-platform", version = "0.1.0", optional = true }
+yuyib-render = { path = "../yuyib-render", version = "0.1.0", optional = true }
+yuyib-render-2d = { path = "../yuyib-render-2d", version = "0.1.0", optional = true }
+yuyib-render-3d = { path = "../yuyib-render-3d", version = "0.1.0", optional = true }
+yuyib-render-texture = { path = "../yuyib-render-texture", version = "0.1.0", optional = true }
+yuyib-scene = { path = "../yuyib-scene", version = "0.1.0", optional = true }
+yuyib-shader = { path = "../yuyib-shader", version = "0.1.0", optional = true }
+yuyib-source1 = { path = "../yuyib-source1", version = "0.1.0", optional = true }
+yuyib-source1-scene = { path = "../yuyib-source1-scene", version = "0.1.0", optional = true }
+yuyib-tasks = { path = "../yuyib-tasks", version = "0.1.0", optional = true }
+yuyib-vmf = { path = "../yuyib-vmf", version = "0.1.0", optional = true }
+yuyib-vmf-model = { path = "../yuyib-vmf-model", version = "0.1.0", optional = true }
+yuyib-vmt = { path = "../yuyib-vmt", version = "0.1.0", optional = true }
+yuyib-vtf = { path = "../yuyib-vtf", version = "0.1.0", optional = true }
+yuyib-ui = { path = "../yuyib-ui", version = "0.1.0", optional = true }
+yuyib-ui-render = { path = "../yuyib-ui-render", version = "0.1.0", optional = true }
+yuyib-ui-text = { path = "../yuyib-ui-text", version = "0.1.0", optional = true }
+yuyib-ui-text-render = { path = "../yuyib-ui-text-render", version = "0.1.0", optional = true }
+yuyib-webview = { path = "../yuyib-webview", version = "0.1.0", optional = true }
+yuyib-source1-assets = { path = "../yuyib-source1-assets", version = "0.1.0", optional = true }
+
+[dev-dependencies]
+bevy_ecs.workspace = true
+serde = { version = "1.0.228", features = ["derive"] }
+
+[[example]]
+name = "application_webview"
+path = "examples/application_webview.rs"
+required-features = ["webview"]
+
+[[example]]
+name = "game_plugin_schedule"
+path = "examples/game_plugin_schedule.rs"
+required-features = ["game"]
+
+[[example]]
+name = "asset_server_streaming"
+path = "examples/asset_server_streaming.rs"
+required-features = ["assets"]
+
+[[example]]
+name = "custom_importer"
+path = "examples/custom_importer.rs"
+required-features = ["assets"]
+
+[[example]]
+name = "offline_sprite_atlas"
+path = "examples/offline_sprite_atlas.rs"
+required-features = ["two-d"]
+
+[[example]]
+name = "render_graph_phases"
+path = "examples/render_graph_phases.rs"
+required-features = ["app"]
+
+[[example]]
+name = "game_3d_scene"
+path = "examples/game_3d_scene.rs"
+required-features = ["app", "three-d"]
+
+[[example]]
+name = "static_navigation_queries"
+path = "examples/static_navigation_queries.rs"
+required-features = ["three-d"]
+
+[[example]]
+name = "animation_crossfade"
+path = "examples/animation_crossfade.rs"
+required-features = ["three-d"]
+
+[[example]]
+name = "world_interaction_flow"
+path = "examples/world_interaction_flow.rs"
+required-features = ["gameplay"]
+
+[[example]]
+name = "gltf_material_policy"
+path = "examples/gltf_material_policy.rs"
+required-features = ["app", "three-d"]
+
+[[example]]
+name = "gltf_material_usage"
+path = "examples/gltf_material_usage.rs"
+required-features = ["app", "three-d"]
+
+[[example]]
+name = "gltf_unbound_material_fallback"
+path = "examples/gltf_unbound_material_fallback.rs"
+required-features = ["app", "three-d"]
+
+[[example]]
+name = "gltf_texture_diagnostics"
+path = "examples/gltf_texture_diagnostics.rs"
+required-features = ["app", "three-d"]
+
+[[example]]
+name = "frame_capture_smoke"
+path = "examples/frame_capture_smoke.rs"
+required-features = ["three-d", "two-d"]
+
+[[example]]
+name = "specular_ibl_window"
+path = "examples/specular_ibl_window.rs"
+required-features = ["app", "three-d"]
+
+[[example]]
+name = "specular_ibl_smoke"
+path = "examples/specular_ibl_smoke.rs"
+required-features = ["three-d", "two-d"]
+
+[[example]]
+name = "equirect_hdr_smoke"
+path = "examples/equirect_hdr_smoke.rs"
+required-features = ["three-d"]
+
+[[example]]
+name = "ggx_ibl_cook_smoke"
+path = "examples/ggx_ibl_cook_smoke.rs"
+required-features = ["three-d"]
+
+[[example]]
+name = "skybox_smoke"
+path = "examples/skybox_smoke.rs"
+required-features = ["three-d", "two-d"]
+
+[[example]]
+name = "directional_shadow_smoke"
+path = "examples/directional_shadow_smoke.rs"
+required-features = ["three-d", "two-d"]
+
+[[example]]
+name = "pbr_alpha_mask_smoke"
+path = "examples/pbr_alpha_mask_smoke.rs"
+required-features = ["three-d", "two-d"]
+
+[lints]
+workspace = true

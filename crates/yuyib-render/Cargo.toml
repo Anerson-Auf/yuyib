@@ -1,0 +1,16 @@
+[package]
+name = "yuyib-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "WGPU-backed rendering foundation for Yuyib."
+
+[dependencies]
+pollster.workspace = true
+wgpu.workspace = true
+yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }
+
+[lints]
+workspace = true

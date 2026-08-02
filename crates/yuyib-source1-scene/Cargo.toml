@@ -1,0 +1,17 @@
+[package]
+name = "yuyib-source1-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Renderer-neutral Source 1 VMF entity metadata adapter for Yuyib ECS."
+
+[dependencies]
+bevy_ecs.workspace = true
+yuyib-ecs = { path = "../yuyib-ecs" }
+yuyib-game-3d = { path = "../yuyib-game-3d" }
+yuyib-vmf = { path = "../yuyib-vmf" }
+
+[lints]
+workspace = true

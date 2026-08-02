@@ -1,0 +1,16 @@
+[book]
+title = "Yuyib Wiki"
+authors = ["Anerson"]
+language = "ru"
+
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+smart-punctuation = true
+git-repository-url = "https://example.invalid/yuyib"
+additional-css = ["theme/wiki.css"]
+
+[output.html.search]
+enable = true

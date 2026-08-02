@@ -1,0 +1,27 @@
+[package]
+name = "yuyib-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "High-level native application facade for Yuyib."
+
+[features]
+ui = ["dep:yuyib-input", "dep:yuyib-ui", "dep:yuyib-ui-render"]
+ui-text = ["ui", "dep:yuyib-ui-text", "dep:yuyib-ui-text-render"]
+webview = ["dep:yuyib-webview"]
+
+[dependencies]
+yuyib-core = { path = "../yuyib-core", version = "0.1.0" }
+yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }
+yuyib-render = { path = "../yuyib-render", version = "0.1.0" }
+yuyib-input = { path = "../yuyib-input", optional = true }
+yuyib-ui = { path = "../yuyib-ui", optional = true }
+yuyib-ui-render = { path = "../yuyib-ui-render", optional = true }
+yuyib-ui-text = { path = "../yuyib-ui-text", optional = true }
+yuyib-ui-text-render = { path = "../yuyib-ui-text-render", optional = true }
+yuyib-webview = { path = "../yuyib-webview", optional = true }
+
+[lints]
+workspace = true

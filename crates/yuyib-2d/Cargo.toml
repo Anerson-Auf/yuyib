@@ -1,0 +1,16 @@
+[package]
+name = "yuyib-2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "2D texture, sprite-sheet and deterministic sprite-animation data models for Yuyib."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+yuyib-assets = { path = "../yuyib-assets" }
+
+[lints]
+workspace = true

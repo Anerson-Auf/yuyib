@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; connect-src 'self'"
+    />
+    <title>Yuyib Editor</title>
+  </head>
+  <body>
+    <svg class="svg-definitions" aria-hidden="true">
+      <symbol id="i-cube" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 7 9 5v10l-9-5V7Zm18 0-9 5v10l9-5V7Z"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5h6l2 2h10v9a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+      <symbol id="i-undo" viewBox="0 0 24 24"><path d="m9 8-5 4 5 4"/><path d="M5 12h8a6 6 0 0 1 6 6"/></symbol>
+      <symbol id="i-redo" viewBox="0 0 24 24"><path d="m15 8 5 4-5 4"/><path d="M19 12h-8a6 6 0 0 0-6 6"/></symbol>
+      <symbol id="i-code" viewBox="0 0 24 24"><path d="m9 6-6 6 6 6M15 6l6 6-6 6M14 3l-4 18"/></symbol>
+      <symbol id="i-scene" viewBox="0 0 24 24"><circle cx="12" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M12 9v4M8 16l4-3 4 3"/></symbol>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m4 18 5-5 3 3 3-4 5 6"/></symbol>
+      <symbol id="i-bug" viewBox="0 0 24 24"><path d="M8 9h8v7a4 4 0 0 1-8 0V9Z"/><path d="m9 5 3 4 3-4M4 12h4M16 12h4M5 18l3-2M19 18l-3-2"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5"/><path d="M18.5 9A8 8 0 1 0 20 15"/></symbol>
+      <symbol id="i-crosshair" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 9 3 3-3 3M12 15h5"/></symbol>
+    </svg>
+
+    <div id="projectLauncher" class="project-launcher is-hidden" aria-modal="true" role="dialog" aria-labelledby="launcherTitle">
+      <header class="launcher-chrome" aria-label="Window">
+        <div class="launcher-chrome-brand"><strong>Yuyib</strong><span>Editor</span></div>
+        <div class="window-drag-region" aria-hidden="true"></div>
+        <div class="window-controls" aria-label="Window controls">
+          <button type="button" data-window="minimize" aria-label="Minimize">─</button>
+          <button type="button" data-window="maximize" aria-label="Maximize">□</button>
+          <button type="button" data-window="close" class="window-close" aria-label="Close">×</button>
+        </div>
+      </header>
+      <div class="project-launcher-card">
+        <div class="project-launcher-brand"><span class="brand-mark"><span class="brand-core"></span></span><div><strong id="launcherTitle">Yuyib Editor</strong><span>Open an existing project or create a new one</span></div></div>
+        <label class="launcher-field"><span>Project name</span><input id="launcherProjectName" type="text" maxlength="64" placeholder="My Game" autocomplete="off" /></label>
+        <label class="launcher-field"><span>Profile</span>
+          <select id="launcherProfile">
+            <option value="game3d" selected>Game 3D</option>
+            <option value="game2d">Game 2D</option>
+            <option value="application">Application</option>
+          </select>
+        </label>
+        <div class="launcher-actions">
+          <button id="launcherCreateButton" class="primary-button">Create project…</button>
+          <button id="launcherOpenButton" class="toolbar-action">Open project folder…</button>
+        </div>
+        <label class="launcher-field"><span>Or paste project folder path</span><input id="launcherOpenPath" type="text" placeholder="D:\games\my-project" autocomplete="off" /></label>
+        <div class="launcher-actions">
+          <button id="launcherOpenPathButton" class="toolbar-action">Open path</button>
+        </div>
+        <p class="launcher-help">Create picks a <strong>parent</strong> folder and writes <code>parent/Name/</code> with <code>project.yuyib</code>. Open must select that project folder (the one that contains <code>project.yuyib</code>), not the monorepo or a parent of several projects.</p>
+        <p id="launcherStatus" class="launcher-status"></p>
+      </div>
+    </div>
+
+    <div id="addComponentDialog" class="component-dialog" aria-modal="true" aria-labelledby="addComponentDialogTitle" role="dialog" hidden>
+      <div class="component-dialog__backdrop" data-close-component-dialog></div>
+      <section class="component-dialog__panel">
+        <header class="component-dialog__header">
+          <div><strong id="addComponentDialogTitle">Add Component</strong><small id="addComponentDialogEntity">Select an entity</small></div>
+          <button type="button" class="icon-button icon-button--small" data-close-component-dialog aria-label="Close add component dialog">×</button>
+        </header>
+        <div id="addComponentOptions" class="component-dialog__options"></div>
+      </section>
+    </div>
+
+    <div id="revisionConflictDialog" class="component-dialog" aria-modal="true" aria-labelledby="revisionConflictTitle" role="alertdialog" hidden>
+      <div class="component-dialog__backdrop" data-close-revision-conflict></div>
+      <section class="component-dialog__panel component-dialog__panel--compact">
+        <header class="component-dialog__header">
+          <div><strong id="revisionConflictTitle">Revision conflict</strong><small id="revisionConflictPath">—</small></div>
+          <button type="button" class="icon-button icon-button--small" data-close-revision-conflict aria-label="Close revision conflict dialog">×</button>
+        </header>
+        <div class="component-dialog__body">
+          <p id="revisionConflictMessage" class="component-dialog__detail">The document changed outside the Editor.</p>
+          <p id="revisionConflictRevisions" class="component-dialog__meta"></p>
+        </div>
+        <div class="component-dialog__actions">
+          <button id="revisionConflictReload" type="button" class="primary-button">Reload</button>
+          <button type="button" class="toolbar-action" data-close-revision-conflict>Cancel</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="app" class="editor-shell">
+      <header class="titlebar">
+        <div class="brand-mark"><span class="brand-core"></span></div>
+        <div class="title-copy"><strong>Yuyib</strong><span>Editor</span></div>
+        <nav class="menu-strip" aria-label="Application menu">
+          <button type="button" data-menu="file-open-project">File</button>
+          <button type="button" data-menu="edit-menu">Edit</button>
+          <button type="button" data-menu="assets-focus">Assets</button>
+          <button type="button" data-menu="scene-open">Scene</button>
+          <button type="button" data-menu="build-check">Build</button>
+          <button type="button" data-menu="help-about">Help</button>
+        </nav>
+        <div class="project-chip"><span class="status-dot status-dot--ok"></span><span id="projectNameLabel">No project</span><span class="branch-name">—</span></div>
+        <div id="bridgeMode" class="bridge-mode">Browser mock</div>
+        <div class="window-drag-region" aria-hidden="true"></div>
+        <div class="window-controls" aria-label="Window controls">
+          <button type="button" data-window="minimize" aria-label="Minimize">─</button>
+          <button type="button" data-window="maximize" aria-label="Maximize">□</button>
+          <button type="button" data-window="close" class="window-close" aria-label="Close">×</button>
+        </div>
+      </header>
+
+      <div class="main-toolbar">
+        <div class="toolbar-group history-controls">
+          <button class="icon-button" data-command="history.undo" title="Undo"><svg><use href="#i-undo"/></svg></button>
+          <button class="icon-button" data-command="history.redo" title="Redo"><svg><use href="#i-redo"/></svg></button>
+        </div>
+        <div class="toolbar-separator"></div>
+        <div class="tool-segment" aria-label="Transform tool">
+          <button class="tool-button is-active" data-tool="move" title="Move">W</button>
+          <button class="tool-button" data-tool="rotate" title="Rotate">E</button>
+          <button class="tool-button" data-tool="scale" title="Scale">R</button>
+          <button class="tool-button" data-tool="rect" title="Rect">T</button>
+        </div>
+        <button class="select-control"><span>Local</span><span class="select-caret">⌄</span></button>
+        <button class="select-control"><span>Pivot</span><span class="select-caret">⌄</span></button>
+        <div class="toolbar-center">
+          <div class="play-controls">
+            <button id="playButton" class="play-button" title="Play"><svg><use href="#i-play"/></svg></button>
+            <button id="pauseButton" class="icon-button" title="Pause"><svg><use href="#i-pause"/></svg></button>
+            <button id="stopButton" class="icon-button" title="Stop"><svg><use href="#i-stop"/></svg></button>
+          </div>
+        </div>
+        <div class="toolbar-right">
+          <button id="saveButton" class="toolbar-action"><span class="save-indicator"></span>Save scene <kbd>Ctrl S</kbd></button>
+          <button id="buildButton" class="toolbar-action toolbar-action--accent" title="Run scoped Cargo check"><svg><use href="#i-terminal"/></svg>Cargo check</button>
+        </div>
+      </div>
+
+      <main class="workspace">
+        <aside class="activity-rail" aria-label="Editor areas">
+          <button class="activity-button is-active" data-rail="project" title="Project"><svg><use href="#i-folder"/></svg></button>
+          <button class="activity-button" data-rail="scene" title="Scene"><svg><use href="#i-scene"/></svg></button>
+          <button class="activity-button" data-rail="assets" title="Assets"><svg><use href="#i-image"/></svg></button>
+          <button class="activity-button" data-rail="diagnostics" title="Diagnostics"><svg><use href="#i-bug"/></svg><span class="rail-badge">0</span></button>
+          <div class="activity-spacer"></div>
+          <button class="activity-button" data-rail="settings" title="Settings"><svg><use href="#i-settings"/></svg></button>
+        </aside>
+
+        <aside class="left-sidebar panel-column">
+          <section class="panel project-panel">
+            <header class="panel-header">
+              <h2>Project</h2>
+              <div class="header-actions"><button id="assetsRefreshButton" class="icon-button icon-button--small" title="Refresh assets"><svg><use href="#i-refresh"/></svg></button><button id="assetsTrackButton" class="icon-button icon-button--small" title="Track selected glTF (.yasset)">T</button><button id="assetsRenameButton" class="icon-button icon-button--small" title="Rename tracked glTF">R</button><button id="assetsMigrateModelRefsButton" class="icon-button icon-button--small" title="Migrate project scenes: Model3d path → asset://GUID (tracked only; not selection)">G</button><button class="icon-button icon-button--small" title="More"><svg><use href="#i-more"/></svg></button></div>
+            </header>
+            <div class="panel-search"><svg><use href="#i-search"/></svg><input id="assetSearch" type="search" placeholder="Search assets" autocomplete="off"/><kbd>⌘P</kbd></div>
+            <div class="project-breadcrumb"><button>Assets</button><span>/</span><button>cyberpunk</button></div>
+            <div class="asset-grid" id="assetGrid">
+              <button class="asset-card" data-kind="asset" data-id="asset://models/neon_arch">
+                <span class="asset-thumb asset-thumb--arch"><span></span></span><span class="asset-name">neon_arch.glb</span><span class="asset-meta">GLTF · 2.8 MB</span>
+              </button>
+              <button class="asset-card is-selected" data-kind="asset" data-id="asset://models/neon_sign">
+                <span class="asset-thumb asset-thumb--sign"><span>夜雨</span></span><span class="asset-name">neon_sign.glb</span><span class="asset-meta">GLTF · 846 KB</span>
+              </button>
+              <button class="asset-card" data-kind="asset" data-id="asset://textures/alley_wall">
+                <span class="asset-thumb asset-thumb--wall"></span><span class="asset-name">alley_wall.ktx2</span><span class="asset-meta">Texture · 4K</span>
+              </button>
+              <button class="asset-card" data-kind="asset" data-id="asset://materials/holo_ad">
+                <span class="asset-thumb asset-thumb--material"><span></span></span><span class="asset-name">holo_ad.yasset</span><span class="asset-meta">Material</span>
+              </button>
+            </div>
+            <button class="show-all-button">Show all 124 assets <span>→</span></button>
+          </section>
+
+          <section class="panel hierarchy-panel">
+            <header class="panel-header">
+              <h2>Scene Hierarchy</h2>
+              <div class="header-actions"><button id="createEntityButton" class="add-button" title="Create entity">＋</button><button id="createPlayerButton" class="add-button" title="Create player spawn">P</button><button id="deleteEntityButton" class="icon-button icon-button--small" title="Delete selected entity" disabled>×</button><button id="createSceneButton" class="icon-button icon-button--small" title="Create scene"><svg><use href="#i-more"/></svg></button><button id="openSceneButton" class="icon-button icon-button--small" title="Open scene"><svg><use href="#i-folder"/></svg></button></div>
+            </header>
+            <div class="scene-name-row"><span class="status-dot status-dot--cyan"></span><strong id="scenePathLabel">Loading scene…</strong><span class="dirty-mark">●</span></div>
+            <div id="projectSceneList" class="project-scene-list" hidden></div>
+            <div id="sceneTree" class="tree" role="tree"><div class="data-empty-state"><span class="loading-spinner"></span><span>Waiting for scene.document</span></div></div>
+          </section>
+        </aside>
+
+        <section class="center-stack">
+          <div class="document-tabs" role="tablist">
+            <button class="document-tab is-active" data-view="scene"><svg><use href="#i-scene"/></svg><span>Scene</span><span class="tab-modified">●</span></button>
+            <button class="document-tab" data-view="preview"><svg><use href="#i-image"/></svg><span>Asset Preview</span></button>
+            <button class="document-tab" data-view="code"><svg><use href="#i-code"/></svg><span>Code</span></button>
+            <div class="tab-strip-fill"></div>
+            <button class="icon-button"><svg><use href="#i-more"/></svg></button>
+          </div>
+
+          <div id="sceneView" class="main-view scene-view is-visible">
+            <div class="viewport-toolbar">
+              <div class="viewport-mode"><button class="is-active">Shaded</button><button>Wireframe</button><button>UV</button></div>
+              <div class="viewport-toolbar-spacer"></div>
+              <button class="icon-button icon-button--small" title="Frame selected"><svg><use href="#i-crosshair"/></svg></button>
+            </div>
+            <div class="viewport-canvas-wrap">
+              <canvas id="sceneCanvas" aria-label="Yuyib 3D scene viewport mock"></canvas>
+              <div id="viewportInputRelay" class="viewport-input-relay" aria-hidden="true"></div>
+              <div class="viewport-axis" id="viewportAxis" aria-hidden="true">
+                <svg viewBox="0 0 56 56" width="56" height="56">
+                  <line id="axisLineX" x1="28" y1="28" x2="46" y2="34" stroke="#ff5e72" stroke-width="2"/>
+                  <line id="axisLineY" x1="28" y1="28" x2="32" y2="10" stroke="#52d69b" stroke-width="2"/>
+                  <line id="axisLineZ" x1="28" y1="28" x2="12" y2="38" stroke="#5b8eff" stroke-width="2"/>
+                  <circle cx="28" cy="28" r="2.5" fill="#cbd3df"/>
+                  <text id="axisLabelX" x="48" y="36" fill="#ff687a" font-size="8" font-family="monospace" font-weight="700">X</text>
+                  <text id="axisLabelY" x="33" y="9" fill="#4be09f" font-size="8" font-family="monospace" font-weight="700">Y</text>
+                  <text id="axisLabelZ" x="4" y="42" fill="#5b8eff" font-size="8" font-family="monospace" font-weight="700">Z</text>
+                </svg>
+              </div>
+              <div class="viewport-stats"><span>Perspective</span><span>Lit PBR</span><span>60 FPS</span></div>
+              <div class="selection-chip"><span class="selection-chip-icon"><svg><use href="#i-cube"/></svg></span><span><strong id="selectionName">No selection</strong><small id="selectionMeta">Open a .yscene document</small><small id="selectionCoords" class="selection-coords is-hidden"></small></span></div>
+              <div id="previewLoading" class="preview-loading is-hidden"><span class="loading-spinner"></span><span>Reimporting asset…</span><strong>68%</strong></div>
+            </div>
+            <div class="viewport-footer">
+              <div><span class="status-dot status-dot--ok"></span><span id="sceneStatusLabel">Waiting for authoring document</span></div>
+              <div class="resource-stat"><span>Triangles</span><strong>184.2k</strong></div>
+              <div class="resource-stat"><span>GPU</span><strong>412 MB / 1.5 GB</strong></div>
+              <div class="resource-meter"><span></span></div>
+            </div>
+          </div>
+
+          <div id="previewView" class="main-view preview-view">
+            <div class="preview-viewport">
+              <div class="viewport-toolbar">
+                <div class="viewport-mode"><button class="is-active">Shaded</button></div>
+                <div class="viewport-toolbar-spacer"></div>
+                <label class="overlay-toggle"><input type="checkbox" data-overlay="collision"/><span></span>Collision</label>
+                <label class="overlay-toggle"><input type="checkbox" data-overlay="normals" checked/><span></span>Normals</label>
+                <label class="overlay-toggle"><input type="checkbox" data-overlay="bounds" checked/><span></span>Bounds</label>
+              </div>
+              <div class="preview-stage">
+                <div id="previewInputRelay" class="viewport-input-relay" aria-hidden="true"></div>
+                <div id="assetPreviewLoading" class="preview-loading is-hidden"><span class="loading-spinner"></span><span>Loading asset…</span><strong>0%</strong></div>
+                <div class="preview-stage-hint">Native WGPU preview · orbit with RMB</div>
+              </div>
+            </div>
+            <aside class="preview-summary">
+              <div class="summary-kicker">Imported asset</div>
+              <h3 id="assetPreviewTitle">No asset selected</h3>
+              <p id="assetPreviewSubtitle">Open a .glb / .gltf from Assets</p>
+              <dl>
+                <div><dt>Primitives</dt><dd id="assetPreviewMeshes">—</dd></div>
+                <div><dt>GPU</dt><dd id="assetPreviewGpu">—</dd></div>
+              </dl>
+              <button id="placeAssetInSceneButton" class="primary-button" disabled type="button"><svg><use href="#i-cube"/></svg>Place in Scene</button>
+              <button id="reimportButton" class="primary-button" type="button"><svg><use href="#i-refresh"/></svg>Reimport with current settings</button>
+            </aside>
+          </div>
+
+          <div id="codeView" class="main-view code-view">
+            <aside class="code-explorer">
+              <div class="code-explorer-title">Explorer <button class="icon-button icon-button--small"><svg><use href="#i-more"/></svg></button></div>
+              <div class="code-workspace-name">WORKSPACE</div>
+              <button class="code-tree-row is-open"><svg><use href="#i-chevron"/></svg><span>src</span></button>
+              <button class="code-tree-row code-depth-1" data-source="project.world"><span class="rust-file-icon">Rs</span><span>main.rs</span></button>
+              <button class="code-tree-row code-depth-1 is-selected" data-source="component.neon-sign"><span class="rust-file-icon">Rs</span><span>neon_sign.rs</span><span class="code-dirty-dot">●</span></button>
+              <button class="code-tree-row code-depth-1" data-source="systems.neon"><span class="rust-file-icon">Rs</span><span>neon_systems.rs</span></button>
+              <button class="code-tree-row is-open"><svg><use href="#i-chevron"/></svg><span>assets</span></button>
+              <button class="code-tree-row code-depth-1"><span class="scene-file-icon">Ys</span><span>district_01.yscene</span></button>
+              <div class="code-outline-heading">Outline</div>
+              <button class="outline-row"><span class="outline-symbol">S</span>NeonSign</button>
+              <button class="outline-row"><span class="outline-symbol outline-symbol--fn">ƒ</span>pulse_neon_signs</button>
+              <button class="outline-row"><span class="outline-symbol outline-symbol--fn">ƒ</span>register</button>
+            </aside>
+            <section class="editor-workbench">
+              <div class="code-tabs"><button class="code-file-tab is-active"><span class="rust-file-icon">Rs</span>neon_sign.rs<span class="code-dirty-dot">●</span><span class="close-tab">×</span></button></div>
+              <div class="code-breadcrumb"><span>project</span><b>›</b><span>src</span><b>›</b><span>neon_sign.rs</span><b>›</b><strong>NeonSign</strong></div>
+              <div id="monacoHost" class="monaco-host"><div class="monaco-loading"><span class="loading-spinner"></span>Loading Monaco Editor…</div></div>
+              <footer class="code-statusbar"><span class="statusbar-primary">workspace</span><span>↻</span><span>0 diagnostics</span><span class="statusbar-spacer"></span><span id="rustAnalyzerState"><i></i>LSP · unavailable</span><span>Ln 1, Col 1</span><span>UTF-8</span><span>Spaces: 4</span><span>Rust</span></footer>
+            </section>
+          </div>
+
+          <section class="bottom-panel">
+            <div class="bottom-tabs" role="tablist">
+              <button class="bottom-tab is-active" data-bottom="diagnostics">Import Diagnostics <span class="count-badge count-badge--warning">3</span></button>
+              <button class="bottom-tab" data-bottom="preview-log">Preview Pipeline</button>
+              <button class="bottom-tab" data-bottom="output">Output</button>
+              <div class="bottom-tab-fill"></div>
+              <button id="copyDiagnostics" class="icon-button icon-button--small" title="Copy diagnostics">⧉</button>
+              <button id="clearDiagnostics" class="icon-button icon-button--small" title="Clear"><span class="clear-icon">⌫</span></button>
+            </div>
+            <div id="diagnosticsPanel" class="bottom-content diagnostics-content is-visible">
+              <button class="diagnostic-row diagnostic-row--warning"><span class="diagnostic-icon">!</span><span class="diagnostic-main"><strong>Occlusion texture channel is missing</strong><small>material_0 · using constant 1.0</small></span><span class="diagnostic-source">neon_sign.glb</span><span class="diagnostic-time">12:41:08</span></button>
+              <button class="diagnostic-row diagnostic-row--info"><span class="diagnostic-icon">i</span><span class="diagnostic-main"><strong>Tangents generated during import</strong><small>mesh: sign_face · MikkTSpace · 1,248 vertices</small></span><span class="diagnostic-source">neon_sign.glb</span><span class="diagnostic-time">12:41:08</span></button>
+              <button class="diagnostic-row diagnostic-row--warning"><span class="diagnostic-icon">!</span><span class="diagnostic-main"><strong>Animated node has a non-uniform scale</strong><small>node: sign_hanger · preview may differ from authored metadata</small></span><span class="diagnostic-source">animation_0</span><span class="diagnostic-time">12:41:09</span></button>
+            </div>
+            <div id="previewLogPanel" class="bottom-content preview-log-content">
+              <div class="pipeline-flow"><span>source asset<small>846 KB</small></span><b>→</b><span>import settings<small>gltf@2</small></span><b>→</b><span>neutral asset<small>cached</small></span><b>→</b><span>GPU publish<small>5/5 primitives</small></span><b>→</b><span class="pipeline-active">preview<small>ready · 42 MB</small></span></div>
+            </div>
+            <div id="outputPanel" class="bottom-content output-content"><pre id="outputLog"><span>[editor]</span> Authoring session ready at revision 1842&#10;<span>[preview]</span> Published 5 primitives within frame budget (3.7 ms)&#10;<span>[assets]</span> Cache hit asset://models/neon_sign @ 7fa3a2</pre></div>
+          </section>
+        </section>
+
+        <aside class="right-sidebar panel inspector-panel">
+          <header class="panel-header inspector-titlebar"><div><span class="inspector-object-icon"><svg><use href="#i-cube"/></svg></span><span><strong id="inspectorName">No selection</strong><small>Scene document</small></span></div><button class="icon-button icon-button--small"><svg><use href="#i-more"/></svg></button></header>
+          <div class="inspector-identity"><span>Entity GUID</span><code id="inspectorGuid">—</code><button id="copyEntityGuid" title="Copy">⧉</button></div>
+          <label class="entity-name-editor"><span>Name</span><input id="entityNameInput" type="text" disabled placeholder="Select an entity"></label>
+          <div id="componentList" class="component-list"><div class="data-empty-state"><span>Select an entity to inspect components</span></div></div>
+          <button id="addComponentButton" class="add-component-button" title="Add a supported component">＋ Add Component</button>
+          <section class="source-navigation">
+            <div class="source-heading"><span>Code &amp; ownership</span><span class="coverage-chip">Awaiting coverage</span></div>
+            <div id="unavailableCapabilities" class="unavailable-capabilities" hidden></div>
+            <button data-open-source="component"><svg><use href="#i-code"/></svg><span><strong>Open component source</strong><small>Resolved from host coverage</small></span><b>↗</b></button>
+            <button data-open-source="adapter"><svg><use href="#i-code"/></svg><span><strong>Open authoring adapter</strong><small>Resolved from host coverage</small></span><b>↗</b></button>
+            <button data-open-source="systems.reading"><svg><use href="#i-search"/></svg><span><strong>Find systems using component</strong><small>Resolved from host coverage</small></span><b>→</b></button>
+            <button id="runCheckButton" class="run-check"><svg><use href="#i-terminal"/></svg><span><strong>Run scoped Cargo check</strong><small>Cargo package not configured</small></span><b>⌘↵</b></button>
+          </section>
+        </aside>
+      </main>
+
+      <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

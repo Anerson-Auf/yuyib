@@ -1,0 +1,35 @@
+{
+  "format": "yuyib.scene",
+  "format_version": 1,
+  "scene_guid": "290095ef-db21-4a53-95b4-65b0124e7ebf",
+  "entities": [
+    {
+      "guid": "10f41612-2cb7-41d5-a3ef-973a94c66940",
+      "name": "Origin",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

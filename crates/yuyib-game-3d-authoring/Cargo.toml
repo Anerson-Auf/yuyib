@@ -1,0 +1,18 @@
+[package]
+name = "yuyib-game-3d-authoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Typed 3D transform and hierarchy authoring validation and scene materialization for Yuyib."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+yuyib-authoring = { path = "../yuyib-authoring" }
+yuyib-ecs = { path = "../yuyib-ecs" }
+yuyib-game-3d = { path = "../yuyib-game-3d" }
+
+[lints]
+workspace = true

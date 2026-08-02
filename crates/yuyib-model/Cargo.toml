@@ -1,0 +1,15 @@
+[package]
+name = "yuyib-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Validated 3D model, mesh and material data for Yuyib."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+yuyib-assets = { path = "../yuyib-assets" }
+
+[lints]
+workspace = true

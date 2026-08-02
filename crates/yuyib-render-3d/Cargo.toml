@@ -1,0 +1,26 @@
+[package]
+name = "yuyib-render-3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Unlit indexed 3D mesh rendering for Yuyib."
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["hdr"] }
+bytemuck = { version = "1.24.0", features = ["derive"] }
+yuyib-2d = { path = "../yuyib-2d", version = "0.1.0" }
+yuyib-model = { path = "../yuyib-model", version = "0.1.0" }
+yuyib-model-assets = { path = "../yuyib-model-assets", version = "0.1.0" }
+yuyib-assets = { path = "../yuyib-assets", version = "0.1.0" }
+yuyib-ecs = { path = "../yuyib-ecs", version = "0.1.0" }
+yuyib-game-3d = { path = "../yuyib-game-3d", version = "0.1.0" }
+yuyib-gltf = { path = "../yuyib-gltf", version = "0.1.0" }
+yuyib-render = { path = "../yuyib-render", version = "0.1.0" }
+yuyib-render-texture = { path = "../yuyib-render-texture", version = "0.1.0" }
+yuyib-scene = { path = "../yuyib-scene", version = "0.1.0" }
+yuyib-tasks = { path = "../yuyib-tasks", version = "0.1.0" }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "yuyib-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Explicit glTF scene-to-ECS adapter for Yuyib."
+
+[dependencies]
+bevy_ecs.workspace = true
+yuyib-assets = { path = "../yuyib-assets" }
+yuyib-ecs = { path = "../yuyib-ecs" }
+yuyib-game-3d = { path = "../yuyib-game-3d" }
+yuyib-gltf = { path = "../yuyib-gltf" }
+yuyib-model = { path = "../yuyib-model" }
+
+[dev-dependencies]
+base64 = "0.22.1"
+
+[lints]
+workspace = true

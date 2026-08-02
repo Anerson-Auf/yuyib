@@ -1,0 +1,20 @@
+[package]
+name = "yuyib-render-2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Instanced GPU sprite rendering for Yuyib."
+
+[dependencies]
+bytemuck = { version = "1.24.0", features = ["derive"] }
+yuyib-2d = { path = "../yuyib-2d", version = "0.1.0" }
+yuyib-image = { path = "../yuyib-image", version = "0.1.0" }
+yuyib-render = { path = "../yuyib-render", version = "0.1.0" }
+
+[dev-dependencies]
+yuyib-assets = { path = "../yuyib-assets", version = "0.1.0" }
+
+[lints]
+workspace = true

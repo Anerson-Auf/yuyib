@@ -1,0 +1,17 @@
+[package]
+name = "yuyib-character-3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Renderer-neutral deterministic prototype character motor for Yuyib."
+
+[dependencies]
+bevy_ecs.workspace = true
+yuyib-ecs = { path = "../yuyib-ecs" }
+yuyib-game-3d = { path = "../yuyib-game-3d" }
+yuyib-physics = { path = "../yuyib-physics" }
+
+[lints]
+workspace = true

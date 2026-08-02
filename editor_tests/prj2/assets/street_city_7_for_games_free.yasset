@@ -1,0 +1,15 @@
+{
+  "format": "yuyib.asset",
+  "format_version": 1,
+  "guid": "36cd2349-24dc-4640-9f93-677aa37bccc5",
+  "source": "assets/street_city_7_for_games_free.glb",
+  "content_hash": "blake3:1bf58de5a7d3ec71b2670e044d071f9905b7edc985cbe30887c2c78678bbbc09",
+  "importer": "yuyib.gltf-import",
+  "importer_version": 1,
+  "import_settings": {
+    "schema": "yuyib.gltf-import-settings",
+    "version": 1,
+    "payload": {}
+  },
+  "dependencies": []
+}

@@ -1,0 +1,15 @@
+{
+  "format": "yuyib.asset",
+  "format_version": 1,
+  "guid": "9b6da13b-8edf-4b2b-b978-ef9c06f0dccd",
+  "source": "assets/the_billiards_room.glb",
+  "content_hash": "blake3:bddfdef06e846b3b358c67ad689af902c5442b9ea6500147cfbd9b505e257231",
+  "importer": "yuyib.gltf-import",
+  "importer_version": 1,
+  "import_settings": {
+    "schema": "yuyib.gltf-import-settings",
+    "version": 1,
+    "payload": {}
+  },
+  "dependencies": []
+}

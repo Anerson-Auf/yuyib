@@ -1,0 +1,153 @@
+{
+  "format": "yuyib.scene",
+  "format_version": 1,
+  "scene_guid": "b1ca97e0-6aac-42ca-9626-de1e66b191ef",
+  "entities": [
+    {
+      "guid": "32a9ce03-dbc8-4f78-b0cc-945d5c83d101",
+      "name": "Origin",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "guid": "55089672-abb5-4719-b857-641aa2d6e920",
+      "name": "asd",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              -0.048110347241163254,
+              0.0,
+              0.19675755500793457
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "guid": "6be56c67-6a0a-436a-822e-be02cd52c3ac",
+      "name": "no_i_am_not_a_human_location__map",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "schema": "yuyib.model3d",
+          "version": 1,
+          "payload": {
+            "mesh": null,
+            "model": "no_i_am_not_a_human_location__map.glb",
+            "render_order": 0,
+            "visible": true
+          }
+        },
+        {
+          "schema": "yuyib.parent3d",
+          "version": 1,
+          "payload": {
+            "parent": "32a9ce03-dbc8-4f78-b0cc-945d5c83d101"
+          }
+        }
+      ]
+    },
+    {
+      "guid": "e54590a0-35c0-4d41-a4b9-c680758bf090",
+      "name": "cyberpunk_city",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "schema": "yuyib.model3d",
+          "version": 1,
+          "payload": {
+            "mesh": null,
+            "model": "cyberpunk_city.glb",
+            "render_order": 0,
+            "visible": true
+          }
+        },
+        {
+          "schema": "yuyib.parent3d",
+          "version": 1,
+          "payload": {
+            "parent": "55089672-abb5-4719-b857-641aa2d6e920"
+          }
+        }
+      ]
+    }
+  ]
+}

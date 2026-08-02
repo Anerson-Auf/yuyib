@@ -1,0 +1,1195 @@
+{
+  "capabilities": [
+    {
+      "id": "yuyib.animated-sprite2d",
+      "title": "AnimatedSprite2d",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.game-2d",
+      "documentation": "crates/yuyib-game-2d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.application",
+      "title": "Application host",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.app",
+      "documentation": "crates/yuyib-app/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-app/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.custom-render-passes",
+      "title": "Custom render graph passes",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.render",
+      "documentation": "crates/yuyib-render/src/graph.rs",
+      "source": {
+        "file": "crates/yuyib-render/src/graph.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.directional-light3d",
+      "title": "DirectionalLight3d",
+      "surfaces": [
+        "visual"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null
+    },
+    {
+      "id": "yuyib.game-2d-scene",
+      "title": "Game2dScene",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.game-2d",
+      "documentation": "crates/yuyib-game-2d/src/scene.rs",
+      "source": {
+        "file": "crates/yuyib-game-2d/src/scene.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.game-3d-scene",
+      "title": "Game3dScene",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.render-3d",
+      "documentation": "crates/yuyib-render-3d/src/scene.rs",
+      "source": {
+        "file": "crates/yuyib-render-3d/src/scene.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.game-lifecycle",
+      "title": "Game lifecycle and schedules",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.game",
+      "documentation": "crates/yuyib-game/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.gameplay-interactions",
+      "title": "Gameplay interactions",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.gameplay",
+      "documentation": "crates/yuyib-gameplay/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-gameplay/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.gltf-import",
+      "title": "glTF import",
+      "surfaces": [
+        "asset"
+      ],
+      "owner": "yuyib.gltf",
+      "documentation": "crates/yuyib-gltf/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-gltf/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null,
+      "asset_evidence": {
+        "import_settings_schema": "yuyib.gltf-import-settings",
+        "preview_capability": "yuyib.gltf-preview",
+        "diagnostic_codes": [
+          "gltf-flat-only-material",
+          "gltf-unbound-material",
+          "gltf-external-texture-uri",
+          "gltf-skipped-primitives",
+          "gltf-missing-uv-set"
+        ]
+      }
+    },
+    {
+      "id": "yuyib.gltf-preview",
+      "title": "glTF authoring preview",
+      "surfaces": [
+        "asset"
+      ],
+      "owner": "yuyib.gltf",
+      "documentation": "crates/yuyib-gltf-authoring/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-gltf-authoring/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null,
+      "asset_evidence": {
+        "import_settings_schema": "yuyib.gltf-import-settings",
+        "preview_capability": "yuyib.gltf-preview",
+        "diagnostic_codes": [
+          "gltf-flat-only-material",
+          "gltf-unbound-material",
+          "gltf-external-texture-uri",
+          "gltf-skipped-primitives",
+          "gltf-missing-uv-set"
+        ]
+      }
+    },
+    {
+      "id": "yuyib.kinematic-sprite-controller2d",
+      "title": "KinematicSpriteController2d",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.game-2d",
+      "documentation": "crates/yuyib-game-2d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.local-matrix-transform3d",
+      "title": "LocalMatrixTransform3d",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.local-transform3d",
+      "title": "LocalTransform3d",
+      "surfaces": [
+        "visual"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null
+    },
+    {
+      "id": "yuyib.model3d",
+      "title": "Model3d",
+      "surfaces": [
+        "visual"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null
+    },
+    {
+      "id": "yuyib.parent3d",
+      "title": "Parent3d relationship",
+      "surfaces": [
+        "visual"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null
+    },
+    {
+      "id": "yuyib.sprite2d",
+      "title": "Sprite2d",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.game-2d",
+      "documentation": "crates/yuyib-game-2d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.tile-map2d",
+      "title": "TileMap2d",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.game-2d",
+      "documentation": "crates/yuyib-game-2d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    },
+    {
+      "id": "yuyib.transform3d",
+      "title": "Transform3d",
+      "surfaces": [
+        "visual"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null
+    },
+    {
+      "id": "yuyib.world-transform3d",
+      "title": "WorldTransform3d",
+      "surfaces": [
+        "unavailable"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": "Metadata exists, but no typed end-to-end authoring adapter is registered.",
+      "target_milestone": "typed-adapter-and-coverage-gate"
+    }
+  ],
+  "components": [
+    {
+      "id": "yuyib.animated-sprite2d",
+      "capability": "yuyib.animated-sprite2d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "animation",
+          "title": "Animation",
+          "kind": {
+            "kind": "specialized",
+            "options": {
+              "widget": "yuyib.widget.sprite-animation"
+            }
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.directional-light3d",
+      "capability": "yuyib.directional-light3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "direction.x",
+          "title": "Direction X",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "axis",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "direction.y",
+          "title": "Direction Y",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "axis",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "direction.z",
+          "title": "Direction Z",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "axis",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "color.x",
+          "title": "Colour R",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "linear",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "color.y",
+          "title": "Colour G",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "linear",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "color.z",
+          "title": "Colour B",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "linear",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "illuminance_lux",
+          "title": "Illuminance",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "lux",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "enabled",
+          "title": "Enabled",
+          "kind": {
+            "kind": "bool"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.interactable",
+      "capability": "yuyib.gameplay-interactions",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "interaction",
+          "title": "Interaction",
+          "kind": {
+            "kind": "specialized",
+            "options": {
+              "widget": "yuyib.widget.interaction"
+            }
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-gameplay/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.kinematic-sprite-controller2d",
+      "capability": "yuyib.kinematic-sprite-controller2d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "config",
+          "title": "Controller",
+          "kind": {
+            "kind": "specialized",
+            "options": {
+              "widget": "yuyib.widget.kinematic-controller2d"
+            }
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.local-matrix-transform3d",
+      "capability": "yuyib.local-matrix-transform3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "matrix",
+          "title": "Local matrix",
+          "kind": {
+            "kind": "specialized",
+            "options": {
+              "widget": "yuyib.widget.matrix4"
+            }
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.local-transform3d",
+      "capability": "yuyib.local-transform3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "translation.x",
+          "title": "Translation X",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "translation.y",
+          "title": "Translation Y",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "translation.z",
+          "title": "Translation Z",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation.x",
+          "title": "Rotation X",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "quaternion",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation.y",
+          "title": "Rotation Y",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "quaternion",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation.z",
+          "title": "Rotation Z",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "quaternion",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation.w",
+          "title": "Rotation W",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "quaternion",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "scale.x",
+          "title": "Scale X",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "ratio",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "scale.y",
+          "title": "Scale Y",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "ratio",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "scale.z",
+          "title": "Scale Z",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "ratio",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.model3d",
+      "capability": "yuyib.model3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "model",
+          "title": "Model",
+          "kind": {
+            "kind": "asset_reference"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "mesh",
+          "title": "Mesh",
+          "kind": {
+            "kind": "specialized",
+            "options": {
+              "widget": "yuyib.widget.optional-u32"
+            }
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "visible",
+          "title": "Visible",
+          "kind": {
+            "kind": "bool"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "render_order",
+          "title": "Render order",
+          "kind": {
+            "kind": "i32"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.parent3d",
+      "capability": "yuyib.parent3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "parent",
+          "title": "Parent",
+          "kind": {
+            "kind": "entity_reference"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.sprite2d",
+      "capability": "yuyib.sprite2d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "region",
+          "title": "Texture region",
+          "kind": {
+            "kind": "specialized",
+            "options": {
+              "widget": "yuyib.widget.texture-region"
+            }
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "position",
+          "title": "Position",
+          "kind": {
+            "kind": "vec2"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "size",
+          "title": "Size",
+          "kind": {
+            "kind": "vec2"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation_radians",
+          "title": "Rotation",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "radians",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "tint",
+          "title": "Tint",
+          "kind": {
+            "kind": "color"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "layer",
+          "title": "Layer",
+          "kind": {
+            "kind": "i32"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.tile-map2d",
+      "capability": "yuyib.tile-map2d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "map",
+          "title": "Tile map",
+          "kind": {
+            "kind": "specialized",
+            "options": {
+              "widget": "yuyib.widget.tile-map"
+            }
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "position",
+          "title": "Position",
+          "kind": {
+            "kind": "vec2"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": true,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "layer",
+          "title": "Layer",
+          "kind": {
+            "kind": "i32"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "visible",
+          "title": "Visible",
+          "kind": {
+            "kind": "bool"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.transform3d",
+      "capability": "yuyib.transform3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "translation.x",
+          "title": "Translation X",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "translation.y",
+          "title": "Translation Y",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "translation.z",
+          "title": "Translation Z",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "units",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation.x",
+          "title": "Rotation X",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "quaternion",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation.y",
+          "title": "Rotation Y",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "quaternion",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation.z",
+          "title": "Rotation Z",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "quaternion",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "rotation.w",
+          "title": "Rotation W",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "quaternion",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "scale.x",
+          "title": "Scale X",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "ratio",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "scale.y",
+          "title": "Scale Y",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "ratio",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "scale.z",
+          "title": "Scale Z",
+          "kind": {
+            "kind": "f32"
+          },
+          "unit": "ratio",
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.world-transform3d",
+      "capability": "yuyib.world-transform3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "matrix",
+          "title": "World matrix",
+          "kind": {
+            "kind": "specialized",
+            "options": {
+              "widget": "yuyib.widget.matrix4"
+            }
+          },
+          "unit": null,
+          "read_only": true,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    }
+  ],
+  "import_settings": [
+    {
+      "id": "yuyib.gltf-import-settings",
+      "capability": "yuyib.gltf-import",
+      "current_version": 1
+    }
+  ],
+  "systems": [
+    {
+      "id": "yuyib.system.hierarchy-propagation-3d",
+      "owner": "yuyib.game-3d",
+      "reads": [
+        "yuyib.local-matrix-transform3d",
+        "yuyib.local-transform3d",
+        "yuyib.parent3d"
+      ],
+      "writes": [
+        "yuyib.transform3d",
+        "yuyib.world-transform3d"
+      ],
+      "schedule": "yuyib.schedule.caller-driven",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": 528,
+        "column": null
+      },
+      "documentation": null
+    },
+    {
+      "id": "yuyib.system.kinematic-sprite-controller-2d",
+      "owner": "yuyib.game-2d",
+      "reads": [
+        "yuyib.kinematic-sprite-controller2d",
+        "yuyib.tile-map2d"
+      ],
+      "writes": [
+        "yuyib.sprite2d"
+      ],
+      "schedule": "yuyib.schedule.caller-driven",
+      "source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": 1623,
+        "column": null
+      },
+      "documentation": null
+    },
+    {
+      "id": "yuyib.system.sprite-animation-2d",
+      "owner": "yuyib.game-2d",
+      "reads": [],
+      "writes": [
+        "yuyib.animated-sprite2d",
+        "yuyib.sprite2d"
+      ],
+      "schedule": "yuyib.schedule.caller-driven",
+      "source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": 549,
+        "column": null
+      },
+      "documentation": null
+    },
+    {
+      "id": "yuyib.system.tile-map-animation-2d",
+      "owner": "yuyib.game-2d",
+      "reads": [],
+      "writes": [
+        "yuyib.tile-map2d"
+      ],
+      "schedule": "yuyib.schedule.caller-driven",
+      "source": {
+        "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": 1007,
+        "column": null
+      },
+      "documentation": null
+    }
+  ],
+  "previews": [
+    {
+      "capability": "yuyib.gltf-preview",
+      "features": {
+        "mesh_selection": true,
+        "material_selection": true,
+        "animation_selection": false,
+        "overlays": [
+          "normals",
+          "bounds"
+        ],
+        "material_override": false,
+        "shared_render_presets": true,
+        "non_destructive_reimport": true
+      },
+      "budgets": {
+        "max_cpu_bytes": 536870912,
+        "max_gpu_bytes": 536870912,
+        "max_diagnostics": 256
+      },
+      "cache": {
+        "max_entries": 8,
+        "max_bytes": 1073741824,
+        "invalidate_on_content_hash_change": true,
+        "invalidate_on_import_settings_change": true
+      }
+    }
+  ],
+  "migrations": []
+}

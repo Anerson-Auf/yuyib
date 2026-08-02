@@ -1,0 +1,19 @@
+[package]
+name = "yuyib-render-texture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Reusable sampled GPU texture resources for Yuyib renderers."
+
+[dependencies]
+yuyib-2d = { path = "../yuyib-2d", version = "0.1.0" }
+yuyib-image = { path = "../yuyib-image", version = "0.1.0" }
+yuyib-render = { path = "../yuyib-render", version = "0.1.0" }
+
+[dev-dependencies]
+yuyib-assets = { path = "../yuyib-assets", version = "0.1.0" }
+
+[lints]
+workspace = true
