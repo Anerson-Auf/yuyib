@@ -730,6 +730,24 @@ impl MeshRenderer3d {
         camera: Camera3d,
         draws: &[(&GpuMesh, [f32; 16], [f32; 4])],
     ) -> Result<MeshDrawStats, MeshRenderError> {
+        self.draw_batch_with_depth_load_double_sided(frame, camera, draws, DepthLoad::Clear)
+    }
+
+    /// Like [`Self::draw_batch_depth_clear_double_sided`], but preserves an
+    /// existing depth buffer (`DepthLoad::Load`) so overlays can compose after
+    /// a world pass without wiping occlusion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MeshRenderError`] for invalid camera/matrix/colour data, or
+    /// when `draws` exceeds [`UNLIT_MESH_INSTANCE_CAPACITY`].
+    pub fn draw_batch_with_depth_load_double_sided(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        draws: &[(&GpuMesh, [f32; 16], [f32; 4])],
+        depth_load: DepthLoad,
+    ) -> Result<MeshDrawStats, MeshRenderError> {
         if draws.is_empty() {
             return Ok(MeshDrawStats {
                 triangles: 0,
@@ -751,7 +769,6 @@ impl MeshRenderer3d {
         frame
             .queue()
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
-        // Pack into a tightly padded staging blob so one write covers all slots.
         let mut packed = vec![0_u8; self.instance_stride as usize * draws.len()];
         for (index, uniform) in uniforms.iter().enumerate() {
             let start = index * self.instance_stride as usize;
@@ -766,7 +783,7 @@ impl MeshRenderer3d {
         let draw_calls = draws.len() as u32;
         frame.with_surface_pass_with_depth(
             wgpu::LoadOp::Load,
-            wgpu::LoadOp::Clear(1.0),
+            depth_load.operation(),
             |pass| {
                 pass.set_pipeline(&self.double_sided_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);

@@ -20,6 +20,8 @@ ecs = ["dep:yuyib-ecs"]
 tasks = ["dep:yuyib-tasks"]
 assets = ["dep:yuyib-assets", "tasks"]
 physics = ["dep:yuyib-physics", "ecs"]
+## Optional Rapier dynamics backend for M4 (`DynamicsBackend3d`).
+physics-rapier = ["physics", "yuyib-physics/rapier"]
 gameplay = ["dep:yuyib-gameplay", "ecs", "physics"]
 net = ["dep:yuyib-net"]
 audio = ["dep:yuyib-audio"]
@@ -229,6 +231,41 @@ required-features = ["three-d", "two-d"]
 name = "pbr_alpha_mask_smoke"
 path = "examples/pbr_alpha_mask_smoke.rs"
 required-features = ["three-d", "two-d"]
+
+[[example]]
+name = "physics_rapier_smoke"
+path = "examples/physics_rapier_smoke.rs"
+required-features = ["physics-rapier"]
+
+[[example]]
+name = "physics_rapier_kinematic_smoke"
+path = "examples/physics_rapier_kinematic_smoke.rs"
+required-features = ["physics-rapier"]
+
+[[example]]
+name = "physics_rapier_joints_smoke"
+path = "examples/physics_rapier_joints_smoke.rs"
+required-features = ["physics-rapier"]
+
+[[example]]
+name = "physics_rapier_convex_smoke"
+path = "examples/physics_rapier_convex_smoke.rs"
+required-features = ["physics-rapier"]
+
+[[example]]
+name = "physics_rapier_contacts_smoke"
+path = "examples/physics_rapier_contacts_smoke.rs"
+required-features = ["physics-rapier"]
+
+[[example]]
+name = "physics_rapier_window"
+path = "examples/physics_rapier_window.rs"
+required-features = ["app", "three-d", "physics-rapier"]
+
+[[example]]
+name = "playable_dynamics_overlay_smoke"
+path = "examples/playable_dynamics_overlay_smoke.rs"
+required-features = ["three-d", "physics-rapier"]
 
 [lints]
 workspace = true

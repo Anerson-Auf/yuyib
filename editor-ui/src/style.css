@@ -743,10 +743,11 @@ body.hosted-mode .brand-mark {
 .tab-modified { margin-left: auto; color: var(--orange); font-size: 7px; }
 .tab-strip-fill { flex: 1; }
 
-.main-view { display: none; min-width: 0; min-height: 0; overflow: hidden; }
-.main-view.is-visible { display: grid; }
+.main-view { display: none !important; min-width: 0; min-height: 0; overflow: hidden; }
+.main-view.is-visible { display: grid !important; }
 
-.scene-view { grid-template-rows: 32px minmax(0, 1fr) 28px; background: #080b10; }
+.scene-view { grid-template-rows: 32px minmax(0, 1fr); background: #080b10; }
+body.hosted-mode .scene-view { grid-template-rows: 28px minmax(0, 1fr); }
 
 .viewport-toolbar {
   display: flex;
@@ -762,6 +763,7 @@ body.hosted-mode .brand-mark {
 .viewport-mode button:last-child { border: 0; }
 .viewport-mode button.is-active { background: #1a2633; color: #cbd5e1; }
 .viewport-toolbar-spacer { flex: 1; }
+.viewport-status-label { color: #6f7c8e; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 42%; }
 
 .overlay-toggle { display: flex; align-items: center; gap: 5px; color: #9aa6b8; font-size: 9px; cursor: pointer; padding: 2px 6px; border-radius: 3px; background: #141a24; }
 .overlay-toggle input { position: absolute; opacity: 0; pointer-events: none; }
@@ -850,7 +852,7 @@ button.linkish:hover { color: #b9dceb; text-decoration: underline; }
 .loading-spinner { width: 13px; height: 13px; flex: 0 0 auto; border: 2px solid #2b3848; border-top-color: var(--cyan); border-radius: 50%; animation: spin 750ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.preview-view { display: grid; grid-template-columns: minmax(350px, 1fr) 265px; background: #090c12; min-height: 0; }
+.preview-view { grid-template-columns: minmax(350px, 1fr) 265px; background: #090c12; min-height: 0; }
 .preview-viewport { display: grid; grid-template-rows: 32px minmax(0, 1fr); min-height: 0; min-width: 0; }
 .preview-stage { position: relative; overflow: hidden; background: radial-gradient(ellipse at 50% 46%, #17233a 0, #0c1019 37%, #07090e 73%); min-height: 280px; }
 .preview-stage-hint { position: absolute; left: 12px; bottom: 10px; z-index: 2; color: #7f90a8; font-size: 9px; pointer-events: none; }

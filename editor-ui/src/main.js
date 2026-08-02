@@ -35,7 +35,7 @@ const state = {
   transactionId: 1,
   sourcePath: hosted ? null : "src/neon_sign.rs",
   sourceRevision: hosted ? null : 12,
-  overlays: { bounds: true, collision: false, normals: true },
+  overlays: { bounds: true, collision: false, normals: true, tangents: false, uv: false },
   previewMeshes: [],
   previewSelectedMesh: null,
   previewMaterials: [],
@@ -1528,7 +1528,10 @@ function applySceneDocument(payload) {
   state.scene.readOnly = Boolean(payload.read_only);
   state.revision = state.scene.revision;
   document.querySelector("#sceneStatusLabel").textContent = `${payload.document.entities.length} entities · revision ${state.scene.revision}`;
-  if (state.view !== "scene") setMainView("scene");
+  // Do not steal Asset Preview while a glTF session is open — scene document
+  // refresh used to force Scene and zero out the preview hole mid-upload.
+  const previewingAsset = state.view === "preview" && Boolean(state.assetPreview?.path || state.assetPreview?.id);
+  if (state.view !== "scene" && !previewingAsset) setMainView("scene");
   const selectedStillExists = state.selection?.kind === "entity" && payload.document.entities.some((entity) => entity.guid === state.selection.stableId);
   if (!selectedStillExists) {
     const firstGuid = payload.document.roots?.[0] || payload.document.entities[0]?.guid;
@@ -1592,7 +1595,7 @@ function renderUnavailableCapabilities(payload) {
   summary.textContent = `${unavailable.length} engine capabilities not authorable yet (expected)`;
   const tip = document.createElement("p");
   tip.className = "unavailable-tip";
-  tip.textContent = "Authoring that works now: scenes, hierarchy reparent, Transform W/E/R gizmo, Model3d + DirectionalLight Visual, pinned Play (scene+revision), Asset Preview Bounds/Normals + mesh/material selection. Apply Play Changes and collision overlay remain unavailable.";
+  tip.textContent = "Authoring that works now: scenes, hierarchy reparent, Transform W/E/R gizmo, Model3d + DirectionalLight Visual, pinned Play (scene+revision), Asset Preview Bounds/Collision/Normals/Tangents/UV + mesh/material selection. Apply Play Changes and animation clip selection remain unavailable.";
   const list = document.createElement("ul");
   unavailable.forEach((entry) => {
     const item = document.createElement("li");
@@ -1867,8 +1870,14 @@ window.addEventListener("yuyib:event", ({ detail }) => {
     case "host.asset": {
       appendOutput("assets", `Opened ${payload.path || payload.id || "asset"}`);
       updateAssetPreviewPanel(payload);
-      if (payload.kind === "model" || payload.preview?.status === "available" || /\.(glb|gltf)$/i.test(payload.path || "")) {
-        setMainView("preview");
+      if (
+        payload.kind === "model"
+        || payload.kind === "asset"
+        || payload.preview?.status === "available"
+        || /\.(glb|gltf|yasset)$/i.test(payload.path || "")
+      ) {
+        if (state.view !== "preview") setMainView("preview");
+        else sendViewportBounds();
         showToast("Asset Preview", payload.path || payload.name || "asset", "info");
       }
       break;
@@ -2019,26 +2028,21 @@ function handleHostProcess(payload) {
       return;
     }
     if (payload.status === "progress") {
-      document.querySelector("#previewLoading")?.classList.remove("is-hidden");
-      if (document.querySelector("#previewLoading strong")) {
-        document.querySelector("#previewLoading strong").textContent = `${Math.round((payload.completed || 0) * 100)}%`;
-      }
       const assetLoading = document.querySelector("#assetPreviewLoading");
       if (assetLoading) {
         assetLoading.classList.remove("is-hidden");
-        assetLoading.querySelector("strong").textContent = `${Math.round((payload.completed || 0) * 100)}%`;
+        const strong = assetLoading.querySelector("strong");
+        if (strong) strong.textContent = `${Math.round((payload.completed || 0) * 100)}%`;
       }
       if (payload.stage === "import") {
         showToast("Loading model", payload.path || "glTF import…", "info");
       }
       appendOutput("preview", `${payload.stage} ${Math.round((payload.completed || 0) * 100)}%`);
     } else if (payload.status === "scene_model_ready") {
-      document.querySelector("#previewLoading")?.classList.add("is-hidden");
       document.querySelector("#assetPreviewLoading")?.classList.add("is-hidden");
       showToast("Model ready", payload.path || "glTF hierarchy spawned", "success");
       appendOutput("preview", `Scene model ready ${payload.path || ""}`);
     } else if (payload.status === "ready") {
-      document.querySelector("#previewLoading").classList.add("is-hidden");
       document.querySelector("#assetPreviewLoading")?.classList.add("is-hidden");
       const primitives = Number.isFinite(payload.primitive_count) ? payload.primitive_count : 0;
       const gpuMb = Number.isFinite(payload.gpu_bytes)
@@ -2054,7 +2058,6 @@ function handleHostProcess(payload) {
       if (state.view !== "preview") setMainView("preview");
       window.requestAnimationFrame(sendViewportBounds);
     } else if (payload.status === "failed") {
-      document.querySelector("#previewLoading").classList.add("is-hidden");
       document.querySelector("#assetPreviewLoading")?.classList.add("is-hidden");
       showToast("Preview failed", payload.message || payload.stage || "import error", "warning");
     }
@@ -2149,6 +2152,24 @@ function requestSelection(kind, stableId) {
 
 function requestAssetOpen(assetId) {
   if (hosted) {
+    // Switch Preview + sync bounds BEFORE asset.open so the native hole exists
+    // when CPU import finishes and GPU upload can start on the first click.
+    const id = String(assetId || "");
+    const fromIndex = (state.assets || []).find((item) =>
+      item.id === id || item.path === id || `asset://${item.path}` === id
+    );
+    const path = fromIndex?.path || id;
+    const kind = fromIndex?.kind || "";
+    const wantsPreview = kind === "model" || kind === "asset"
+      || /\.(glb|gltf|yasset)$/i.test(path)
+      || /^asset:\/\//i.test(id);
+    if (wantsPreview) {
+      if (state.view !== "preview") setMainView("preview");
+      else {
+        post("workspace.mode", { mode: "preview" });
+        sendViewportBounds();
+      }
+    }
     post("asset.open", { id: assetId });
     return;
   }
@@ -2158,8 +2179,11 @@ function requestAssetOpen(assetId) {
 function setMainView(view) {
   state.view = view;
   document.querySelectorAll(".document-tab").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === view));
-  document.querySelectorAll(".main-view").forEach((panel) => panel.classList.remove("is-visible"));
-  document.querySelector(`#${view}View`).classList.add("is-visible");
+  document.querySelectorAll(".main-view").forEach((panel) => {
+    const active = panel.id === `${view}View`;
+    panel.classList.toggle("is-visible", active);
+    panel.hidden = !active;
+  });
   if (view === "code") {
     ensureMonaco();
     window.requestAnimationFrame(() => state.monacoEditor?.layout());
@@ -2167,6 +2191,8 @@ function setMainView(view) {
   if (view === "scene") window.requestAnimationFrame(drawScene);
   // Preview/Code must hide the sibling WGPU HWND or it covers WebView dialogs/tabs.
   post("workspace.mode", { mode: view === "code" ? "code" : view === "preview" ? "preview" : "scene" });
+  // Sync bounds immediately (getBoundingClientRect forces layout) then again on rAF.
+  sendViewportBounds();
   window.requestAnimationFrame(sendViewportBounds);
 }
 
@@ -2661,13 +2687,17 @@ document.querySelectorAll("[data-overlay]").forEach((input) => input.addEventLis
     other.checked = input.checked;
   });
   if (hosted) {
-    if (overlay !== "bounds" && overlay !== "normals") {
+    if (overlay !== "bounds" && overlay !== "collision" && overlay !== "normals" && overlay !== "tangents" && overlay !== "uv") {
       showToast("Overlay unavailable", `${overlay} overlay is not wired on the native host yet`, "info");
       state.overlays[overlay] = false;
       document.querySelectorAll(`[data-overlay="${overlay}"]`).forEach((other) => {
         other.checked = false;
       });
       return;
+    }
+    if (state.view !== "preview") {
+      showToast("Asset Preview only", "Preview overlays draw on the Asset Preview tab after opening a .glb/.gltf", "info");
+      setMainView("preview");
     }
     post("preview.overlay.set", { overlay, enabled: input.checked });
     return;
@@ -3099,14 +3129,18 @@ function initializeUiMode() {
   document.querySelector("#pauseButton").title = "Pause is not part of pinned Play v1 (Start/Stop only)";
   document.querySelectorAll("[data-overlay]").forEach((input) => {
     const overlay = input.dataset.overlay;
-    if (overlay === "bounds" || overlay === "normals") {
+    if (overlay === "bounds" || overlay === "collision" || overlay === "normals" || overlay === "tangents" || overlay === "uv") {
       input.disabled = false;
       input.checked = Boolean(state.overlays[overlay]);
       const label = input.closest("label");
       if (label) {
-        label.title = overlay === "bounds"
-          ? "Toggle AABB wireframe in Asset Preview"
-          : "Toggle vertex normal shafts in Asset Preview";
+        label.title = {
+          bounds: "Toggle AABB wireframe in Asset Preview",
+          collision: "Toggle collision mesh wireframe in Asset Preview",
+          normals: "Toggle vertex normal shafts in Asset Preview",
+          tangents: "Toggle vertex tangent shafts in Asset Preview",
+          uv: "Toggle UV0 vertex markers (u→R, v→G) in Asset Preview",
+        }[overlay] || "";
         label.classList.remove("is-unavailable");
       }
       return;
@@ -3120,7 +3154,10 @@ function initializeUiMode() {
   });
   // Push default overlay state so host matches both Scene and Preview toolbars.
   post("preview.overlay.set", { overlay: "bounds", enabled: Boolean(state.overlays.bounds) });
+  post("preview.overlay.set", { overlay: "collision", enabled: Boolean(state.overlays.collision) });
   post("preview.overlay.set", { overlay: "normals", enabled: Boolean(state.overlays.normals) });
+  post("preview.overlay.set", { overlay: "tangents", enabled: Boolean(state.overlays.tangents) });
+  post("preview.overlay.set", { overlay: "uv", enabled: Boolean(state.overlays.uv) });
   document.querySelector('[data-view="preview"]').disabled = false;
   document.querySelector('[data-view="preview"]').title = "Asset Preview — open a .glb/.gltf from Assets";
   document.querySelector("#reimportButton").disabled = false;

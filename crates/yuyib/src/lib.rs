@@ -207,12 +207,16 @@ pub mod prelude {
     };
     #[cfg(feature = "physics")]
     pub use crate::physics::{
-        Aabb2d, Aabb3d, AabbCollider2d, AabbCollider3d, Circle, CircleCollider, Position2d,
-        Position3d, Ray2d, Ray3d, SphereCollider3d, SphereMeshResolution3d, StaticAabb2d,
-        StaticAabbBroadphase2d, StaticAabbBroadphaseError2d, StaticAabbBroadphaseLimits2d,
-        StaticRaycastAabbHit2d, TriangleMesh3d, TriangleMeshError, TriangleMeshQueryError,
-        TriangleMeshRayHit3d, Vec2, Vec3, Velocity2d, Velocity3d, resolve_kinematic_aabb_2d,
+        Aabb2d, Aabb3d, AabbCollider2d, AabbCollider3d, BodyId3d, Circle, CircleCollider,
+        CollisionGroups3d, ContactPair3d, DynamicsBackend3d, DynamicsBackendError3d,
+        DynamicsFixedStepper3d, DynamicsWorldConfig3d, JointId3d, Position2d, Position3d, Ray2d,
+        Ray3d, SphereCollider3d, SphereMeshResolution3d, StaticAabb2d, StaticAabbBroadphase2d,
+        StaticAabbBroadphaseError2d, StaticAabbBroadphaseLimits2d, StaticRaycastAabbHit2d,
+        TriangleMesh3d, TriangleMeshError, TriangleMeshQueryError, TriangleMeshRayHit3d, Vec2,
+        Vec3, Velocity2d, Velocity3d, resolve_kinematic_aabb_2d,
     };
+    #[cfg(feature = "physics-rapier")]
+    pub use crate::physics::RapierDynamicsWorld3d;
     #[cfg(feature = "platform")]
     pub use crate::platform::{
         CursorControl, CursorControlOutcome, CursorGrab, Window, WindowConfig, WindowMode,

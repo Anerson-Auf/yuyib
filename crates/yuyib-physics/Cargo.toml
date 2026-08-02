@@ -7,9 +7,15 @@ authors.workspace = true
 repository.workspace = true
 description = "Deterministic lightweight 2D and 3D physics foundations for Yuyib."
 
+[features]
+default = []
+# Mature 3D dynamics backend (M4 facade). Static mesh queries stay available without it.
+rapier = ["dep:rapier3d"]
+
 [dependencies]
 bevy_ecs.workspace = true
 yuyib-ecs = { path = "../yuyib-ecs" }
+rapier3d = { workspace = true, optional = true }
 
 [lints]
 workspace = true

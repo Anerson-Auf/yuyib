@@ -54,10 +54,18 @@ cargo run -p yuyib --example <name>
 | `animated_girl_preview` | imported animation preview | animated GLB fixture |
 | `velina_skeletal_preview` | skeletal rendering path | matching character GLB |
 | `playable_vertical` | input + character motor vertical slice | 3D test assets |
-| `cyberpunk_city_playable` | streamed street city, cooked outdoor IBL/skybox + directional shadows + tiny ambient, animated player, V toggles 1st/3rd person, mesh collision | street city + character GLB |
+| `cyberpunk_city_playable` | streamed street city + character; optional Rapier props overlay | street city + character GLB; `--features physics-rapier` for overlay |
+| `playable_dynamics_overlay_smoke` | M4.7–M4.9 headless Rapier playable overlay (solid trimesh + props) | `--features "three-d,physics-rapier"` |
 | `equirect_hdr_smoke` | CPU Radiance/linear equirect ingest + hemisphere sample check | none (synthetic) |
 | `ggx_ibl_cook_smoke` | CPU GGX cook equirect → cube mips + BRDF LUT + `Game3dScene` probe/sky queue | none (synthetic; needs `for_tests/`) |
 | `asset_cook_cache_smoke` | M3 disk cook cache: second glTF import is a hit (parse skipped) | none (synthetic) |
+| `physics_rapier_smoke` | M4.1 Rapier facade: dynamic sphere settles on fixed cuboid | `--features physics-rapier` |
+| `physics_rapier_kinematic_smoke` | M4.3 kinematic platform + trigger overlap + CCD | `--features physics-rapier` |
+| `physics_rapier_joints_smoke` | M4.4 fixed/revolute joints + collision groups | `--features physics-rapier` |
+| `physics_rapier_convex_smoke` | M4.5 convex hull + limited prismatic joint | `--features physics-rapier` |
+| `physics_rapier_contacts_smoke` | M4.6 contact pairs + rope + `DynamicsFixedStepper3d` | `--features physics-rapier` |
+| `playable_dynamics_overlay_smoke` | M4.7–M4.9 playable Rapier overlay (solid trimesh + props) | `--features "three-d,physics-rapier"` |
+| `physics_rapier_window` | M4.2–M4.6 Rapier window: full dynamics lab | `--features "app,three-d,physics-rapier"` |
 | `skybox_smoke` | fullscreen cubemap skybox from cooked outdoor mip0 (+Y vs −Y luma) | none (synthetic) |
 | `directional_shadow_smoke` | orthographic directional shadow map darkens occluded ground (factor PBR) | none |
 | `pbr_alpha_mask_smoke` | PBR `MASK` discards occluder shading + shadow cutout vs opaque | none |

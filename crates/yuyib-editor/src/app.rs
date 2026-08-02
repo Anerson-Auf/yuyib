@@ -18,7 +18,7 @@ use std::{
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use yuyib_assets::Assets;
+use yuyib_assets::{Assets, CookCache};
 use yuyib_authoring::{AssetGuid, AuthoringRegistry, EntityGuid, TransactionError};
 use yuyib_ecs::{bevy_ecs::entity::Entity, prelude::World};
 use yuyib_editor_core::{
@@ -40,7 +40,9 @@ use yuyib_game_3d_authoring::{
     validate_directional_light_field, validate_model3d_field, validate_parent_field,
     validate_transform_field,
 };
-use yuyib_gltf::discover_external_dependencies;
+use yuyib_gltf::{
+    ImportOptions, discover_external_dependencies, import_scene_bytes_cached_at,
+};
 use yuyib_gltf_authoring::default_settings_json;
 use yuyib_model::{Model, ModelHandle};
 use yuyib_platform::{
@@ -61,7 +63,7 @@ use yuyib_render_3d::{
     Camera3d, DiffuseIrradianceSh3d, Game3dLighting, Game3dScene, Game3dSceneConfig, Game3dShading,
     LambertLighting3d, PbrLighting3d, SsaoPolicy,
 };
-use yuyib_scene::{SceneSelection, spawn_scene};
+use yuyib_scene::{SceneSelection, spawn_scene_with_model};
 use yuyib_webview::{
     AssetBundle, AssetLimits, AssetPath, BridgeLimits, EndpointName, LocalCsp, LocalPage,
     MimePolicy, PageEvent, PageSessionId, WebViewBounds, WebViewBuilder, WebViewHost,
@@ -128,6 +130,8 @@ pub struct EditorApp {
     model_cache: HashMap<String, ModelHandle>,
     /// CPU-imported glTF scenes, shared across rematerialize passes.
     gltf_import_cache: HashMap<String, Arc<yuyib_gltf::ImportedAsset>>,
+    /// Stable GPU model handles for glTF paths — rematerialize reuses residency.
+    gltf_model_handles: HashMap<String, ModelHandle>,
     /// Paths currently importing on a worker thread.
     gltf_import_inflight: HashSet<String>,
     job_sender: SyncSender<EditorJob>,
@@ -151,8 +155,14 @@ pub struct EditorApp {
     gltf_preview: Option<GltfPreviewSession>,
     /// Asset Preview AABB wireframe (`preview.overlay.set` / Bounds).
     preview_overlay_bounds: bool,
+    /// Asset Preview collision mesh wireframe (`preview.overlay.set` / Collision).
+    preview_overlay_collision: bool,
     /// Asset Preview vertex normals (`preview.overlay.set` / Normals).
     preview_overlay_normals: bool,
+    /// Asset Preview vertex tangents (`preview.overlay.set` / Tangents).
+    preview_overlay_tangents: bool,
+    /// Asset Preview UV0 markers (`preview.overlay.set` / UV).
+    preview_overlay_uv: bool,
     play: Option<ManagedProcess>,
     /// Last Play pin echoed on stop/timeout/exit (`path` + history + file revision).
     play_pin: Option<Value>,
@@ -299,6 +309,7 @@ enum EditorJob {
     GltfImported {
         path: String,
         result: Result<yuyib_gltf::ImportedAsset, String>,
+        cook_hit: bool,
     },
 }
 
@@ -398,6 +409,7 @@ impl EditorApp {
             gizmo_unlit: None,
             model_cache: HashMap::new(),
             gltf_import_cache: HashMap::new(),
+            gltf_model_handles: HashMap::new(),
             gltf_import_inflight: HashSet::new(),
             job_sender,
             job_receiver,
@@ -419,7 +431,10 @@ impl EditorApp {
             asset_index: None,
             gltf_preview: None,
             preview_overlay_bounds: true,
+            preview_overlay_collision: false,
             preview_overlay_normals: true,
+            preview_overlay_tangents: false,
+            preview_overlay_uv: false,
             play: None,
             play_pin: None,
             play_launch_after_build: false,
@@ -799,6 +814,7 @@ impl EditorApp {
                     documents.root().display(),
                     manifest.name
                 );
+                let same_root = roots_equal(&self.project_root, documents.root());
                 self.documents = documents;
                 self.project_root = self.documents.root().to_path_buf();
                 self.project = Some(manifest);
@@ -809,17 +825,25 @@ impl EditorApp {
                 };
                 self.asset_index = None;
                 self.gltf_preview = None;
-                // Keep authored Scene GPU residency; Preview has its own facade.
+                // Preview is always project-local; Scene GPU residency can stay warm
+                // when reopening the same root in-process.
                 self.preview_scene.clear_model_caches();
                 self.watch_asset_revision = None;
                 self.watch_scene_conflict_active = false;
-                self.gltf_import_cache.clear();
-                self.gltf_import_inflight.clear();
-                self.model_cache.clear();
-                self.reset_foundation_preview();
-                if let Err(error) = self.rebuild_preview_scene() {
-                    self.publish_diagnostic("error", "project.open", &error.to_string());
+                if same_root {
+                    eprintln!(
+                        "yuyib-editor: same-root reopen — keeping import/GPU session caches"
+                    );
+                } else {
+                    self.gltf_import_cache.clear();
+                    self.gltf_model_handles.clear();
+                    self.gltf_import_inflight.clear();
+                    self.model_cache.clear();
+                    if let Err(error) = self.rebuild_preview_scene() {
+                        self.publish_diagnostic("error", "project.open", &error.to_string());
+                    }
                 }
+                self.reset_foundation_preview();
                 if self.play.is_some() {
                     self.stop_play();
                 }
@@ -830,7 +854,15 @@ impl EditorApp {
                 self.publish_diagnostic(
                     "info",
                     "project",
-                    &format!("Opened project {}", self.project_root.display()),
+                    &format!(
+                        "Opened project {}{}",
+                        self.project_root.display(),
+                        if same_root {
+                            " (session caches warm)"
+                        } else {
+                            ""
+                        }
+                    ),
                 );
             }
             Err(error) => {
@@ -964,8 +996,16 @@ impl EditorApp {
             return;
         };
         let open_scene = item.open == Some(AssetOpenIntent::Scene) || item.kind == AssetKind::Scene;
-        let open_gltf =
+        let mut open_gltf =
             item.open == Some(AssetOpenIntent::GltfPreview) || item.kind == AssetKind::GltfSource;
+        // .yasset metadata cards share the GUID with the glTF source — resolve
+        // the real .glb/.gltf path so preview starts on the first click.
+        if !open_gltf && item.kind == AssetKind::AssetMetadata {
+            open_gltf = item.metadata.as_ref().is_some_and(|metadata| {
+                let source = metadata.source.replace('\\', "/");
+                source.ends_with(".glb") || source.ends_with(".gltf")
+            });
+        }
         let scene_path = if open_scene {
             Some(if asset_root.is_empty() {
                 item.path.clone()
@@ -1044,10 +1084,16 @@ impl EditorApp {
             }),
         );
         if open_gltf {
-            self.start_gltf_preview(&path);
+            let preview_path = self
+                .resolve_gltf_source_under_root(&selection_id)
+                .or_else(|| self.resolve_gltf_source_under_root(&path))
+                .unwrap_or_else(|| path.clone());
+            // Mode first so the next non-zero bounds apply to the Preview hole
+            // before CPU import completes and GPU upload starts.
             if self.mode != WorkspaceMode::Preview {
                 self.set_workspace_mode(WorkspaceMode::Preview);
             }
+            self.start_gltf_preview(&preview_path);
         }
     }
 
@@ -1248,6 +1294,8 @@ impl EditorApp {
         self.model_cache.remove(under_root);
         self.gltf_import_cache.remove(project_source);
         self.gltf_import_cache.remove(under_root);
+        self.invalidate_gltf_model_handle(project_source);
+        self.invalidate_gltf_model_handle(under_root);
         if let Some(prefixed) = project_source
             .strip_prefix("assets/")
             .map(str::to_owned)
@@ -1255,6 +1303,13 @@ impl EditorApp {
         {
             self.model_cache.remove(&prefixed);
             self.gltf_import_cache.remove(&prefixed);
+            self.invalidate_gltf_model_handle(&prefixed);
+        }
+    }
+
+    fn invalidate_gltf_model_handle(&mut self, path: &str) {
+        if let Some(handle) = self.gltf_model_handles.remove(path) {
+            self.scene.invalidate_model(handle);
         }
     }
 
@@ -1918,8 +1973,26 @@ impl EditorApp {
                     window.request_redraw();
                 }
             }
+            "collision" => {
+                self.preview_overlay_collision = request.enabled;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             "normals" => {
                 self.preview_overlay_normals = request.enabled;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            "tangents" => {
+                self.preview_overlay_tangents = request.enabled;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            "uv" => {
+                self.preview_overlay_uv = request.enabled;
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -1928,7 +2001,7 @@ impl EditorApp {
                 "warning",
                 "preview.overlay.set",
                 &format!(
-                    "preview overlay `{other}` is not supported yet (Bounds/Normals are available)"
+                    "preview overlay `{other}` is not supported yet (Bounds/Collision/Normals/Tangents/UV are available)"
                 ),
             ),
         }
@@ -1998,7 +2071,16 @@ impl EditorApp {
     }
 
     fn set_viewport_bounds(&mut self, bounds: ViewportBoundsRequest) {
-        self.logical_viewport = (bounds.width > 0.0 && bounds.height > 0.0).then_some(bounds);
+        // Ignore transient 0×0 reports from ResizeObserver while Asset Preview
+        // is active — they hide the HWND and stall GPU upload mid-import.
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            if self.gltf_preview.is_some() && matches!(self.mode, WorkspaceMode::Preview) {
+                return;
+            }
+            self.logical_viewport = None;
+        } else {
+            self.logical_viewport = Some(bounds);
+        }
         if let Err(error) = self.apply_layout() {
             self.viewport = None;
             self.publish_diagnostic("error", "viewport.bounds", &error.to_string());
@@ -3416,12 +3498,17 @@ impl EditorApp {
         let sender = self.job_sender.clone();
         let absolute_for_job = absolute;
         let path_for_job = path;
+        let cook_root = editor_cook_cache_root(&self.project_root);
         thread::spawn(move || {
-            let result =
-                yuyib_gltf::import_scene_path(&absolute_for_job).map_err(|error| error.to_string());
+            let (result, cook_hit) = match import_gltf_with_cook_cache(&absolute_for_job, &cook_root)
+            {
+                Ok((imported, hit)) => (Ok(imported), hit),
+                Err(error) => (Err(error), false),
+            };
             let _ = sender.try_send(EditorJob::GltfImported {
                 path: path_for_job,
                 result,
+                cook_hit,
             });
         });
         Ok(false)
@@ -3434,9 +3521,17 @@ impl EditorApp {
         path: &str,
         imported: &yuyib_gltf::ImportedAsset,
     ) -> Result<bool, ()> {
-        let spawned = match spawn_scene(
+        let model = match self.gltf_model_handles.get(path).copied() {
+            Some(handle) if self.models.get(handle).is_some() => handle,
+            _ => {
+                let handle = self.models.insert(imported.model.clone());
+                self.gltf_model_handles.insert(path.to_owned(), handle);
+                handle
+            }
+        };
+        let spawned = match spawn_scene_with_model(
             world,
-            &mut self.models,
+            model,
             imported,
             SceneSelection::Default,
         ) {
@@ -3475,7 +3570,11 @@ impl EditorApp {
         let mut need_rebuild = false;
         for job in jobs {
             match job {
-                EditorJob::GltfImported { path, result } => {
+                EditorJob::GltfImported {
+                    path,
+                    result,
+                    cook_hit,
+                } => {
                     self.gltf_import_inflight.remove(&path);
                     match result {
                         Ok(imported) => {
@@ -3488,8 +3587,14 @@ impl EditorApp {
                                     "status": "scene_model_ready",
                                     "path": path,
                                     "completed": 1.0,
+                                    "cook_hit": cook_hit,
                                 }),
                             );
+                            if cook_hit {
+                                eprintln!(
+                                    "yuyib-editor: glTF cook cache hit for `{path}` (parse skipped)"
+                                );
+                            }
                             need_rebuild = true;
                         }
                         Err(error) => {
@@ -4265,7 +4370,11 @@ impl EditorApp {
         let gizmo_state = self.gizmo;
         let mode = self.mode;
         let preview_overlay_bounds = self.preview_overlay_bounds;
+        let preview_overlay_collision = self.preview_overlay_collision;
         let preview_overlay_normals = self.preview_overlay_normals;
+        let preview_overlay_tangents = self.preview_overlay_tangents;
+        let preview_overlay_uv = self.preview_overlay_uv;
+        let orbit_radius = self.orbit.radius;
         let scene = &mut self.scene;
         let preview_scene = &mut self.preview_scene;
         let world = &mut self.world;
@@ -4276,7 +4385,6 @@ impl EditorApp {
             return;
         };
         let camera: Camera3d = *scene.camera_mut();
-        let preview_camera: Camera3d = *preview_scene.camera_mut();
         let mut scene_error: Option<String> = None;
         let surface_result =
             renderer.render_frame(ClearColor::linear(0.012, 0.018, 0.032, 1.0), |frame| {
@@ -4288,24 +4396,99 @@ impl EditorApp {
                         Some(session) => match session.render(frame, preview_scene) {
                             Ok(Some(GltfPreviewFrame::Drawn { .. })) => {
                                 let mut result = Ok(());
+                                let overlay_camera = *preview_scene.camera_mut();
                                 if let Some(pass) = gizmo_unlit.as_ref() {
-                                    let mut parts = Vec::new();
+                                    // Bounds first (≤12 draws). Collision/Normals are
+                                    // chunked in GizmoUnlitPass; cheap overlays stay
+                                    // visible even if a denser pass errors.
                                     if preview_overlay_bounds {
                                         if let Some(bounds) = session.bounds() {
-                                            parts.extend(editor_gizmo::bounds_box_parts(
+                                            let parts = editor_gizmo::bounds_box_parts(
                                                 bounds.minimum(),
                                                 bounds.maximum(),
-                                            ));
+                                            );
+                                            if !parts.is_empty() {
+                                                if let Err(error) =
+                                                    pass.draw(frame, overlay_camera, &parts)
+                                                {
+                                                    result = Err(error.to_string());
+                                                }
+                                            }
                                         }
                                     }
-                                    if preview_overlay_normals {
-                                        parts.extend(session.normal_overlay_parts());
+                                    if result.is_ok() && preview_overlay_collision {
+                                        let thickness = session
+                                            .bounds()
+                                            .map(|bounds| {
+                                                editor_gizmo::collision_edge_thickness_for_radius(
+                                                    bounds.radius(),
+                                                )
+                                            })
+                                            .unwrap_or(0.008);
+                                        let parts = session
+                                            .collision_overlay_parts_with_thickness(thickness);
+                                        if !parts.is_empty() {
+                                            if let Err(error) =
+                                                pass.draw(frame, overlay_camera, &parts)
+                                            {
+                                                result = Err(error.to_string());
+                                            }
+                                        }
                                     }
-                                    if !parts.is_empty() {
-                                        if let Err(error) =
-                                            pass.draw(frame, preview_camera, &parts)
-                                        {
-                                            result = Err(error.to_string());
+                                    if result.is_ok() && preview_overlay_normals {
+                                        let length = session
+                                            .bounds()
+                                            .map(|bounds| {
+                                                editor_gizmo::normal_shaft_length_for_radius(
+                                                    bounds.radius(),
+                                                )
+                                            })
+                                            .unwrap_or(0.12)
+                                            .max((orbit_radius * 0.017).clamp(0.06, 4.0));
+                                        let parts =
+                                            session.normal_overlay_parts_with_length(length);
+                                        if !parts.is_empty() {
+                                            if let Err(error) =
+                                                pass.draw(frame, overlay_camera, &parts)
+                                            {
+                                                result = Err(error.to_string());
+                                            }
+                                        }
+                                    }
+                                    if result.is_ok() && preview_overlay_tangents {
+                                        let length = session
+                                            .bounds()
+                                            .map(|bounds| {
+                                                editor_gizmo::normal_shaft_length_for_radius(
+                                                    bounds.radius(),
+                                                )
+                                            })
+                                            .unwrap_or(0.12)
+                                            .max((orbit_radius * 0.017).clamp(0.06, 4.0));
+                                        let parts =
+                                            session.tangent_overlay_parts_with_length(length);
+                                        if !parts.is_empty() {
+                                            if let Err(error) =
+                                                pass.draw(frame, overlay_camera, &parts)
+                                            {
+                                                result = Err(error.to_string());
+                                            }
+                                        }
+                                    }
+                                    if result.is_ok() && preview_overlay_uv {
+                                        let size = session
+                                            .bounds()
+                                            .map(|bounds| {
+                                                (bounds.radius() * 0.012).clamp(0.02, 0.35)
+                                            })
+                                            .unwrap_or(0.06);
+                                        let parts = session.uv_overlay_parts_with_size(size);
+                                        if !parts.is_empty() {
+                                            if let Err(error) =
+                                                pass.draw(frame, overlay_camera, &parts)
+                                            {
+                                                result = Err(error.to_string());
+                                            }
                                         }
                                     }
                                 }
@@ -5222,6 +5405,39 @@ fn editor_preview_lighting() -> Game3dLighting {
     let irradiance = DiffuseIrradianceSh3d::constant([0.38, 0.40, 0.44])
         .expect("preview global irradiance is valid");
     Game3dLighting::FixedPbr(PbrLighting3d::new(direct, irradiance))
+}
+
+fn roots_equal(a: &Path, b: &Path) -> bool {
+    fn normalize(path: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+    normalize(a) == normalize(b)
+}
+
+/// Disk cook cache root for editor scene glTF imports (M3).
+fn editor_cook_cache_root(project_root: &Path) -> PathBuf {
+    project_root.join(".yuyib_cook")
+}
+
+fn import_gltf_with_cook_cache(
+    absolute: &Path,
+    cook_root: &Path,
+) -> Result<(yuyib_gltf::ImportedAsset, bool), String> {
+    let bytes = fs::read(absolute).map_err(|error| error.to_string())?;
+    let parent = absolute.parent().unwrap_or_else(|| Path::new("."));
+    let cache = CookCache::new(cook_root);
+    import_scene_bytes_cached_at(&bytes, parent, ImportOptions::default(), &cache)
+        .map_err(|error| error.to_string())
 }
 
 fn create_editor_game_scene(project_root: &Path) -> Result<Game3dScene, Box<dyn Error>> {

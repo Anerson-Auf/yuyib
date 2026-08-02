@@ -1,9 +1,10 @@
 //! Authoring surface for glTF: settings JSON → [`ImportOptions`] and a
 //! [`PreviewAdapter`] over production [`GltfSceneLoad`].
 //!
-//! This crate does **not** add a second decoder. Mesh/material/animation
-//! selection and non-Bounds overlays remain future PreviewFeatures; Bounds is
-//! registered on the adapter and drawn by the Editor host via `GizmoUnlitPass`.
+//! This crate does **not** add a second decoder. Animation selection remains a
+//! future PreviewFeature. Bounds, Collision, Normals, Tangents and UV overlays
+//! are registered on the adapter and drawn by the Editor host via
+//! `GizmoUnlitPass`. Mesh/material selection is available.
 //! Preview cache keys honor `PreviewCachePolicy` (content hash + import settings).
 
 #![forbid(unsafe_code)]

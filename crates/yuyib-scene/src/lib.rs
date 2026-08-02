@@ -61,9 +61,27 @@ pub fn spawn_scene(
     asset: &ImportedAsset,
     selection: SceneSelection,
 ) -> Result<SpawnedScene, SceneSpawnError> {
+    let model = models.insert(asset.model.clone());
+    spawn_scene_with_model(world, model, asset, selection)
+}
+
+/// Spawns one selected glTF root scene using an existing [`ModelHandle`].
+///
+/// Editor rematerialize / same-project reopen can reuse a stable handle so the
+/// GPU model residency cache stays warm instead of re-uploading every open.
+///
+/// # Errors
+///
+/// Returns [`SceneSpawnError`] when the selection is absent/invalid or when
+/// source hierarchy references cannot be represented unambiguously.
+pub fn spawn_scene_with_model(
+    world: &mut World,
+    model: ModelHandle,
+    asset: &ImportedAsset,
+    selection: SceneSelection,
+) -> Result<SpawnedScene, SceneSpawnError> {
     let source_scene = select_scene(&asset.scene, selection)?;
     let selected_nodes = collect_selected_nodes(&asset.scene, source_scene)?;
-    let model = models.insert(asset.model.clone());
     let mut entities = HashMap::new();
 
     for (node_index, _) in &selected_nodes {

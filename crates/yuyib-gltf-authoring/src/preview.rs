@@ -39,7 +39,13 @@ impl GltfPreviewAdapter {
             shared_render_presets: true,
             mesh_selection: true,
             material_selection: true,
-            overlays: BTreeSet::from([PreviewOverlay::Bounds, PreviewOverlay::Normals]),
+            overlays: BTreeSet::from([
+                PreviewOverlay::Bounds,
+                PreviewOverlay::Collision,
+                PreviewOverlay::Normals,
+                PreviewOverlay::Tangents,
+                PreviewOverlay::Uv,
+            ]),
             ..PreviewFeatures::default()
         };
         let budgets = PreviewBudgets {
@@ -97,13 +103,17 @@ impl PreviewAdapter for GltfPreviewAdapter {
                 .filter(|overlay| {
                     !matches!(
                         overlay,
-                        PreviewOverlay::Bounds | PreviewOverlay::Normals
+                        PreviewOverlay::Bounds
+                            | PreviewOverlay::Collision
+                            | PreviewOverlay::Normals
+                            | PreviewOverlay::Tangents
+                            | PreviewOverlay::Uv
                     )
                 })
                 .collect();
             if !unsupported.is_empty() {
                 return Err(PreviewJobError::new(format!(
-                    "glTF preview overlays not registered yet: {unsupported:?} (Bounds/Normals are supported)"
+                    "glTF preview overlays not registered yet: {unsupported:?} (Bounds/Collision/Normals/Tangents/UV are supported)"
                 )));
             }
         }
@@ -446,7 +456,28 @@ mod tests {
                 .descriptor()
                 .features()
                 .overlays
+                .contains(&PreviewOverlay::Collision)
+        );
+        assert!(
+            adapter
+                .descriptor()
+                .features()
+                .overlays
                 .contains(&PreviewOverlay::Normals)
+        );
+        assert!(
+            adapter
+                .descriptor()
+                .features()
+                .overlays
+                .contains(&PreviewOverlay::Tangents)
+        );
+        assert!(
+            adapter
+                .descriptor()
+                .features()
+                .overlays
+                .contains(&PreviewOverlay::Uv)
         );
     }
 
@@ -477,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn start_rejects_unregistered_overlays() {
+    fn start_accepts_all_overlay_variants_before_file_check() {
         let adapter = GltfPreviewAdapter::new();
         let request = PreviewRequest {
             asset: AssetGuid::new(),
@@ -488,15 +519,22 @@ mod tests {
             import_settings_version: SchemaVersion::new(1).expect("version"),
             import_settings: json!({}),
             selection: None,
-            overlays: BTreeSet::from([PreviewOverlay::Collision]),
+            overlays: BTreeSet::from([
+                PreviewOverlay::Bounds,
+                PreviewOverlay::Collision,
+                PreviewOverlay::Normals,
+                PreviewOverlay::Tangents,
+                PreviewOverlay::Uv,
+            ]),
             material_override: None,
             render_preset: None,
             cancellation: PreviewCancellation::default(),
         };
         let Err(error) = adapter.start(request) else {
-            panic!("collision overlay must reject start");
+            panic!("missing file must still reject");
         };
-        assert!(error.message().contains("overlays not registered"));
+        assert!(error.message().contains("not a file"));
+        assert!(!error.message().contains("overlays not registered"));
     }
 
     #[test]
@@ -511,13 +549,19 @@ mod tests {
             import_settings_version: SchemaVersion::new(1).expect("version"),
             import_settings: json!({}),
             selection: None,
-            overlays: BTreeSet::from([PreviewOverlay::Bounds, PreviewOverlay::Normals]),
+            overlays: BTreeSet::from([
+                PreviewOverlay::Bounds,
+                PreviewOverlay::Collision,
+                PreviewOverlay::Normals,
+                PreviewOverlay::Tangents,
+                PreviewOverlay::Uv,
+            ]),
             material_override: None,
             render_preset: None,
             cancellation: PreviewCancellation::default(),
         };
         let Err(error) = adapter.start(request) else {
-            panic!("missing file must still reject after Bounds/Normals are accepted");
+            panic!("missing file must still reject after all overlays are accepted");
         };
         assert!(error.message().contains("not a file"));
         assert!(!error.message().contains("overlays not registered"));

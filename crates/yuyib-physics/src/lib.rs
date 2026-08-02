@@ -16,6 +16,9 @@
 //! It remains detection-only: response and trigger semantics belong to the
 //! caller.
 //!
+//! Dynamic rigid bodies ship behind the M4 [`backend`] facade (`rapier` feature).
+//! Playable character motion continues to use [`TriangleMesh3d`] static queries.
+//!
 //! ```
 //! use yuyib_physics::{Body2d, Circle, Vec2, collide_circles};
 //!
@@ -26,6 +29,16 @@
 //! ```
 
 #![forbid(unsafe_code)]
+
+mod backend;
+
+pub use backend::{
+    BodyId3d, CollisionGroups3d, ContactPair3d, DynamicsBackend3d, DynamicsBackendError3d,
+    DynamicsFixedStepper3d, DynamicsWorldConfig3d, JointId3d,
+};
+
+#[cfg(feature = "rapier")]
+pub use backend::RapierDynamicsWorld3d;
 
 use std::fmt;
 

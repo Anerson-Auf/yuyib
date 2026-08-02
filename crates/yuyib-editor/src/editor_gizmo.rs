@@ -109,7 +109,10 @@ impl GizmoUnlitPass {
         })
     }
 
-    /// Draws all parts after the scene in one depth-cleared batch pass.
+    /// Draws all parts after the scene in depth-cleared unlit batches.
+    ///
+    /// Chunks by the unlit instance capacity (32) so dense overlays like vertex
+    /// normals cannot fail the whole pass with `BatchTooLarge`.
     ///
     /// # Errors
     ///
@@ -123,6 +126,8 @@ impl GizmoUnlitPass {
         if parts.is_empty() {
             return Ok(());
         }
+        // Must stay ≤ `UNLIT_MESH_INSTANCE_CAPACITY` in yuyib-render-3d.
+        const CHUNK: usize = 32;
         let draws: Vec<(&GpuMesh, [f32; 16], [f32; 4])> = parts
             .iter()
             .map(|part| {
@@ -135,9 +140,11 @@ impl GizmoUnlitPass {
                 (mesh, part.model_matrix, part.color)
             })
             .collect();
-        self.renderer
-            .draw_batch_depth_clear_double_sided(frame, camera, &draws)
-            .map(|_| ())
+        for chunk in draws.chunks(CHUNK) {
+            self.renderer
+                .draw_batch_depth_clear_double_sided(frame, camera, chunk)?;
+        }
+        Ok(())
     }
 }
 
@@ -214,26 +221,62 @@ pub fn bounds_box_parts(minimum: [f32; 3], maximum: [f32; 3]) -> Vec<GizmoDrawPa
     for (from, to) in edges {
         let a = corners[from];
         let b = corners[to];
-        let delta = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let length_sq = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
-        if length_sq < 1.0e-12 {
-            continue;
+        if let Some(part) = edge_shaft_part(a, b, thickness, color) {
+            parts.push(part);
         }
-        let length = length_sq.sqrt();
-        let Some(rot) = rotation_y_to_dir(delta) else {
-            continue;
-        };
-        parts.push(GizmoDrawPart {
-            mesh: GizmoMeshKind::Shaft,
-            model_matrix: compose(a, rot, [thickness, length, thickness]),
-            color,
-        });
     }
     parts
 }
 
-/// Hard cap on shafts drawn by [`vertex_normal_parts`] / preview overlay.
-pub const NORMAL_OVERLAY_MAX_SHAFTS: usize = 1_024;
+/// Hard cap on collision wireframe triangles (each triangle = up to 3 edge shafts).
+pub const COLLISION_OVERLAY_MAX_TRIANGLES: usize = 256;
+
+/// Hard cap on normal samples (each sample = shaft + tip).
+pub const NORMAL_OVERLAY_MAX_SHAFTS: usize = 128;
+
+/// Thin shaft thickness for collision wireframe from aggregate bounds radius.
+#[must_use]
+pub fn collision_edge_thickness_for_radius(radius: f32) -> f32 {
+    let radius = if radius.is_finite() && radius > 0.0 {
+        radius
+    } else {
+        1.0
+    };
+    (radius * 0.0035).clamp(0.0012, 0.035)
+}
+
+/// Wireframe edges for world-space triangles (sampled, capped).
+///
+/// Same authored faces the static mesh collider walks — preview overlay only,
+/// not a second physics build.
+#[must_use]
+pub fn collision_triangle_wireframe_parts(
+    faces: &[[[f32; 3]; 3]],
+    thickness: f32,
+    max_triangles: usize,
+) -> Vec<GizmoDrawPart> {
+    if faces.is_empty() || !thickness.is_finite() || thickness <= 0.0 {
+        return Vec::new();
+    }
+    let budget = max_triangles.min(COLLISION_OVERLAY_MAX_TRIANGLES).max(1);
+    let stride = faces.len().div_ceil(budget).max(1);
+    let color = [0.30, 0.90, 0.55, 0.88];
+    let mut parts = Vec::with_capacity(budget.saturating_mul(3));
+    let mut index = 0;
+    let mut drawn = 0;
+    while index < faces.len() && drawn < budget {
+        let face = faces[index];
+        let edges = [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])];
+        for (a, b) in edges {
+            if let Some(part) = edge_shaft_part(a, b, thickness, color) {
+                parts.push(part);
+            }
+        }
+        drawn += 1;
+        index = index.saturating_add(stride);
+    }
+    parts
+}
 
 /// Visible shaft length from aggregate bounds radius (scales with the asset).
 #[must_use]
@@ -243,7 +286,8 @@ pub fn normal_shaft_length_for_radius(radius: f32) -> f32 {
     } else {
         1.0
     };
-    (radius * 0.22).clamp(0.2, (radius * 0.55).max(0.2))
+    // ~⅓ of the first overlay scale — long shafts obscured the mesh.
+    (radius * 0.073).clamp(0.06, (radius * 0.18).max(0.06))
 }
 
 /// Debug shafts for vertex normals (local → world via column-major model matrix).
@@ -264,9 +308,9 @@ pub fn vertex_normal_parts(
     }
     let budget = max_count.min(NORMAL_OVERLAY_MAX_SHAFTS).max(1);
     let stride = positions.len().div_ceil(budget).max(1);
-    let thickness = (length * 0.12).clamp(0.02, length * 0.22);
-    let tip_len = (length * 0.28).clamp(0.04, length * 0.4);
-    let tip_r = (thickness * 2.2).max(thickness + 0.01);
+    let thickness = (length * 0.05).clamp(0.006, length * 0.09);
+    let tip_len = (length * 0.28).clamp(0.015, length * 0.4);
+    let tip_r = (thickness * 2.0).max(thickness + 0.003);
     let color = [1.0, 0.35, 0.95, 1.0];
     let mut parts = Vec::with_capacity(budget.saturating_mul(2));
     let mut index = 0;
@@ -417,14 +461,327 @@ pub fn model_normal_overlay_parts(
                         remaining,
                     )
                 };
-                // Each sample may contribute shaft+tip (2 parts).
-                let samples = chunk.len() / 2;
-                remaining = remaining.saturating_sub(samples.max(1));
+                if chunk.is_empty() {
+                    continue;
+                }
+                let samples = (chunk.len() / 2).max(1);
+                remaining = remaining.saturating_sub(samples);
                 parts.extend(chunk);
             }
         }
     }
     parts
+}
+
+/// Debug shafts for vertex tangents (xyz of glTF tangent, local → world).
+#[must_use]
+pub fn vertex_tangent_parts(
+    positions: &[[f32; 3]],
+    tangents: &[[f32; 4]],
+    model_matrix: [f32; 16],
+    length: f32,
+    max_count: usize,
+) -> Vec<GizmoDrawPart> {
+    if positions.len() != tangents.len() || positions.is_empty() || !length.is_finite() || length <= 0.0
+    {
+        return Vec::new();
+    }
+    let directions: Vec<[f32; 3]> = tangents.iter().map(|t| [t[0], t[1], t[2]]).collect();
+    let budget = max_count.min(NORMAL_OVERLAY_MAX_SHAFTS).max(1);
+    let stride = positions.len().div_ceil(budget).max(1);
+    let thickness = (length * 0.05).clamp(0.006, length * 0.09);
+    let tip_len = (length * 0.28).clamp(0.015, length * 0.4);
+    let tip_r = (thickness * 2.0).max(thickness + 0.003);
+    // Distinct from magenta normals — cyan shafts.
+    let color = [0.15, 0.92, 0.95, 1.0];
+    let mut parts = Vec::with_capacity(budget.saturating_mul(2));
+    let mut index = 0;
+    while index < positions.len() && parts.len() / 2 < budget {
+        let Some(world_t) = transform_direction(model_matrix, directions[index]) else {
+            index = index.saturating_add(stride);
+            continue;
+        };
+        let origin = transform_point(model_matrix, positions[index]);
+        let Some(rot) = rotation_y_to_dir(world_t) else {
+            index = index.saturating_add(stride);
+            continue;
+        };
+        let tip_origin = [
+            origin[0] + world_t[0] * length,
+            origin[1] + world_t[1] * length,
+            origin[2] + world_t[2] * length,
+        ];
+        parts.push(GizmoDrawPart {
+            mesh: GizmoMeshKind::Shaft,
+            model_matrix: compose(origin, rot, [thickness, length, thickness]),
+            color,
+        });
+        parts.push(GizmoDrawPart {
+            mesh: GizmoMeshKind::Tip,
+            model_matrix: compose(tip_origin, rot, [tip_r, tip_len, tip_r]),
+            color,
+        });
+        index = index.saturating_add(stride);
+    }
+    parts
+}
+
+/// Collects world-space tangent shafts for every visible [`Model3d`] with tangents.
+#[must_use]
+pub fn model_tangent_overlay_parts(
+    world: &World,
+    models: &yuyib_assets::Assets<yuyib_model::Model>,
+    length: f32,
+) -> Vec<GizmoDrawPart> {
+    let mut remaining = NORMAL_OVERLAY_MAX_SHAFTS;
+    let mut parts = Vec::new();
+    for entity in world.iter_entities() {
+        if remaining == 0 {
+            break;
+        }
+        let Some(model3d) = entity.get::<Model3d>() else {
+            continue;
+        };
+        if !model3d.visible {
+            continue;
+        }
+        let Some(model_matrix) = entity_model_matrix(entity) else {
+            continue;
+        };
+        let Some(model) = models.get(model3d.model) else {
+            continue;
+        };
+        let mesh_indices: Vec<usize> = match model3d.mesh {
+            Some(index) => vec![index],
+            None => (0..model.meshes().len()).collect(),
+        };
+        for mesh_index in mesh_indices {
+            let Some(mesh) = model.meshes().get(mesh_index) else {
+                continue;
+            };
+            for primitive in mesh.primitives() {
+                if remaining == 0 {
+                    break;
+                }
+                let Some(tangents) = primitive.tangents() else {
+                    continue;
+                };
+                let chunk = vertex_tangent_parts(
+                    primitive.positions(),
+                    tangents,
+                    model_matrix,
+                    length,
+                    remaining,
+                );
+                if chunk.is_empty() {
+                    continue;
+                }
+                let samples = (chunk.len() / 2).max(1);
+                remaining = remaining.saturating_sub(samples);
+                parts.extend(chunk);
+            }
+        }
+    }
+    parts
+}
+
+/// Vertex markers colored by UV0 (u→R, v→G) for Asset Preview UV overlay.
+#[must_use]
+pub fn vertex_uv_marker_parts(
+    positions: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    model_matrix: [f32; 16],
+    size: f32,
+    max_count: usize,
+) -> Vec<GizmoDrawPart> {
+    if positions.len() != uvs.len() || positions.is_empty() || !size.is_finite() || size <= 0.0 {
+        return Vec::new();
+    }
+    let budget = max_count.min(NORMAL_OVERLAY_MAX_SHAFTS).max(1);
+    let stride = positions.len().div_ceil(budget).max(1);
+    let half = size * 0.5;
+    let mut parts = Vec::with_capacity(budget);
+    let mut index = 0;
+    while index < positions.len() && parts.len() < budget {
+        let uv = uvs[index];
+        if !uv[0].is_finite() || !uv[1].is_finite() {
+            index = index.saturating_add(stride);
+            continue;
+        }
+        let origin = transform_point(model_matrix, positions[index]);
+        let color = [uv[0].clamp(0.0, 1.0), uv[1].clamp(0.0, 1.0), 0.22, 0.95];
+        parts.push(GizmoDrawPart {
+            mesh: GizmoMeshKind::Box,
+            model_matrix: trs_matrix(origin, [half, half, half]),
+            color,
+        });
+        index = index.saturating_add(stride);
+    }
+    parts
+}
+
+/// Collects UV0 markers for every visible [`Model3d`] that has texcoords.
+#[must_use]
+pub fn model_uv_overlay_parts(
+    world: &World,
+    models: &yuyib_assets::Assets<yuyib_model::Model>,
+    size: f32,
+) -> Vec<GizmoDrawPart> {
+    let mut remaining = NORMAL_OVERLAY_MAX_SHAFTS;
+    let mut parts = Vec::new();
+    for entity in world.iter_entities() {
+        if remaining == 0 {
+            break;
+        }
+        let Some(model3d) = entity.get::<Model3d>() else {
+            continue;
+        };
+        if !model3d.visible {
+            continue;
+        }
+        let Some(model_matrix) = entity_model_matrix(entity) else {
+            continue;
+        };
+        let Some(model) = models.get(model3d.model) else {
+            continue;
+        };
+        let mesh_indices: Vec<usize> = match model3d.mesh {
+            Some(index) => vec![index],
+            None => (0..model.meshes().len()).collect(),
+        };
+        for mesh_index in mesh_indices {
+            let Some(mesh) = model.meshes().get(mesh_index) else {
+                continue;
+            };
+            for primitive in mesh.primitives() {
+                if remaining == 0 {
+                    break;
+                }
+                let Some(uvs) = primitive.tex_coords_0() else {
+                    continue;
+                };
+                let chunk =
+                    vertex_uv_marker_parts(primitive.positions(), uvs, model_matrix, size, remaining);
+                if chunk.is_empty() {
+                    continue;
+                }
+                remaining = remaining.saturating_sub(chunk.len());
+                parts.extend(chunk);
+            }
+        }
+    }
+    parts
+}
+
+/// Collects collision wireframe shafts for every visible [`Model3d`] (sampled).
+#[must_use]
+pub fn model_collision_overlay_parts(
+    world: &World,
+    models: &yuyib_assets::Assets<yuyib_model::Model>,
+    thickness: f32,
+) -> Vec<GizmoDrawPart> {
+    if !thickness.is_finite() || thickness <= 0.0 {
+        return Vec::new();
+    }
+    let mut remaining = COLLISION_OVERLAY_MAX_TRIANGLES;
+    let mut world_faces: Vec<[[f32; 3]; 3]> = Vec::new();
+    for entity in world.iter_entities() {
+        if remaining == 0 {
+            break;
+        }
+        let Some(model3d) = entity.get::<Model3d>() else {
+            continue;
+        };
+        if !model3d.visible {
+            continue;
+        }
+        let Some(model_matrix) = entity_model_matrix(entity) else {
+            continue;
+        };
+        let Some(model) = models.get(model3d.model) else {
+            continue;
+        };
+        let mesh_indices: Vec<usize> = match model3d.mesh {
+            Some(index) => vec![index],
+            None => (0..model.meshes().len()).collect(),
+        };
+        for mesh_index in mesh_indices {
+            let Some(mesh) = model.meshes().get(mesh_index) else {
+                continue;
+            };
+            for primitive in mesh.primitives() {
+                if remaining == 0 {
+                    break;
+                }
+                append_world_collision_faces(
+                    primitive,
+                    model_matrix,
+                    &mut world_faces,
+                    &mut remaining,
+                );
+            }
+        }
+    }
+    collision_triangle_wireframe_parts(&world_faces, thickness, COLLISION_OVERLAY_MAX_TRIANGLES)
+}
+
+fn append_world_collision_faces(
+    primitive: &MeshPrimitive,
+    model_matrix: [f32; 16],
+    out: &mut Vec<[[f32; 3]; 3]>,
+    remaining: &mut usize,
+) {
+    let positions = primitive.positions();
+    let indices = primitive.indices();
+    if positions.is_empty() || indices.len() < 3 {
+        return;
+    }
+    let tri_count = indices.len() / 3;
+    if tri_count == 0 {
+        return;
+    }
+    // Sample across the primitive so large meshes still show coverage.
+    let local_budget = (*remaining).max(1);
+    let stride = tri_count.div_ceil(local_budget).max(1);
+    let mut tri = 0;
+    while tri < tri_count && *remaining > 0 {
+        let base = tri * 3;
+        let Some(ia) = indices.get(base).copied() else {
+            break;
+        };
+        let Some(ib) = indices.get(base + 1).copied() else {
+            break;
+        };
+        let Some(ic) = indices.get(base + 2).copied() else {
+            break;
+        };
+        let Some(a) = positions.get(ia as usize).copied() else {
+            tri = tri.saturating_add(stride);
+            continue;
+        };
+        let Some(b) = positions.get(ib as usize).copied() else {
+            tri = tri.saturating_add(stride);
+            continue;
+        };
+        let Some(c) = positions.get(ic as usize).copied() else {
+            tri = tri.saturating_add(stride);
+            continue;
+        };
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let n = cross3(ab, ac);
+        if normalize3(n).is_none() {
+            tri = tri.saturating_add(stride);
+            continue;
+        }
+        out.push([
+            transform_point(model_matrix, a),
+            transform_point(model_matrix, b),
+            transform_point(model_matrix, c),
+        ]);
+        *remaining = remaining.saturating_sub(1);
+        tri = tri.saturating_add(stride);
+    }
 }
 
 fn entity_model_matrix(entity: yuyib_ecs::bevy_ecs::world::EntityRef<'_>) -> Option<[f32; 16]> {
@@ -434,7 +791,57 @@ fn entity_model_matrix(entity: yuyib_ecs::bevy_ecs::world::EntityRef<'_>) -> Opt
     if let Some(local) = entity.get::<yuyib_game_3d::LocalMatrixTransform3d>() {
         return Some(local.column_major());
     }
+    if let Some(local) = entity.get::<yuyib_game_3d::LocalTransform3d>() {
+        return Some(trs_matrix_from_components(
+            local.translation,
+            local.rotation,
+            local.scale,
+        ));
+    }
+    if let Some(local) = entity.get::<Transform3d>() {
+        return Some(trs_matrix_from_components(
+            local.translation,
+            local.rotation,
+            local.scale,
+        ));
+    }
     None
+}
+
+fn trs_matrix_from_components(
+    translation: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+) -> [f32; 16] {
+    let [x, y, z, w] = rotation;
+    let xx = x * x;
+    let yy = y * y;
+    let zz = z * z;
+    let xy = x * y;
+    let xz = x * z;
+    let yz = y * z;
+    let wx = w * x;
+    let wy = w * y;
+    let wz = w * z;
+    let c0 = [
+        (1.0 - 2.0 * (yy + zz)) * scale[0],
+        (2.0 * (xy + wz)) * scale[0],
+        (2.0 * (xz - wy)) * scale[0],
+    ];
+    let c1 = [
+        (2.0 * (xy - wz)) * scale[1],
+        (1.0 - 2.0 * (xx + zz)) * scale[1],
+        (2.0 * (yz + wx)) * scale[1],
+    ];
+    let c2 = [
+        (2.0 * (xz + wy)) * scale[2],
+        (2.0 * (yz - wx)) * scale[2],
+        (1.0 - 2.0 * (xx + yy)) * scale[2],
+    ];
+    [
+        c0[0], c0[1], c0[2], 0.0, c1[0], c1[1], c1[2], 0.0, c2[0], c2[1], c2[2], 0.0,
+        translation[0], translation[1], translation[2], 1.0,
+    ]
 }
 
 /// Directional-light aim cone: beam shaft + open cone along world light direction.
@@ -703,6 +1110,26 @@ fn rotation_y_to_dir(dir: [f32; 3]) -> Option<[[f32; 3]; 3]> {
     Some([[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]])
 }
 
+fn edge_shaft_part(
+    a: [f32; 3],
+    b: [f32; 3],
+    thickness: f32,
+    color: [f32; 4],
+) -> Option<GizmoDrawPart> {
+    let delta = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let length_sq = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
+    if length_sq < 1.0e-12 {
+        return None;
+    }
+    let length = length_sq.sqrt();
+    let rot = rotation_y_to_dir(delta)?;
+    Some(GizmoDrawPart {
+        mesh: GizmoMeshKind::Shaft,
+        model_matrix: compose(a, rot, [thickness, length, thickness]),
+        color,
+    })
+}
+
 fn transform_point(m: [f32; 16], p: [f32; 3]) -> [f32; 3] {
     [
         m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
@@ -958,5 +1385,55 @@ mod tests {
         ];
         assert!(vertex_normal_parts(&[[0.0; 3]], &[], identity, 0.1, 8).is_empty());
         assert!(vertex_normal_parts(&[[0.0; 3]], &[[0.0, 1.0, 0.0]], identity, 0.0, 8).is_empty());
+    }
+
+    #[test]
+    fn collision_wireframe_draws_three_edges_per_triangle() {
+        let faces = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]];
+        let parts = collision_triangle_wireframe_parts(&faces, 0.01, 8);
+        assert_eq!(parts.len(), 3);
+        assert!(parts.iter().all(|part| matches!(part.mesh, GizmoMeshKind::Shaft)));
+    }
+
+    #[test]
+    fn collision_wireframe_caps_triangle_budget() {
+        let faces: Vec<[[f32; 3]; 3]> = (0..64)
+            .map(|i| {
+                let x = i as f32;
+                [[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0]]
+            })
+            .collect();
+        let parts = collision_triangle_wireframe_parts(&faces, 0.01, 4);
+        assert!(parts.len() <= 12);
+        assert!(!parts.is_empty());
+    }
+
+    #[test]
+    fn vertex_tangent_parts_samples() {
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let tangents = [[1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]];
+        let parts = vertex_tangent_parts(&positions, &tangents, identity, 0.1, 8);
+        assert_eq!(parts.len(), 4);
+    }
+
+    #[test]
+    fn vertex_uv_marker_parts_color_by_uv() {
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let parts = vertex_uv_marker_parts(
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            &[[0.25, 0.75], [1.0, 0.0]],
+            identity,
+            0.1,
+            8,
+        );
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|part| matches!(part.mesh, GizmoMeshKind::Box)));
+        assert!((parts[0].color[0] - 0.25).abs() < 1.0e-5);
+        assert!((parts[0].color[1] - 0.75).abs() < 1.0e-5);
     }
 }

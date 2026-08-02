@@ -1171,7 +1171,10 @@
         "material_selection": true,
         "animation_selection": false,
         "overlays": [
+          "collision",
           "normals",
+          "tangents",
+          "uv",
           "bounds"
         ],
         "material_override": false,

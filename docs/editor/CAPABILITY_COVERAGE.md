@@ -11,9 +11,9 @@ Capability coverage отвечает на вопрос: «как пользов�
 > `Parent3d`, `Model3d`, `DirectionalLight3d` — Inspector + materialize +
 > viewport/Play evidence. **Asset (incremental):** `yuyib.gltf-import` /
 > `yuyib.gltf-preview` — `GltfPreviewAdapter` over production `GltfSceneLoad`
-> + settings mapping + non-destructive reimport + **Bounds/Normals** overlays + preview
-> **cache key/invalidation** evidence + **mesh selection**; material/animation
-> selection and remaining overlays still open (not full Asset DoD). **Coverage gate (incremental):**
+> + settings mapping + non-destructive reimport + **Bounds/Collision/Normals/Tangents/UV** (Preview-only) + preview
+> **cache key/invalidation** evidence + **mesh/material selection**; animation
+> selection still open (not full Asset DoD). **Coverage gate (incremental):**
 > `validate_coverage_gate` + `AssetCoverageEvidence` enforced in scoped tests;
 > canonical `CoverageManifest::to_pretty_json` + golden fixture in
 > `yuyib-gltf-authoring`; GitHub Actions foundation CI в `.github/workflows/`.
@@ -108,7 +108,7 @@ Human-readable documentation и Editor palette генерируются из т�
 | Mesh/material/animation subresources | Есть 3D foundation | `Unavailable` | `Asset`: selection, clip playback, material assignment |
 | 3D transform/hierarchy | Есть ECS foundation | `Visual` | hierarchy, Inspector, gizmo, round-trip — **closed** |
 | Camera/light/model instance | Есть частично | Model/Light `Visual`; Camera follow-up | Light transform/cone/Play — **closed** |
-| Collision/bounds/normals/tangents/UV | Есть разные runtime paths | Bounds+Normals partial; rest `Unavailable` | Bounds AABB + normals shafts in Asset Preview; collision/tangents/UV open |
+| Collision/bounds/normals/tangents/UV | Есть разные runtime paths | All five Preview overlays partial | Bounds AABB + collision wireframe + normals/tangents shafts + UV0 markers in Asset Preview; animation selection open |
 | 3D PBR/render presets | Есть частично | partial Scene/Play PBR parity | Preview Asset route still open |
 | Scene persistence/materialization | `.yscene` foundation | partial | GUID, schemas, opaque preservation — **closed** for TRS/Model/Light |
 | Play Mode | Game lifecycle есть | process-isolated `yuyib-play` | Player motor + mesh physics + lights — **closed**; Apply Play off |

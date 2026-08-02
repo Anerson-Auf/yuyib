@@ -199,9 +199,10 @@
           </div>
 
           <div id="sceneView" class="main-view scene-view is-visible">
-            <div class="viewport-toolbar">
-              <div class="viewport-mode"><button class="is-active">Shaded</button><button>Wireframe</button><button>UV</button></div>
+              <div class="viewport-toolbar">
+              <div class="viewport-mode"><button class="is-active">Shaded</button></div>
               <div class="viewport-toolbar-spacer"></div>
+              <span id="sceneStatusLabel" class="viewport-status-label">Waiting for authoring document</span>
               <button class="icon-button icon-button--small" title="Frame selected"><svg><use href="#i-crosshair"/></svg></button>
             </div>
             <div class="viewport-canvas-wrap">
@@ -220,13 +221,6 @@
               </div>
               <div class="viewport-stats"><span>Perspective</span><span>Lit PBR</span><span>60 FPS</span></div>
               <div class="selection-chip"><span class="selection-chip-icon"><svg><use href="#i-cube"/></svg></span><span><strong id="selectionName">No selection</strong><small id="selectionMeta">Open a .yscene document</small><small id="selectionCoords" class="selection-coords is-hidden"></small></span></div>
-              <div id="previewLoading" class="preview-loading is-hidden"><span class="loading-spinner"></span><span>Reimporting asset…</span><strong>68%</strong></div>
-            </div>
-            <div class="viewport-footer">
-              <div><span class="status-dot status-dot--ok"></span><span id="sceneStatusLabel">Waiting for authoring document</span></div>
-              <div class="resource-stat"><span>Triangles</span><strong>184.2k</strong></div>
-              <div class="resource-stat"><span>GPU</span><strong>412 MB / 1.5 GB</strong></div>
-              <div class="resource-meter"><span></span></div>
             </div>
           </div>
 
@@ -237,6 +231,8 @@
                 <div class="viewport-toolbar-spacer"></div>
                 <label class="overlay-toggle"><input type="checkbox" data-overlay="collision"/><span></span>Collision</label>
                 <label class="overlay-toggle"><input type="checkbox" data-overlay="normals" checked/><span></span>Normals</label>
+                <label class="overlay-toggle"><input type="checkbox" data-overlay="tangents"/><span></span>Tangents</label>
+                <label class="overlay-toggle"><input type="checkbox" data-overlay="uv"/><span></span>UV</label>
                 <label class="overlay-toggle"><input type="checkbox" data-overlay="bounds" checked/><span></span>Bounds</label>
               </div>
               <div class="preview-stage">

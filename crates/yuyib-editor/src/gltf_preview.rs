@@ -479,14 +479,71 @@ impl GltfPreviewSession {
     /// Vertex-normal shafts for Asset Preview overlay (world space, capped).
     #[must_use]
     pub fn normal_overlay_parts(&self) -> Vec<crate::editor_gizmo::GizmoDrawPart> {
-        let Some(ready) = &self.ready else {
-            return Vec::new();
-        };
         let length = self
             .bounds()
             .map(|bounds| crate::editor_gizmo::normal_shaft_length_for_radius(bounds.radius()))
-            .unwrap_or(0.25);
+            .unwrap_or(0.12);
+        self.normal_overlay_parts_with_length(length)
+    }
+
+    /// Same as [`Self::normal_overlay_parts`] with an explicit shaft length.
+    #[must_use]
+    pub fn normal_overlay_parts_with_length(
+        &self,
+        length: f32,
+    ) -> Vec<crate::editor_gizmo::GizmoDrawPart> {
+        let Some(ready) = &self.ready else {
+            return Vec::new();
+        };
         crate::editor_gizmo::model_normal_overlay_parts(ready.world(), ready.models(), length)
+    }
+
+    /// Collision mesh wireframe for Asset Preview overlay (sampled, capped).
+    #[must_use]
+    pub fn collision_overlay_parts(&self) -> Vec<crate::editor_gizmo::GizmoDrawPart> {
+        let thickness = self
+            .bounds()
+            .map(|bounds| {
+                crate::editor_gizmo::collision_edge_thickness_for_radius(bounds.radius())
+            })
+            .unwrap_or(0.008);
+        self.collision_overlay_parts_with_thickness(thickness)
+    }
+
+    /// Same as [`Self::collision_overlay_parts`] with explicit edge thickness.
+    #[must_use]
+    pub fn collision_overlay_parts_with_thickness(
+        &self,
+        thickness: f32,
+    ) -> Vec<crate::editor_gizmo::GizmoDrawPart> {
+        let Some(ready) = &self.ready else {
+            return Vec::new();
+        };
+        crate::editor_gizmo::model_collision_overlay_parts(ready.world(), ready.models(), thickness)
+    }
+
+    /// Tangent shafts for Asset Preview overlay (world space, capped).
+    #[must_use]
+    pub fn tangent_overlay_parts_with_length(
+        &self,
+        length: f32,
+    ) -> Vec<crate::editor_gizmo::GizmoDrawPart> {
+        let Some(ready) = &self.ready else {
+            return Vec::new();
+        };
+        crate::editor_gizmo::model_tangent_overlay_parts(ready.world(), ready.models(), length)
+    }
+
+    /// UV0 vertex markers for Asset Preview overlay.
+    #[must_use]
+    pub fn uv_overlay_parts_with_size(
+        &self,
+        size: f32,
+    ) -> Vec<crate::editor_gizmo::GizmoDrawPart> {
+        let Some(ready) = &self.ready else {
+            return Vec::new();
+        };
+        crate::editor_gizmo::model_uv_overlay_parts(ready.world(), ready.models(), size)
     }
 
     /// Frames the editor orbit camera on the imported bounds.

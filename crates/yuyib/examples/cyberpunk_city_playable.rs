@@ -5,6 +5,17 @@
 //! published in bounded slices. WASD moves, Space jumps, V toggles first/third
 //! person, mouse looks and Esc exits.
 //!
+//! Optional M4.7–M4.9 Rapier props overlay (local solid map trimesh + crates).
+//! Walk into crates to push them (one-way). Props collide with map walls/floors
+//! from the solid layer. Does **not** replace
+//! [`yuyib::physics::TriangleMesh3d`] character collision:
+//!
+//! ```text
+//! cargo run -p yuyib --example cyberpunk_city_playable --features physics-rapier
+//! ```
+//!
+//! Default (mesh character only):
+//!
 //! ```text
 //! cargo run -p yuyib --example cyberpunk_city_playable
 //! ```
@@ -326,6 +337,7 @@ struct PlayableCity {
     character_facing: LocomotionFacingSmoother,
     cursor_activated: bool,
     reported_draw_stats: bool,
+    dynamics: support::playable_dynamics::PlayableDynamicsOverlay,
 }
 
 impl PlayableCity {
@@ -422,6 +434,12 @@ impl PlayableCity {
             focus,
         )?;
         let map_renderer = street_city::create_renderer(asset_root)?;
+        let dynamics =
+            support::playable_dynamics::PlayableDynamicsOverlay::around_spawn_with_solid_mesh(
+                [spawn.x, spawn.y, spawn.z],
+                controller.config().radius,
+                solid_collider.mesh(),
+            )?;
         Ok(Self {
             map,
             map_renderer,
@@ -437,6 +455,7 @@ impl PlayableCity {
             character_facing,
             cursor_activated: false,
             reported_draw_stats: false,
+            dynamics,
         })
     }
 
@@ -502,6 +521,12 @@ impl PlayableCity {
             {
                 break;
             }
+            // Side-by-side Rapier props: kinematic proxy tracks mesh character
+            // M4.9: Rapier props vs solid map trimesh + kinematic character proxy
+            // (one-way push). Does not replace TriangleMesh3d collision.
+            let position = self.controller.position();
+            self.dynamics
+                .step(fixed_delta, [position.x, position.y, position.z]);
             self.fixed_accumulator_seconds -= fixed_delta;
         }
 
@@ -541,6 +566,7 @@ impl PlayableCity {
         if self.follow_camera.draws_playermodel() {
             self.character.draw(frame, camera, root)?;
         }
+        self.dynamics.draw(frame, camera)?;
         Ok(true)
     }
 }

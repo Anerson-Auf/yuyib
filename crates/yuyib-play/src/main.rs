@@ -24,19 +24,24 @@ use yuyib::{
     app::{Application, RenderLoop},
     assets::Assets,
     character_3d::{
-        CharacterController3d, CharacterControllerConfig3d, CharacterInput3d, CharacterMotor3d,
-        CharacterMotorConfig3d,
+        CharacterCollisionError3d, CharacterController3d, CharacterControllerConfig3d,
+        CharacterControllerError3d, CharacterInput3d, CharacterMotor3d, CharacterMotorConfig3d,
+        CharacterSpawnAnchor3d, CharacterSpawnOptions3d, CharacterSpawnReport3d,
+        CharacterSpawnSurfaceSelection3d,
     },
-    game_3d::{DirectionalLight3d, Model3d, Transform3d, WorldTransform3d},
+    game_3d::{DirectionalLight3d, LocalTransform3d, Model3d, Transform3d, WorldTransform3d},
     input::{
         CharacterFollowCamera3d, PlayerCharacterBindings3d, PlayerCharacterControlConfig3d,
         PlayerCharacterControls3d,
     },
     model::{Model, ModelHandle},
-    physics::{TriangleMesh3d, Vec3},
+    physics::{Ray3d, TriangleMesh3d, Vec2, Vec3},
     platform::{CursorControl, WindowConfig},
     render::{BloomConfig, ClearColor, ColorGradeConfig, ColorPostProcess, FxaaConfig},
-    render_3d::{Game3dLighting, Game3dScene, Game3dSceneConfig, Game3dShading, LambertLighting3d},
+    render_3d::{
+        Game3dLighting, Game3dScene, Game3dSceneConfig, Game3dShading, LambertLighting3d,
+        UnboundMaterialPolicy3d,
+    },
 };
 use yuyib_authoring::SceneDocument;
 use yuyib_ecs::bevy_ecs::entity::Entity;
@@ -143,6 +148,14 @@ fn run() -> Result<(), String> {
                     &mut model_cache,
                 )?;
                 if !attached {
+                    let model_ref = payload
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>");
+                    let name = record.name.as_deref().unwrap_or("<unnamed>");
+                    eprintln!(
+                        "yuyib-play: glTF attach skipped for `{name}` (`{model_ref}`) — proxy cube"
+                    );
                     world.entity_mut(*entity).insert(Model3d::new(proxy));
                 }
             } else {
@@ -237,7 +250,10 @@ fn run() -> Result<(), String> {
             &project,
             Game3dSceneConfig::default()
                 .with_shading(Game3dShading::Pbr)
-                .with_lighting(play_scene_lighting()),
+                .with_lighting(play_scene_lighting())
+                // Imported maps often have unbound primitives; failing the whole
+                // frame leaves a clear viewport with only the Player cube visible.
+                .with_unbound_material_policy(UnboundMaterialPolicy3d::DebugMagenta),
         )
         .map_err(|error| error.to_string())?,
     ));
@@ -331,11 +347,13 @@ fn run() -> Result<(), String> {
                     runtime.camera_focus(),
                 );
             }
-            let _ = render_scene.borrow_mut().render(
+            if let Err(error) = render_scene.borrow_mut().render(
                 frame,
                 &mut render_world.borrow_mut(),
                 render_models.as_ref(),
-            );
+            ) {
+                eprintln!("yuyib-play: render failed: {error}");
+            }
         })
         .run()
         .map_err(|error| error.to_string())
@@ -483,9 +501,7 @@ impl PlayRuntime {
             }
 
             let position = body.position();
-            if let Some(mut transform) = world.get_mut::<Transform3d>(entity) {
-                transform.translation = [position.x, position.y, position.z];
-            }
+            sync_player_visual_transform(world, entity, position);
         }
 
         let Some(focus) = self.camera_focus() else {
@@ -494,14 +510,11 @@ impl PlayRuntime {
         let delta = frame_delta_seconds.min(0.125);
         let mut follow = self.follow_camera.take();
         if let Some(follow_camera) = follow.as_mut() {
-            match self.body.as_ref() {
-                Some(PlayerBody::Mesh { collider, .. }) => {
-                    let _ = follow_camera.update_chase(focus, delta, collider.mesh());
-                }
-                _ => {
-                    let _ = follow_camera.update_chase(focus, delta, &self.plane_chase_mesh);
-                }
-            }
+            // Chase boom must not resolve_sphere against the full static map:
+            // inside a room the probe sits in solid volume and ejects the camera
+            // into the sky, which looks like “no map / eternal fall”.
+            // Player locomotion still uses the real mesh collider.
+            let _ = follow_camera.update_chase(focus, delta, &self.plane_chase_mesh);
         }
         self.follow_camera = follow;
     }
@@ -577,28 +590,27 @@ fn build_player_body(
 
     match collider {
         Ok(collider) if collider.triangle_count() > 0 => {
-            match CharacterController3d::new(controller_config, spawn) {
-                Ok(mut controller) => {
-                    if let Err(error) = controller.place_on_triangle_mesh(collider.mesh()) {
-                        eprintln!(
-                            "yuyib-play: mesh place failed ({error}); falling back to plane motor"
-                        );
-                        return plane_motor_fallback(spawn, player);
-                    }
+            match spawn_player_on_mesh(controller_config, &collider, spawn) {
+                Ok(controller) => {
                     eprintln!(
-                        "yuyib-play: Player ready ({} tris) at ({:.2}, {:.2}, {:.2}) — WASD / mouse / Space / Shift / V",
+                        "yuyib-play: Player ready ({} tris, {} draws) at ({:.2}, {:.2}, {:.2}) — WASD / mouse / Space / Shift / V",
                         collider.triangle_count(),
+                        collider.source_draw_count(),
                         controller.position().x,
                         controller.position().y,
                         controller.position().z
                     );
+                    // Keep the authored cube under the controller before the first frame.
+                    sync_player_visual_transform(world, entity, controller.position());
                     Some(PlayerBody::Mesh {
                         controller,
                         collider,
                     })
                 }
                 Err(error) => {
-                    eprintln!("yuyib-play: controller create failed: {error}");
+                    eprintln!(
+                        "yuyib-play: mesh spawn failed ({error}); falling back to plane motor"
+                    );
                     plane_motor_fallback(spawn, player)
                 }
             }
@@ -612,6 +624,141 @@ fn build_player_body(
             plane_motor_fallback(spawn, player)
         }
     }
+}
+
+/// Writes the controller pose into every transform flavor the renderer may read.
+///
+/// glTF parenting promotes authored roots to [`LocalTransform3d`]. Each frame
+/// `propagate_world_transforms` rebuilds [`Transform3d`] / [`WorldTransform3d`]
+/// from that local — so updating only `Transform3d` leaves the Player cube stuck
+/// at the authored spawn while the chase camera follows the physics body.
+fn sync_player_visual_transform(
+    world: &mut yuyib_ecs::prelude::World,
+    entity: Entity,
+    position: Vec3,
+) {
+    let translation = [position.x, position.y, position.z];
+    if let Some(mut local) = world.get_mut::<LocalTransform3d>(entity) {
+        local.translation = translation;
+    }
+    if let Some(mut transform) = world.get_mut::<Transform3d>(entity) {
+        transform.translation = translation;
+    } else if world.get::<LocalTransform3d>(entity).is_none() {
+        world
+            .entity_mut(entity)
+            .insert(Transform3d::from_translation(translation));
+    }
+    // Drop stale world snapshot so the next propagate/extract cannot prefer an
+    // old matrix over the pose we just wrote.
+    world.entity_mut(entity).remove::<WorldTransform3d>();
+}
+
+/// Places the player on a walkable floor near the authored transform.
+///
+/// Prefer a downward raycast and a tight local floor search. Global outdoor
+/// lowest-surface search teleports the chase camera into empty map regions and
+/// looks like “no location / eternal fall”.
+fn spawn_player_on_mesh(
+    config: CharacterControllerConfig3d,
+    collider: &StaticSceneCollider3d,
+    spawn: Vec3,
+) -> Result<CharacterController3d, CharacterControllerError3d> {
+    let mesh = collider.mesh();
+    if let Some(controller) = try_spawn_by_downward_raycast(config, mesh, spawn)? {
+        eprintln!(
+            "yuyib-play: spawn via downward raycast near authored ({:.2}, {:.2}, {:.2})",
+            spawn.x, spawn.y, spawn.z
+        );
+        return Ok(controller);
+    }
+
+    let preferred_xz = Vec2::new(spawn.x, spawn.z);
+    // Open rooms often have no collision ceiling — do not require one.
+    let local = CharacterSpawnOptions3d {
+        require_ceiling: false,
+        ..CharacterSpawnOptions3d::default()
+    }
+    .with_anchor(CharacterSpawnAnchor3d::PreferredXz(preferred_xz))
+    .with_maximum_horizontal_distance(12.0)
+    .with_surface_selection(CharacterSpawnSurfaceSelection3d::ClosestToElevation(spawn.y));
+    match CharacterController3d::spawn_in_triangle_mesh_with_options(config, mesh, local) {
+        Ok(controller) => {
+            eprintln!(
+                "yuyib-play: spawn via local floor search near authored ({:.2}, {:.2}, {:.2})",
+                spawn.x, spawn.y, spawn.z
+            );
+            return Ok(controller);
+        }
+        Err(CharacterControllerError3d::NoPlayableSpawn(report)) => {
+            eprintln!(
+                "yuyib-play: local floor spawn missed near ({:.2}, {:.2}, {:.2}) \
+                 (ranked={}, rejects={:?})",
+                spawn.x,
+                spawn.y,
+                spawn.z,
+                report.ranked_candidate_count,
+                report.reject_counts
+            );
+        }
+        Err(error) => return Err(error),
+    }
+
+    Err(CharacterControllerError3d::NoPlayableSpawn(
+        CharacterSpawnReport3d {
+            anchor: preferred_xz,
+            surface_triangle_count: u32::try_from(mesh.triangles().len()).unwrap_or(u32::MAX),
+            ranked_candidate_count: 0,
+            reject_counts: Default::default(),
+            selected: None,
+        },
+    ))
+}
+
+fn try_spawn_by_downward_raycast(
+    config: CharacterControllerConfig3d,
+    mesh: &TriangleMesh3d,
+    spawn: Vec3,
+) -> Result<Option<CharacterController3d>, CharacterControllerError3d> {
+    let origins = [
+        Vec3::new(spawn.x, spawn.y + 6.0, spawn.z),
+        Vec3::new(spawn.x, spawn.y + 1.5, spawn.z),
+        spawn,
+    ];
+    for origin in origins {
+        let Ok(ray) = Ray3d::new(origin, Vec3::new(0.0, -1.0, 0.0)) else {
+            continue;
+        };
+        let hit = match mesh.raycast(ray, 48.0) {
+            Ok(hit) => hit,
+            Err(error) => {
+                return Err(CharacterControllerError3d::Physics(error));
+            }
+        };
+        let Some(hit) = hit else {
+            continue;
+        };
+        // Prefer upward-facing support (walkable floor), not ceiling underside.
+        if hit.normal.y < 0.35 {
+            continue;
+        }
+        let position = Vec3::new(
+            hit.position.x,
+            hit.position.y + config.radius + 0.02,
+            hit.position.z,
+        );
+        let clearance = mesh
+            .resolve_sphere(position, config.radius, config.collision_iterations)
+            .map_err(CharacterCollisionError3d::from)
+            .map_err(CharacterControllerError3d::Collision)?;
+        if clearance.contacts != 0 {
+            // Nudge to resolved pose when barely intersecting the floor.
+            let mut controller = CharacterController3d::new(config, clearance.position)?;
+            controller.place_on_triangle_mesh(mesh)?;
+            return Ok(Some(controller));
+        }
+        return Ok(Some(CharacterController3d::new(config, position)?));
+    }
+    Ok(None)
 }
 
 fn plane_motor_fallback(
@@ -763,6 +910,10 @@ fn attach_gltf_hierarchy(
     }
     let absolute = candidates.into_iter().find(|candidate| candidate.is_file());
     let Some(absolute) = absolute else {
+        eprintln!(
+            "yuyib-play: no glTF file for model ref `{raw}` (resolved `{path}`) under {}",
+            project.display()
+        );
         return Ok(false);
     };
     let extension = absolute
@@ -771,6 +922,10 @@ fn attach_gltf_hierarchy(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if !matches!(extension.as_str(), "glb" | "gltf") {
+        eprintln!(
+            "yuyib-play: model path is not glTF (`{}`)",
+            absolute.display()
+        );
         return Ok(false);
     }
     let _ = cache;
@@ -808,7 +963,10 @@ fn payload_is_gltf(payload: &Value) -> bool {
         .get("model")
         .and_then(Value::as_str)
         .is_some_and(|path| {
-            let path = path.strip_prefix("asset://").unwrap_or(path);
+            let path = path.strip_prefix("asset://").unwrap_or(path).trim();
+            if path.is_empty() || path.eq_ignore_ascii_case("builtin:cube") {
+                return false;
+            }
             looks_like_asset_guid(path)
                 || path_looks_like_gltf(path)
                 || Path::new(path).extension().is_none()

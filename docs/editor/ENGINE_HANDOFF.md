@@ -68,7 +68,7 @@ owning capability или в companion crate.
   `DirectionalLight3d` — Inspector + materialization + viewport/Play.
 - Transform gizmo (Move / Rotate / Scale).
 - Asset (incremental): `yuyib.gltf-import` / `yuyib.gltf-preview` через
-  production `GltfSceneLoad`; Bounds/Normals overlays; mesh + material
+  production `GltfSceneLoad`; Bounds/Collision/Normals/Tangents/UV overlays; mesh + material
   selection; preview cache invalidation; non-destructive reimport.
 - Play slice: Player motor, mesh collider, authored light, dark PBR fallback.
 - Scene и Asset Preview на отдельных `Game3dScene` (изоляция GPU residency).
@@ -77,10 +77,10 @@ owning capability или в companion crate.
 
 | Тема | Статус |
 |---|---|
-| glTF preview remainder | collision / tangents / UV overlays; animation selection |
+| glTF preview remainder | animation clip selection |
 | Apply Play Mode Changes | выключен до adapter whitelist |
 | rust-analyzer / LSP | не подключён |
-| Coverage CI (GitHub Actions) | scoped tests есть; Actions wiring нет |
+| Coverage CI (GitHub Actions) | foundation workflows в `.github/workflows/` |
 | Field mutation без typed adapter | host блокирует edit |
 | Project creation wizard / cook export | нет |
 | Full multi-entry host preview artifact store | thin |
@@ -125,7 +125,7 @@ passes используют `Load`.
 | M1 playable 3D (street-city smoke) | Closed |
 | M2 rendering baseline (IBL, shadows, bloom, FXAA, SSAO, grade, diagnostics) | Usable MVP |
 | M3.1 / M3.2 cook cache (glTF + external dep fingerprints) | Usable MVP |
-| M4 physics facade (mature backend) | Next critical |
+| M4 physics facade (mature backend) | M4.1–M4.9 usable MVP (map trimesh + one-way character→prop push; mesh motor unchanged) |
 | M5 high-level profiles | Planned |
 | M6 native UI completion | Early partial (`ScrollView`) |
 | Editor E1 remainder | Asset overlays / LSP / Actions CI |

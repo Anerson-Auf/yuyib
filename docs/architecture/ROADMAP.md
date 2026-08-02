@@ -202,9 +202,22 @@ Definition of Done (core): неизменённый GLB повторно не п
 
 ### M4 — Physics facade над mature backend
 
+**M4.1–M4.9 usable MVP slice:** Rapier facade + playable side-by-side overlay
+(`support/playable_dynamics.rs`): local solid **map trimesh** (walls/floors near
+spawn), props, and a **kinematic character sphere** that tracks the mesh player
+so crates can be pushed (one-way). Character locomotion/collision still uses
+`TriangleMesh3d::resolve_sphere` — no motor rewrite.
+
 Собственные static queries/BVH сохраняются. General-purpose rigid-body solver
 не следует разрабатывать внутри Yuyib: dynamic bodies, broadphase, CCD, sleeping,
-joints и determinism должны прийти через заменяемый mature backend adapter.
+joints и determinism должны прийти через заменяемый mature backend adapter
+(**Rapier #1**; Avian #2 later).
+
+**M4.10+ / still open:** two-way character↔prop response, slope-aware character
+rewrite, 2D Rapier port.
+
+**v2.0 polish (do not block):** editor physics UI, replacing character mesh
+queries with backend mesh queries.
 
 Definition of Done: static/kinematic/dynamic bodies, box/sphere/capsule/convex,
 triggers/contacts, filters, CCD, joints, moving platforms и slope-aware character
