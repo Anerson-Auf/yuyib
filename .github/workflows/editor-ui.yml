@@ -1,0 +1,40 @@
+# CI for editor-ui (Vite + Monaco). Path-filtered; no npm test script yet.
+name: Editor UI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "editor-ui/**"
+      - ".github/workflows/editor-ui.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "editor-ui/**"
+      - ".github/workflows/editor-ui.yml"
+
+defaults:
+  run:
+    working-directory: editor-ui
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editor-ui/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Syntax check
+        run: node --check src/main.js
+
+      - name: Production build
+        run: npm run build

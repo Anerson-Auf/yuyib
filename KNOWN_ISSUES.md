@@ -33,7 +33,8 @@
   diagnostics.
 - Apply Play Mode Changes (reverse sync runtime → authored) выключен
   намеренно до whitelist adapters.
-- Coverage gate есть в scoped tests; GitHub Actions wiring ещё нет.
+- Coverage gate есть в scoped tests; foundation GitHub Actions —
+  `.github/workflows/` (не полный workspace gate).
 - Component field mutation без typed adapter блокируется host-ом.
 
 ## Native UI / WebView

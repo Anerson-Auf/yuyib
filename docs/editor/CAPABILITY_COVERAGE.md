@@ -16,8 +16,8 @@ Capability coverage отвечает на вопрос: «как пользов�
 > selection and remaining overlays still open (not full Asset DoD). **Coverage gate (incremental):**
 > `validate_coverage_gate` + `AssetCoverageEvidence` enforced in scoped tests;
 > canonical `CoverageManifest::to_pretty_json` + golden fixture in
-> `yuyib-gltf-authoring`; GitHub Actions still open. Этот policy-документ не
-> второй source of truth — machine snapshot важнее.
+> `yuyib-gltf-authoring`; GitHub Actions foundation CI в `.github/workflows/`.
+> Этот policy-документ не второй source of truth — machine snapshot важнее.
 
 ## Допустимые статусы
 

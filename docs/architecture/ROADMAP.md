@@ -38,7 +38,7 @@
 | Source 1 | early partial | BSP/VPK/lightmaps/displacements/props/material integration |
 | Source 2 | missing/research | format/version/legal matrix and importer plugin |
 | Editor/authoring | E1 in progress | Asset DoD remainder, coverage Actions CI, rust-analyzer/LSP |
-| Documentation/release | partial | book freshness, CI, golden tests, stable policy |
+| Documentation/release | partial | book freshness, golden tests, stable policy; Actions foundation CI landed |
 
 ## Критический путь
 
