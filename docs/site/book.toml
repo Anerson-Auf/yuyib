@@ -9,7 +9,7 @@ src = "src"
 default-theme = "navy"
 preferred-dark-theme = "navy"
 smart-punctuation = true
-git-repository-url = "https://example.invalid/yuyib"
+git-repository-url = "https://github.com/Anerson-Auf/yuyib"
 additional-css = ["theme/wiki.css"]
 
 [output.html.search]

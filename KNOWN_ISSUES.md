@@ -9,8 +9,6 @@
 - Поддерживается только **Windows**. Другие ОС не являются verified targets.
 - Public API помечен как **Experimental**: breaking changes возможны до первого
   stable minor.
-- `repository` в `Cargo.toml` / `book.toml` пока placeholder
-  (`example.invalid`) — замените на URL GitHub-репозитория при публикации.
 
 ## Renderer / 3D
 

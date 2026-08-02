@@ -55,7 +55,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Anerson"]
-repository = "https://example.invalid/yuyib"
+repository = "https://github.com/Anerson-Auf/yuyib"
 
 [workspace.dependencies]
 bevy_ecs = "0.19.0"
