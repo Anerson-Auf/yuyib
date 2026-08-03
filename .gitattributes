@@ -1,0 +1,10 @@
+# Normalize text EOLs so Windows CI checkouts don't break golden JSON diffs.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.hdr binary
+*.glb binary
+*.gltf binary
+*.yasset binary

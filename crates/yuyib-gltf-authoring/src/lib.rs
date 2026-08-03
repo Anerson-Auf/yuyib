@@ -119,6 +119,8 @@ mod tests {
                 path.display()
             )
         });
+        // Windows checkouts may expand LF→CRLF; compare on normalized newlines.
+        let golden = golden.replace("\r\n", "\n");
         assert_eq!(
             json, golden,
             "coverage manifest drifted from golden; review and UPDATE_COVERAGE_GOLDEN=1 if intentional"
