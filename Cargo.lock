@@ -5482,6 +5482,7 @@ dependencies = [
  "bevy_ecs",
  "serde",
  "yuyib-2d",
+ "yuyib-animation",
  "yuyib-app",
  "yuyib-assets",
  "yuyib-audio",
@@ -5513,6 +5514,7 @@ dependencies = [
  "yuyib-source1-assets",
  "yuyib-source1-scene",
  "yuyib-tasks",
+ "yuyib-tiled",
  "yuyib-ui",
  "yuyib-ui-render",
  "yuyib-ui-text",
@@ -5532,6 +5534,10 @@ dependencies = [
  "serde_json",
  "yuyib-assets",
 ]
+
+[[package]]
+name = "yuyib-animation"
+version = "0.1.0"
 
 [[package]]
 name = "yuyib-app"
@@ -5669,6 +5675,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "yuyib-2d",
+ "yuyib-animation",
  "yuyib-assets",
  "yuyib-ecs",
  "yuyib-image",
@@ -5828,9 +5835,11 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "yuyib-2d",
+ "yuyib-character-2d",
  "yuyib-ecs",
  "yuyib-game-2d",
  "yuyib-image",
+ "yuyib-physics",
  "yuyib-platform",
  "yuyib-render",
  "yuyib-render-2d",
@@ -5844,6 +5853,7 @@ dependencies = [
  "yuyib-character-3d",
  "yuyib-game-3d",
  "yuyib-gltf",
+ "yuyib-image",
  "yuyib-input",
  "yuyib-model",
  "yuyib-model-assets",
@@ -5967,6 +5977,17 @@ dependencies = [
 [[package]]
 name = "yuyib-tasks"
 version = "0.1.0"
+
+[[package]]
+name = "yuyib-tiled"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "yuyib-2d",
+ "yuyib-assets",
+ "yuyib-game-2d",
+]
 
 [[package]]
 name = "yuyib-ui"

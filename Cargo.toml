@@ -16,6 +16,8 @@ members = [
     "crates/yuyib-game",
     "crates/yuyib-assets",
     "crates/yuyib-2d",
+    "crates/yuyib-animation",
+    "crates/yuyib-tiled",
     "crates/yuyib-image",
     "crates/yuyib-gltf",
     "crates/yuyib-model",

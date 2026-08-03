@@ -7,12 +7,19 @@ authors.workspace = true
 repository.workspace = true
 description = "High-level 2D composition profiles for Yuyib (M5)."
 
+[features]
+default = []
+## Rapier platformer playable (`PlatformerPlayable2d`).
+character-2d = ["dep:yuyib-character-2d", "dep:yuyib-physics", "yuyib-physics/rapier2d"]
+
 [dependencies]
 bevy_ecs.workspace = true
 yuyib-2d = { path = "../yuyib-2d" }
+yuyib-character-2d = { path = "../yuyib-character-2d", optional = true }
 yuyib-ecs = { path = "../yuyib-ecs" }
 yuyib-game-2d = { path = "../yuyib-game-2d" }
 yuyib-image = { path = "../yuyib-image" }
+yuyib-physics = { path = "../yuyib-physics", optional = true }
 yuyib-platform = { path = "../yuyib-platform" }
 yuyib-render = { path = "../yuyib-render" }
 yuyib-render-2d = { path = "../yuyib-render-2d" }

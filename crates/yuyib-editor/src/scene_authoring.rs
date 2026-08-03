@@ -828,6 +828,12 @@ fn default_component_record(component_id: &str) -> Result<ComponentRecord, Scene
             "illuminance_lux": 8.0,
             "enabled": true
         }),
+        "yuyib.render3d" => json!({ "draw": true }),
+        "yuyib.collision3d" => json!({
+            "enabled": true,
+            "layer": "",
+            "collide_with": ""
+        }),
         "yuyib.interactable" => json!({
             "interaction": "world.interact",
             "enabled": true,

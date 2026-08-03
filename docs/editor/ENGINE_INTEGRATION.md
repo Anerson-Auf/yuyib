@@ -12,8 +12,9 @@ Editor. Сначала прочитайте этот файл, затем тол
 > diagnostics-only — closed (E1); texture remap closed; LSP completion/hover —
 > **deferred to end-game**; project wizard / cook export — открыты.
 > Операционный статус: [`ENGINE_HANDOFF.md`](ENGINE_HANDOFF.md).
-> Практический authoring API (interactable / trigger / Intent Bridge wire):
-> [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).
+> **SoT:** [`SOURCE_OF_TRUTH.md`](SOURCE_OF_TRUTH.md).
+> Практический authoring API: [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).
+> 3D game-loop checklist: [`GAME_LOOP_3D.md`](GAME_LOOP_3D.md).
 
 ## Что изменилось концептуально
 

@@ -10,6 +10,7 @@ description = "ECS-facing 2D sprite extraction for Yuyib."
 [dependencies]
 bevy_ecs.workspace = true
 yuyib-2d = { path = "../yuyib-2d" }
+yuyib-animation = { path = "../yuyib-animation" }
 yuyib-ecs = { path = "../yuyib-ecs" }
 yuyib-image = { path = "../yuyib-image" }
 yuyib-physics = { path = "../yuyib-physics" }

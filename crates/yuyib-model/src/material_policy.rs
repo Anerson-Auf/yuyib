@@ -925,6 +925,36 @@ mod tests {
     }
 
     #[test]
+    fn policy_forces_body_mat_single_sided_against_yaw_zfight() {
+        let prim = MeshPrimitive::new(vec![[0.0; 3]; 3], vec![0, 1, 2])
+            .expect("triangle")
+            .with_material(MaterialIndex::new(0));
+        let mesh = Mesh::new(Some("body".to_owned()), vec![prim]).expect("mesh");
+        let mut model = Model::new(
+            vec![mesh],
+            vec![
+                Material::new()
+                    .with_name("body_mat")
+                    .with_double_sided(true),
+            ],
+            Vec::new(),
+        )
+        .expect("model");
+        assert!(model.materials()[0].double_sided());
+        ModelMaterialPolicy::new()
+            .patch_named(
+                "body_mat",
+                MaterialFactorPatch::new().with_double_sided(false),
+            )
+            .apply(&mut model)
+            .expect("policy");
+        assert!(
+            !model.materials()[0].double_sided(),
+            "body_mat must be single-sided so yaw cannot z-fight UV islands"
+        );
+    }
+
+    #[test]
     fn policy_patches_remaps_and_assigns_unbound_fallback_atomically() {
         let mut model = sample_model();
         let policy = ModelMaterialPolicy::new()

@@ -1,9 +1,10 @@
 //! GPU-instanced 2D sprites for Yuyib's shared renderer.
 //!
 //! The crate intentionally starts with one texture per draw batch. [`SpriteDraw`]
-//! values are sorted stably by `layer`, then converted to one instance buffer and
-//! issued in a single indexed draw call. A future atlas/bindless layer can batch
-//! multiple textures without changing the world-space sprite API.
+//! values are sorted stably by `layer`, then converted to instance data. When
+//! several textures appear in one frame, submit them together through
+//! [`SpriteRenderer::draw_prepared_batches`] so instance uploads cannot race
+//! render passes on the shared buffer.
 //!
 //! # Example
 //!
@@ -29,8 +30,10 @@
 //! # Limits and caveats
 //!
 //! - A call to [`SpriteRenderer::draw`] accepts exactly one GPU texture. Submit
-//!   separate batches for distinct textures; use one atlas texture to preserve
-//!   one draw call.
+//!   several textures in one frame via [`SpriteRenderer::draw_prepared_batches`].
+//!   Do not interleave `queue.write_buffer` of a shared instance buffer with
+//!   multiple surface passes before `queue.submit` — every pass may observe only
+//!   the last upload. Prefer one atlas texture when a single draw call matters.
 //! - The renderer provides stable ordering *within a batch* by integer `layer`.
 //!   It cannot order draws across separate calls or phases.
 //! - Sprites are alpha blended and have no depth buffer. `layer` is the explicit
@@ -458,6 +461,11 @@ impl SpriteRenderer {
 
     /// Records one alpha-blended indexed instanced pass over the current frame.
     ///
+    /// Prefer [`Self::draw_prepared_batches`] when submitting more than one
+    /// texture in the same frame: repeated [`Self::draw`] calls that each
+    /// `queue.write_buffer` the shared instance storage before `queue.submit`
+    /// can make every pass observe only the last upload.
+    ///
     /// `batch.texture()` must match `texture.asset()`. An empty batch performs
     /// no buffer update and emits no render pass.
     ///
@@ -477,52 +485,93 @@ impl SpriteRenderer {
         texture: &GpuSpriteTexture,
         batch: &PreparedSpriteBatch,
     ) -> Result<SpriteDrawStats, SpriteRenderError> {
-        if batch.texture != texture.asset {
-            return Err(SpriteRenderError::BatchTextureMismatch {
-                batch: batch.texture,
-                gpu: texture.asset,
-            });
-        }
-        if batch.texture_size != texture.size {
-            return Err(SpriteRenderError::BatchTextureSizeMismatch {
-                batch: batch.texture_size,
-                gpu: texture.size,
-            });
-        }
-        let sprites = u32::try_from(batch.instances.len()).map_err(|_| {
-            SpriteRenderError::TooManySprites {
-                actual: batch.instances.len(),
+        self.draw_prepared_batches(frame, camera, &[(texture, batch)])
+    }
+
+    /// Draws many prepared texture batches in **one** surface pass.
+    ///
+    /// Instance data is packed into non-overlapping regions of the shared
+    /// instance buffer with a single `queue.write_buffer` before the pass.
+    /// That ordering is required: `queue.write_buffer` is not part of the
+    /// command encoder, so write→pass→write→pass→submit lets every pass see
+    /// only the last write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpriteRenderError`] for mismatched assets, invalid camera data,
+    /// or an instance count beyond WGPU's `u32` draw range.
+    pub fn draw_prepared_batches(
+        &mut self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera2d,
+        batches: &[(&GpuSpriteTexture, &PreparedSpriteBatch)],
+    ) -> Result<SpriteDrawStats, SpriteRenderError> {
+        let mut ranges = Vec::with_capacity(batches.len());
+        let mut packed: Vec<GpuSpriteInstance> = Vec::new();
+        for &(texture, batch) in batches {
+            if batch.texture != texture.asset {
+                return Err(SpriteRenderError::BatchTextureMismatch {
+                    batch: batch.texture,
+                    gpu: texture.asset,
+                });
             }
-        })?;
-        if sprites == 0 {
+            if batch.texture_size != texture.size {
+                return Err(SpriteRenderError::BatchTextureSizeMismatch {
+                    batch: batch.texture_size,
+                    gpu: texture.size,
+                });
+            }
+            if batch.instances.is_empty() {
+                continue;
+            }
+            let start = u32::try_from(packed.len()).map_err(|_| {
+                SpriteRenderError::TooManySprites {
+                    actual: packed.len().saturating_add(batch.instances.len()),
+                }
+            })?;
+            let count = u32::try_from(batch.instances.len()).map_err(|_| {
+                SpriteRenderError::TooManySprites {
+                    actual: batch.instances.len(),
+                }
+            })?;
+            packed.extend_from_slice(&batch.instances);
+            ranges.push((texture, start, count));
+        }
+        if packed.is_empty() {
             return Ok(SpriteDrawStats::default());
         }
 
+        let total = u32::try_from(packed.len()).map_err(|_| SpriteRenderError::TooManySprites {
+            actual: packed.len(),
+        })?;
         let projection = camera.projection(frame.draw_size())?;
         frame
             .queue()
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&projection));
-        self.ensure_instance_capacity(frame.device(), sprites);
+        self.ensure_instance_capacity(frame.device(), total);
         let instance_buffer = self
             .instance_buffer
             .as_ref()
             .expect("a non-empty sprite batch creates an instance buffer");
         frame
             .queue()
-            .write_buffer(instance_buffer, 0, bytemuck::cast_slice(&batch.instances));
+            .write_buffer(instance_buffer, 0, bytemuck::cast_slice(&packed));
 
+        let draw_calls = u32::try_from(ranges.len()).unwrap_or(u32::MAX);
         frame.with_surface_pass(wgpu::LoadOp::Load, |pass| {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_bind_group(1, &texture.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            pass.draw_indexed(0..6, 0, 0..sprites);
+            for (texture, start, count) in ranges {
+                pass.set_bind_group(1, &texture.bind_group, &[]);
+                pass.draw_indexed(0..6, 0, start..start + count);
+            }
         });
         Ok(SpriteDrawStats {
-            sprites,
-            draw_calls: 1,
+            sprites: total,
+            draw_calls,
         })
     }
 
@@ -717,8 +766,10 @@ impl SpriteRenderer {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            // Pixel-art default: Linear bleeds neighbouring atlas cells and makes
+            // tilemaps shimmer when the camera moves by sub-pixels.
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });

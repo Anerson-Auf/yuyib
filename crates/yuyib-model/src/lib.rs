@@ -164,6 +164,27 @@ impl Model {
         ))
     }
 
+    /// Replaces one texture descriptor after import (for example re-encoded
+    /// diffuse bytes). Material bindings are left unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMaterialEditError::MissingTexture`] when `index` is out
+    /// of range and leaves the model unchanged.
+    pub fn replace_texture(
+        &mut self,
+        index: ModelTextureIndex,
+        replacement: ModelTexture,
+    ) -> Result<ModelTexture, ModelMaterialEditError> {
+        if index.get() >= self.textures.len() {
+            return Err(ModelMaterialEditError::MissingTexture { texture: index });
+        }
+        Ok(std::mem::replace(
+            &mut self.textures[index.get()],
+            replacement,
+        ))
+    }
+
     /// Rebinds one physical mesh primitive to a validated material slot.
     ///
     /// This changes metadata only; vertex/index buffers are neither cloned nor

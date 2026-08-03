@@ -20,11 +20,15 @@ use yuyib_gltf::{
     AnimationClipIndex, AnimationPlayer, AnimationSnapshot, ImportOptions, ImportedAsset,
     NodeIndex, import_scene_path_with_options, sample_bind_pose,
 };
+use yuyib_image::{DecodePolicy, compress_rgba8_luminance, decode_bytes, encode_png_rgba8};
+use yuyib_model::{
+    MaterialFactorPatch, Model, ModelMaterialPolicy, ModelTexture, ModelTextureSource,
+};
 use yuyib_model_assets::{ModelTextureLoader, PreparedModelTextures};
 use yuyib_render::RenderFrame;
 use yuyib_render_3d::{
     Camera3d, DepthLoad, GltfAnimationPreviewGpu, GltfAnimationPreviewGpuError, LambertLighting3d,
-    ModelUploadBudget3d,
+    ModelUploadBudget3d, SkeletalVisibilityMask3d,
 };
 use yuyib_tasks::TaskPool;
 
@@ -381,16 +385,56 @@ impl AnimatedCharacter3d {
         root_transform: [f32; 16],
         depth_load: DepthLoad,
     ) -> Result<(), AnimatedCharacterError> {
+        self.draw_with_visibility(
+            frame,
+            camera,
+            root_transform,
+            depth_load,
+            &SkeletalVisibilityMask3d::new(),
+        )
+    }
+
+    /// Draws with an explicit skeletal visibility mask (morph/cloth A/B diag).
+    ///
+    /// # Errors
+    ///
+    /// Returns when GPU residency is incomplete or draw fails.
+    pub fn draw_with_visibility(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        root_transform: [f32; 16],
+        depth_load: DepthLoad,
+        visibility: &SkeletalVisibilityMask3d,
+    ) -> Result<(), AnimatedCharacterError> {
         self.gpu
-            .draw_with_root_transform(
+            .draw_with_root_transform_and_visibility(
                 frame,
                 camera,
                 &self.asset.scene,
                 &self.pose,
                 root_transform,
                 depth_load,
+                visibility,
             )
             .map_err(AnimatedCharacterError::Gpu)
+    }
+
+    /// Builds a mask that hides every morph (cloth) primitive, leaving skin only.
+    #[must_use]
+    pub fn morph_hidden_visibility(&self) -> SkeletalVisibilityMask3d {
+        let mut mask = SkeletalVisibilityMask3d::new();
+        let _ = mask.hide_where(&self.asset.model, &self.asset.scene, |part| {
+            self.asset.scene.morph_primitives().iter().any(|morph| {
+                morph.mesh() == part.id().mesh() && morph.primitive() == part.id().primitive()
+            })
+        });
+        mask
+    }
+
+    /// Replaces flat character lighting after GPU residency.
+    pub fn set_lighting(&mut self, lighting: LambertLighting3d) {
+        self.gpu.set_lighting(lighting);
     }
 
     /// Returns the imported asset.
@@ -420,8 +464,16 @@ fn import_animated_character(path: &Path) -> Result<ImportedAsset, String> {
     if !path.is_file() {
         return Err(format!("missing animated character at {}", path.display()));
     }
-    let asset = import_scene_path_with_options(path, ImportOptions::skeletal_preview())
+    let mut asset = import_scene_path_with_options(path, ImportOptions::skeletal_preview())
         .map_err(|error| error.to_string())?;
+    // Keep in sync with `playable_character::character_material_policy` (examples).
+    // Double-sided body skin z-fights under tiny camera yaw and looks like a
+    // whole-avatar lighting flip (muddy skin vs bright cloth morph).
+    playable_character_material_policy()
+        .apply(&mut asset.model)
+        .map_err(|error| error.to_string())?;
+    // Keep in sync with `playable_character::unbake_body_mat_diffuse` (examples).
+    unbake_body_mat_diffuse(&mut asset.model)?;
     if asset.scene.skins().is_empty() {
         return Err(format!("{} contains no skeleton", path.display()));
     }
@@ -429,6 +481,78 @@ fn import_animated_character(path: &Path) -> Result<ImportedAsset, String> {
         return Err(format!("{} contains no animation clips", path.display()));
     }
     Ok(asset)
+}
+
+/// Shared playable-character material repairs applied on every skeletal load.
+fn playable_character_material_policy() -> ModelMaterialPolicy {
+    // Must match `playable_character::character_material_policy`. Required
+    // patches on absent names (e.g. `Body_mat`) abort the whole city load.
+    // After this patch, [`unbake_body_mat_diffuse`] softens baked front/back
+    // albedo islands in the fixture diffuse map (flat shader shows bake
+    // honestly as front≠back). Asset re-export without bake is the long-term fix.
+    ModelMaterialPolicy::new().patch_named(
+        "body_mat",
+        MaterialFactorPatch::new().with_double_sided(false),
+    )
+}
+
+/// Must match `playable_character::BODY_ALBEDO_UNBAKE_CONTRAST`.
+const BODY_ALBEDO_UNBAKE_CONTRAST: f32 = 0.40;
+
+/// Softens baked lighting in `body_mat` diffuse before texture prepare.
+///
+/// Thin duplicate of the examples helper: `yuyib-profile-3d` must not depend on
+/// example support. Shared math lives in `yuyib-image::compress_rgba8_luminance`.
+fn unbake_body_mat_diffuse(model: &mut Model) -> Result<(), String> {
+    let Some(texture_index) = model.materials().iter().find_map(|material| {
+        if material.name() != Some("body_mat") {
+            return None;
+        }
+        material
+            .specular_glossiness()
+            .map_or_else(
+                || material.base_color_texture(),
+                |workflow| workflow.diffuse_texture(),
+            )
+            .map(|binding| binding.texture())
+    }) else {
+        return Ok(());
+    };
+    let (encoded_bytes, label, sampler) = {
+        let texture = model
+            .textures()
+            .get(texture_index.get())
+            .ok_or_else(|| "body_mat diffuse texture index is out of range".to_owned())?;
+        match texture.source() {
+            ModelTextureSource::Encoded { bytes, .. } => (
+                Arc::clone(bytes),
+                texture.label().map(str::to_owned),
+                texture.sampler(),
+            ),
+            ModelTextureSource::ExternalUri(_) => {
+                eprintln!("body_mat diffuse is an external URI; skipping runtime albedo unbake");
+                return Ok(());
+            }
+        }
+    };
+    let decoded =
+        decode_bytes(&encoded_bytes, DecodePolicy::default()).map_err(|error| error.to_string())?;
+    let width = decoded.texture().size().width();
+    let height = decoded.texture().size().height();
+    let mut pixels = decoded.into_pixels();
+    compress_rgba8_luminance(&mut pixels, BODY_ALBEDO_UNBAKE_CONTRAST);
+    let encoded = encode_png_rgba8(width, height, &pixels).map_err(|error| error.to_string())?;
+    let mut replacement = ModelTexture::embedded("image/png", Arc::<[u8]>::from(encoded));
+    if let Some(label) = label {
+        replacement = replacement.with_label(label);
+    }
+    if let Some(sampler) = sampler {
+        replacement = replacement.with_sampler(sampler);
+    }
+    model
+        .replace_texture(texture_index, replacement)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn node_translation(

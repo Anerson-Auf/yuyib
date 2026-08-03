@@ -1,4 +1,4 @@
-﻿# РљР°С‚Р°Р»РѕРі Р·Р°РїСѓСЃРєР°РµРјС‹С… РїСЂРёРјРµСЂРѕРІ
+# РљР°С‚Р°Р»РѕРі Р·Р°РїСѓСЃРєР°РµРјС‹С… РїСЂРёРјРµСЂРѕРІ
 
 > **РЎС‚Р°С‚СѓСЃ:** Current examples map  
 > **Р Р°СЃРїРѕР»РѕР¶РµРЅРёРµ:** `crates/yuyib/examples`  
@@ -34,6 +34,10 @@ cargo run -p yuyib --example <name>
 | `sprite_atlas_ecs` | atlas, ECS sprite and animation | `two-d` |
 | `offline_sprite_atlas` | typed bounded offline atlas import and runtime binding (headless) | `two-d` |
 | `two_d_tile_playground` | tilemap + `PlayableLoop2d` (WASD, camera follow, walls) | `two-d` |
+| `two_d_platformer_playable` | HL Rapier platformer (`PlatformerPlayable2d`, A/D + Space) | `--features "app,two-d,character-2d"` |
+| `two_d_playable_hud` | Deep 2D C: `PlayableLoop2d` + Esc pause overlay | `--features "app,two-d,ui"` |
+| `two_d_animator_playable` | Deep 2D D: AnimationSet + SM + `play` + velocity/facing (Space=attack) | `--features "app,two-d"` |
+| `two_d_tiled_playable` | M7: Tiled farm from `for_tests/2d` + 4-dir walk | `--features "app,two-d"` + local `for_tests/2d` |
 
 ## 3D Рё glTF
 
@@ -74,6 +78,11 @@ cargo run -p yuyib --example <name>
 | `animated_character_smoke` | M5.2 `AnimatedCharacterLoad3d`: skeletal import + walk advance | `--features profile-3d` |
 | `game2d_profile_smoke` | M5.1 `Game2dProfile`: World + Game2dScene shell | `--features profile-2d` |
 | `playable_loop_2d_smoke` | Deep 2D A `PlayableLoop2d`: kinematic step + camera follow | `--features profile-2d` |
+| `platformer_playable_2d_smoke` | Deep 2D B `PlatformerPlayable2d`: land + sprite/camera sync | `--features "two-d,character-2d"` |
+| `playable_hud_2d_smoke` | Deep 2D C pause overlay tree + `with_active_flag` | `--features "app,ui"` |
+| `sprite_animator_2d_smoke` | Deep 2D D `SpriteAnimator2d`: play/walk + facing + on_finished | `--features two-d` |
+| `tiled_map_2d_smoke` | M7 Tiled JSON → bind `TileMap2d`/`TileCollision2d` | `--features two-d` |
+| `two_d_platformer_playable` | Deep 2D B windowed HL platformer (A/D + Space) | `--features "app,two-d,character-2d"` |
 | `skybox_smoke` | fullscreen cubemap skybox from cooked outdoor mip0 (+Y vs в€’Y luma) | none (synthetic) |
 | `directional_shadow_smoke` | orthographic directional shadow map darkens occluded ground (factor PBR) | none |
 | `pbr_alpha_mask_smoke` | PBR `MASK` discards occluder shading + shadow cutout vs opaque | none |

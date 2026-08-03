@@ -2,6 +2,7 @@
 target/
 **/*.rs.bk
 *.pdb
+for_tests/
 
 # Editor UI (Node)
 editor-ui/node_modules/
@@ -10,6 +11,7 @@ editor-ui/.vite/
 
 # Local cook / caches
 **/.yuyib_cook/
+**/.yuyib/
 
 # Third-party / local binary assets (keep off public remotes)
 *.glb

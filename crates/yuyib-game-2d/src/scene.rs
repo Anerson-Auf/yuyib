@@ -11,7 +11,8 @@ use yuyib_ecs::prelude::World;
 use yuyib_image::DecodedImage;
 use yuyib_render::RenderFrame;
 use yuyib_render_2d::{
-    Camera2d, GpuSpriteTexture, SpriteDraw, SpriteRenderError, SpriteRenderer, TextureUploadError,
+    Camera2d, GpuSpriteTexture, PreparedSpriteBatch, SpriteDraw, SpriteRenderError, SpriteRenderer,
+    TextureUploadError,
 };
 
 use crate::{
@@ -398,6 +399,7 @@ impl Game2dScene {
         draws: &[SpriteDraw],
         stats: &mut Game2dSceneStats,
     ) -> Result<(), Game2dSceneError> {
+        let mut jobs: Vec<(TextureHandle, PreparedSpriteBatch)> = Vec::new();
         let mut start = 0;
         while start < draws.len() {
             let texture_handle = draws[start].region.texture();
@@ -424,11 +426,29 @@ impl Game2dScene {
                 texture.size(),
                 draws[start..end].iter().copied(),
             )?;
-            let submitted = renderer.draw(frame, self.config.camera, texture, &batch)?;
-            stats.drawn_sprites += submitted.sprites as usize;
-            stats.draw_calls += submitted.draw_calls as usize;
+            jobs.push((texture_handle, batch));
+            // One GPU pass will submit every remaining job together; count each
+            // texture batch against the draw-call budget up front.
+            stats.draw_calls += 1;
             start = end;
         }
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or(Game2dSceneError::InvalidInternalPolicy)?;
+        let mut prepared: Vec<(&GpuSpriteTexture, &PreparedSpriteBatch)> =
+            Vec::with_capacity(jobs.len());
+        for (handle, batch) in &jobs {
+            let Some(texture) = self.resident.get(handle) else {
+                continue;
+            };
+            prepared.push((texture, batch));
+        }
+        let submitted = renderer.draw_prepared_batches(frame, self.config.camera, &prepared)?;
+        stats.drawn_sprites += submitted.sprites as usize;
         Ok(())
     }
 }

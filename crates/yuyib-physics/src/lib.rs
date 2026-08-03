@@ -2350,8 +2350,15 @@ pub fn resolve_kinematic_aabb_2d(
 
     let mut final_center = center;
     let mut contacts = Vec::new();
-    let resolved_x = sweep_aabb_axis_2d(final_center, aabb, desired_delta.x, true, &ordered)
-        .map_err(KinematicAabbMoveError::InvalidInput)?;
+    let resolved_x = sweep_aabb_axis_2d(
+        final_center,
+        aabb,
+        desired_delta.x,
+        true,
+        &ordered,
+        KINEMATIC_AABB_CONTACT_SKIN_2D,
+    )
+    .map_err(KinematicAabbMoveError::InvalidInput)?;
     if let Some(hit) = resolved_x {
         final_center.x += hit.distance.copysign(desired_delta.x);
         contacts.push(KinematicAabbContact2d {
@@ -2361,8 +2368,15 @@ pub fn resolve_kinematic_aabb_2d(
     } else {
         final_center.x += desired_delta.x;
     }
-    let resolved_y = sweep_aabb_axis_2d(final_center, aabb, desired_delta.y, false, &ordered)
-        .map_err(KinematicAabbMoveError::InvalidInput)?;
+    let resolved_y = sweep_aabb_axis_2d(
+        final_center,
+        aabb,
+        desired_delta.y,
+        false,
+        &ordered,
+        KINEMATIC_AABB_CONTACT_SKIN_2D,
+    )
+    .map_err(KinematicAabbMoveError::InvalidInput)?;
     if let Some(hit) = resolved_y {
         final_center.y += hit.distance.copysign(desired_delta.y);
         contacts.push(KinematicAabbContact2d {
@@ -2379,12 +2393,16 @@ pub fn resolve_kinematic_aabb_2d(
     })
 }
 
+/// Keep movers a hair outside static AABBs so float error cannot nest into a wall.
+const KINEMATIC_AABB_CONTACT_SKIN_2D: f32 = 0.5;
+
 fn sweep_aabb_axis_2d(
     center: Vec2,
     moving: Aabb2d,
     delta: f32,
     horizontal: bool,
     static_colliders: &[StaticAabb2d],
+    contact_skin: f32,
 ) -> Result<Option<AxisSweepHit2d>, PhysicsConfigError> {
     if delta == 0.0 {
         return Ok(None);
@@ -2413,11 +2431,27 @@ fn sweep_aabb_axis_2d(
         } else {
             (moving_min.y - static_max.y, Vec2::new(0.0, 1.0))
         };
-        if !separation.is_finite() || separation < 0.0 || separation > delta.abs() {
+        if !separation.is_finite() {
             continue;
         }
+        // Negative gap = collider is already behind the sweep axis. Ignoring it
+        // is required in bordered rooms: otherwise every opposite wall shares the
+        // cross-axis slab and freezes travel at 0 (skin treated "behind" as hit).
+        if separation < 0.0 {
+            continue;
+        }
+        // Within skin of an ahead collider: stop on this axis.
+        let travel = if separation <= contact_skin {
+            0.0
+        } else {
+            let allowed = separation - contact_skin;
+            if allowed > delta.abs() {
+                continue;
+            }
+            allowed
+        };
         let candidate = AxisSweepHit2d {
-            distance: separation,
+            distance: travel,
             collider_key: collider.key,
             normal,
         };
@@ -3893,15 +3927,15 @@ mod tests {
         let wall_hit =
             resolve_kinematic_aabb_2d(Vec2::ZERO, mover, Vec2::new(100.0, 0.0), &[wall], limits)
                 .expect("valid movement");
-        assert_eq!(wall_hit.final_center, Vec2::new(3.0, 0.0));
-        assert_eq!(wall_hit.applied_delta, Vec2::new(3.0, 0.0));
+        assert_eq!(wall_hit.final_center, Vec2::new(2.5, 0.0));
+        assert_eq!(wall_hit.applied_delta, Vec2::new(2.5, 0.0));
         assert_eq!(wall_hit.contacts()[0].normal, Vec2::new(-1.0, 0.0));
 
         let floor = static_aabb(11, Vec2::new(0.0, 5.0), Vec2::new(10.0, 1.0));
         let floor_hit =
             resolve_kinematic_aabb_2d(Vec2::ZERO, mover, Vec2::new(0.0, 100.0), &[floor], limits)
                 .expect("valid movement");
-        assert_eq!(floor_hit.final_center, Vec2::new(0.0, 3.0));
+        assert_eq!(floor_hit.final_center, Vec2::new(0.0, 2.5));
         assert_eq!(floor_hit.contacts()[0].normal, Vec2::new(0.0, -1.0));
     }
 
@@ -3913,7 +3947,7 @@ mod tests {
         let slide =
             resolve_kinematic_aabb_2d(Vec2::ZERO, mover, Vec2::new(10.0, 4.0), &[wall], limits)
                 .expect("valid movement");
-        assert_eq!(slide.final_center, Vec2::new(3.0, 4.0));
+        assert_eq!(slide.final_center, Vec2::new(2.5, 4.0));
         assert_eq!(slide.contacts().len(), 1);
         assert_eq!(slide.contacts()[0].collider_key, 20);
 
@@ -3926,7 +3960,7 @@ mod tests {
             limits,
         )
         .expect("valid movement");
-        assert_eq!(corner.final_center, Vec2::new(3.0, 3.0));
+        assert_eq!(corner.final_center, Vec2::new(2.5, 2.5));
         assert_eq!(
             corner.contacts(),
             [
@@ -3940,6 +3974,41 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn kinematic_aabb_ignores_walls_behind_sweep_in_bordered_room() {
+        // Mover in open space with solid borders on all four sides (farm-map shape).
+        // A skin that treats negative separation as a hit freezes every axis.
+        let mover = Aabb2d::new(Vec2::new(5.0, 4.0)).expect("valid mover");
+        let limits = KinematicAabbMoveLimits2d::new(8).expect("positive budget");
+        let left = static_aabb(1, Vec2::new(-50.0, 0.0), Vec2::new(10.0, 80.0));
+        let right = static_aabb(2, Vec2::new(50.0, 0.0), Vec2::new(10.0, 80.0));
+        let bottom = static_aabb(3, Vec2::new(0.0, -50.0), Vec2::new(80.0, 10.0));
+        let top = static_aabb(4, Vec2::new(0.0, 50.0), Vec2::new(80.0, 10.0));
+        let walls = [left, right, bottom, top];
+
+        let rightward = resolve_kinematic_aabb_2d(
+            Vec2::ZERO,
+            mover,
+            Vec2::new(12.0, 0.0),
+            &walls,
+            limits,
+        )
+        .expect("open move right");
+        assert_eq!(rightward.final_center, Vec2::new(12.0, 0.0));
+        assert!(rightward.contacts().is_empty());
+
+        let up = resolve_kinematic_aabb_2d(
+            Vec2::ZERO,
+            mover,
+            Vec2::new(0.0, 9.0),
+            &walls,
+            limits,
+        )
+        .expect("open move up");
+        assert_eq!(up.final_center, Vec2::new(0.0, 9.0));
+        assert!(up.contacts().is_empty());
     }
 
     #[test]

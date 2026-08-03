@@ -27,7 +27,7 @@ use yuyib_platform::{
 use yuyib_render::RenderFrame;
 use yuyib_render_3d::{
     Camera3d, DepthLoad, GltfSceneColliderLayerId3d, GltfSceneGpuProgress, LambertLighting3d,
-    ModelUploadBudget3d,
+    ModelUploadBudget3d, SkeletalVisibilityMask3d,
 };
 
 use super::{
@@ -174,6 +174,7 @@ pub struct PlayableLoop3d {
     upload_budget: ModelUploadBudget3d,
     cursor_activated: bool,
     reported_draw_stats: bool,
+    character_visibility: SkeletalVisibilityMask3d,
 }
 
 impl PlayableLoop3d {
@@ -267,9 +268,31 @@ impl PlayableLoop3d {
                 upload_budget: desc.upload_budget,
                 cursor_activated: false,
                 reported_draw_stats: false,
+                character_visibility: SkeletalVisibilityMask3d::new(),
             },
             report,
         ))
+    }
+
+    /// Replaces the skeletal visibility mask used on character draw (A/B diag).
+    pub fn set_character_visibility(&mut self, visibility: SkeletalVisibilityMask3d) {
+        self.character_visibility = visibility;
+    }
+
+    /// Clears the skeletal visibility mask (show every primitive).
+    pub fn clear_character_visibility(&mut self) {
+        self.character_visibility = SkeletalVisibilityMask3d::new();
+    }
+
+    /// Escape hatch for character lighting / morph diag.
+    pub fn character_mut(&mut self) -> &mut AnimatedCharacter3d {
+        &mut self.character
+    }
+
+    /// Read-only character presenter.
+    #[must_use]
+    pub const fn character(&self) -> &AnimatedCharacter3d {
+        &self.character
     }
 
     /// Returns whether map+character GPU residency is complete (host supplies map flag).
@@ -450,7 +473,13 @@ impl PlayableLoop3d {
         }
         if self.follow_camera.draws_playermodel() {
             self.character
-                .draw(frame, camera, root, DepthLoad::Load)
+                .draw_with_visibility(
+                    frame,
+                    camera,
+                    root,
+                    DepthLoad::Load,
+                    &self.character_visibility,
+                )
                 .map_err(PlayableLoopError3d::Character)?;
         }
         after_map(frame, camera)?;

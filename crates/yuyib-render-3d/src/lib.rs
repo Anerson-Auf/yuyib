@@ -3493,7 +3493,7 @@ impl TexturedSkeletalSceneRenderer3d {
     /// Multiplicative albedo lift so unlit skins stay readable next to IBL worlds.
     ///
     /// Deprecated path kept for call-site compatibility: prefers
-    /// [`Self::with_lighting`] which drives half-Lambert + ambient.
+    /// [`Self::with_lighting`] (flat view-independent exposure today).
     #[must_use]
     pub const fn with_ambient_fill(mut self, ambient_fill: [f32; 3]) -> Self {
         self.ambient_fill = ambient_fill;
@@ -10415,5 +10415,45 @@ mod tests {
             StandardMaterial3d::from_model_material(&material),
             Err(StandardMaterialError::SpecularGlossinessUnsupported)
         );
+    }
+
+    #[test]
+    fn textured_skinned_fragment_lighting_is_flat_not_ndotl() {
+        // Locks the sci-fi-girl yaw-brightness regression: orbiting a fixed pose
+        // must not change whole-avatar exposure via directional N·L.
+        assert!(
+            TEXTURED_SKINNED_MESH_WGSL.contains("instance.ambient + instance.light_radiance"),
+            "skinned fragment must use flat ambient+radiance exposure"
+        );
+        let fragment = TEXTURED_SKINNED_MESH_WGSL
+            .split("@fragment")
+            .nth(1)
+            .expect("fragment stage");
+        assert!(
+            !fragment.contains("dot("),
+            "skinned fragment must not sample N·L (found dot in fragment):\n{fragment}"
+        );
+    }
+
+    #[test]
+    fn skinned_material_lighting_with_zero_illuminance_is_pure_ambient() {
+        let lighting = LambertLighting3d::artistic(
+            [-0.35, -1.0, -0.25],
+            [1.0, 0.97, 0.92],
+            0.0,
+            [0.92, 0.92, 0.94],
+        )
+        .expect("valid key");
+        assert_eq!(lighting.light().illuminance_lux, 0.0);
+        let exposure = [
+            lighting.ambient()[0]
+                + lighting.light().color[0] * lighting.light().illuminance_lux,
+            lighting.ambient()[1]
+                + lighting.light().color[1] * lighting.light().illuminance_lux,
+            lighting.ambient()[2]
+                + lighting.light().color[2] * lighting.light().illuminance_lux,
+        ];
+        assert_eq!(exposure, lighting.ambient());
+        assert_eq!(exposure, [0.92, 0.92, 0.94]);
     }
 }

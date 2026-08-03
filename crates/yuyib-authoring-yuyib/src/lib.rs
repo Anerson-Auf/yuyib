@@ -37,6 +37,8 @@ mod ids {
     pub const PARENT_3D: &str = "yuyib.parent3d";
     pub const MODEL_3D: &str = "yuyib.model3d";
     pub const DIRECTIONAL_LIGHT_3D: &str = "yuyib.directional-light3d";
+    pub const RENDER_3D: &str = "yuyib.render3d";
+    pub const COLLISION_3D: &str = "yuyib.collision3d";
     pub const SPRITE_2D: &str = "yuyib.sprite2d";
     pub const ANIMATED_SPRITE_2D: &str = "yuyib.animated-sprite2d";
     pub const TILE_MAP_2D: &str = "yuyib.tile-map2d";
@@ -170,6 +172,20 @@ fn register_capabilities(registry: &mut AuthoringRegistry) -> Result<(), Registr
             "crates/yuyib-game-3d/src/lib.rs",
         ),
         capability(
+            ids::RENDER_3D,
+            "Render3d (nodraw)",
+            CoverageStatus::Visual,
+            "yuyib.game-3d",
+            "crates/yuyib-game-3d/src/lib.rs",
+        ),
+        capability(
+            ids::COLLISION_3D,
+            "Collision3d (nocollide)",
+            CoverageStatus::Visual,
+            "yuyib.game-3d",
+            "crates/yuyib-game-3d/src/lib.rs",
+        ),
+        capability(
             ids::SPRITE_2D,
             "Sprite2d",
             CoverageStatus::Unavailable,
@@ -291,6 +307,27 @@ fn register_component_schemas(registry: &mut AuthoringRegistry) -> Result<(), Re
                     .with_unit("lux"),
             )
             .with_field(FieldDescriptor::new("enabled", "Enabled", FieldKind::Bool)),
+        component(ids::RENDER_3D, ids::RENDER_3D).with_field(FieldDescriptor::new(
+            "draw",
+            "Draw (false = nodraw)",
+            FieldKind::Bool,
+        )),
+        component(ids::COLLISION_3D, ids::COLLISION_3D)
+            .with_field(FieldDescriptor::new(
+                "enabled",
+                "Enabled (false = nocollide)",
+                FieldKind::Bool,
+            ))
+            .with_field(FieldDescriptor::new(
+                "layer",
+                "Layer tag",
+                FieldKind::String,
+            ))
+            .with_field(FieldDescriptor::new(
+                "collide_with",
+                "Collide with tags (empty = all; include player for locomotion mesh)",
+                FieldKind::String,
+            )),
         component(ids::SPRITE_2D, ids::SPRITE_2D)
             .with_field(FieldDescriptor::new(
                 "region",

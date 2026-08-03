@@ -7,3 +7,5 @@ pub mod player__b5cfeeb6;
 pub mod light__d489ada5;
 pub mod talknpc__a7b1c201;
 pub mod exitvolume__a7b1c202;
+pub mod nodrawsolid__a7b1c203;
+pub mod ghostprop__a7b1c204;

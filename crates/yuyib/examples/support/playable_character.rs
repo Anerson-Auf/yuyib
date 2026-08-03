@@ -8,6 +8,7 @@ use std::{
     error::Error,
     fmt::Write as _,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use yuyib::{
@@ -15,7 +16,8 @@ use yuyib::{
         AnimationClipIndex, AnimationPlayer, AnimationSnapshot, ImportOptions, ImportedAsset,
         import_scene_path_with_options, sample_bind_pose,
     },
-    model::ModelMaterialPolicy,
+    image::{DecodePolicy, compress_rgba8_luminance, decode_bytes, encode_png_rgba8},
+    model::{MaterialFactorPatch, Model, ModelMaterialPolicy, ModelTexture, ModelTextureSource},
     model_assets::{ModelTextureLoader, PreparedModelTextures},
 };
 
@@ -63,12 +65,92 @@ pub fn character_path(asset_root: &Path) -> PathBuf {
 /// it would not correct this renderer path and would invent a material policy
 /// without asset-backed effect.
 ///
-/// Do **not** force `body_mat` double-sided: thin limbs then rasterize both
-/// front and back faces at nearly the same depth, and a millimetre of camera
-/// motion z-fights between different UV islands (one arm flips brightness).
+/// Force `body_mat` **single-sided**. The source (or a prior policy) may mark it
+/// double-sided; thin limbs then rasterize front and back faces at nearly the
+/// same depth, and a millimetre of camera yaw z-fights between different UV
+/// islands — the whole arm/skin island flips from bright to muddy while the
+/// white cloth morph stays blown-out. Hair cards may stay double-sided.
+///
+/// After import we also luminance-compress the `body_mat` diffuse albedo (see
+/// [`unbake_body_mat_diffuse`]): the fixture ships front/back UV islands with
+/// baked lighting baked into the colour map. Flat skinned shading shows that
+/// honestly as front≠back. A clean re-export without bake remains the correct
+/// long-term fix; this runtime unbake is fixture-specific triage.
 #[must_use]
 pub fn character_material_policy() -> ModelMaterialPolicy {
-    ModelMaterialPolicy::new()
+    // Only `body_mat` exists on the sci-fi girl fixture. A required `Body_mat`
+    // patch aborts street-city / cyberpunk load when the name is absent.
+    ModelMaterialPolicy::new().patch_named(
+        "body_mat",
+        MaterialFactorPatch::new().with_double_sided(false),
+    )
+}
+
+/// Contrast used when compressing baked luminance in `body_mat` diffuse.
+///
+/// `0.0` would flatten to the mean; `1.0` keeps the source. `≈0.40` softens
+/// front/back bake islands without washing skin hue entirely.
+const BODY_ALBEDO_UNBAKE_CONTRAST: f32 = 0.40;
+
+/// Softens baked lighting in the named `body_mat` visible colour texture.
+///
+/// Spec-gloss `diffuse_texture` wins over core `base_color_texture`. Embedded
+/// GLB bytes are decoded, luminance-compressed, re-encoded as PNG, and written
+/// back via [`Model::replace_texture`]. External URI textures are skipped with
+/// a warning (this fixture embeds the map).
+///
+/// # Errors
+///
+/// Propagates decode / encode / texture-slot failures for embedded sources.
+fn unbake_body_mat_diffuse(model: &mut Model) -> Result<(), Box<dyn Error>> {
+    let Some(texture_index) = model.materials().iter().find_map(|material| {
+        if material.name() != Some("body_mat") {
+            return None;
+        }
+        material
+            .specular_glossiness()
+            .map_or_else(
+                || material.base_color_texture(),
+                |workflow| workflow.diffuse_texture(),
+            )
+            .map(|binding| binding.texture())
+    }) else {
+        return Ok(());
+    };
+    let (encoded_bytes, label, sampler) = {
+        let texture = model
+            .textures()
+            .get(texture_index.get())
+            .ok_or("body_mat diffuse texture index is out of range")?;
+        match texture.source() {
+            ModelTextureSource::Encoded { bytes, .. } => (
+                Arc::clone(bytes),
+                texture.label().map(str::to_owned),
+                texture.sampler(),
+            ),
+            ModelTextureSource::ExternalUri(_) => {
+                eprintln!(
+                    "body_mat diffuse is an external URI; skipping runtime albedo unbake"
+                );
+                return Ok(());
+            }
+        }
+    };
+    let decoded = decode_bytes(&encoded_bytes, DecodePolicy::default())?;
+    let width = decoded.texture().size().width();
+    let height = decoded.texture().size().height();
+    let mut pixels = decoded.into_pixels();
+    compress_rgba8_luminance(&mut pixels, BODY_ALBEDO_UNBAKE_CONTRAST);
+    let encoded = encode_png_rgba8(width, height, &pixels)?;
+    let mut replacement = ModelTexture::embedded("image/png", Arc::<[u8]>::from(encoded));
+    if let Some(label) = label {
+        replacement = replacement.with_label(label);
+    }
+    if let Some(sampler) = sampler {
+        replacement = replacement.with_sampler(sampler);
+    }
+    model.replace_texture(texture_index, replacement)?;
+    Ok(())
 }
 
 /// Imports the skeletal character and applies the shared named material policy.
@@ -88,6 +170,7 @@ pub fn import_character(asset_root: &Path) -> Result<ImportedAsset, Box<dyn Erro
     }
     let mut asset = import_scene_path_with_options(&path, ImportOptions::skeletal_preview())?;
     character_material_policy().apply(&mut asset.model)?;
+    unbake_body_mat_diffuse(&mut asset.model)?;
     if asset.scene.skins().is_empty() {
         return Err(format!("{CHARACTER_FILE} contains no skeleton").into());
     }

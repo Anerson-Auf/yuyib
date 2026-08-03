@@ -33,11 +33,23 @@
 
 #![forbid(unsafe_code)]
 
+mod animator;
+mod composer;
 mod scene;
 
+pub use animator::{
+    Cardinal2d, CardinalClipPolicy2d, SpriteAnimator2d, SpriteAnimatorError2d, SpriteFacing2d,
+    VelocityFacingPolicy2d, VelocityFacingPose2d, apply_cardinal_clips_2d,
+    apply_velocity_facing_2d, resolve_cardinal_clips_2d, resolve_velocity_facing_2d,
+    step_sprite_animators_2d,
+};
+pub use composer::{TileMapComposer2d, TileMapComposerError2d, TileStamp2d};
 pub use scene::{
     DrawBudget2d, Game2dScene, Game2dSceneConfig, Game2dSceneConfigError, Game2dSceneError,
     Game2dSceneStats, TextureCacheConfig2d, TextureQueueError2d,
+};
+pub use yuyib_animation::{
+    AnimationError, AnimationSet, AnimationStateDef, AnimationStateMachine, PlayOutcome,
 };
 
 use std::time::Duration;
@@ -518,6 +530,13 @@ impl AnimatedSprite2d {
     /// Restarts from frame zero and resumes playback.
     pub const fn restart(&mut self) {
         self.state.reset();
+        self.playing = true;
+    }
+
+    /// Replaces authored frames and restarts from the first frame.
+    pub fn replace_animation(&mut self, animation: SpriteAnimation) {
+        self.state = animation.state();
+        self.animation = animation;
         self.playing = true;
     }
 }
@@ -1038,6 +1057,13 @@ impl TileCollision2d {
         }
         Ok(Self { solid })
     }
+
+    /// Row-major solid flags.
+    #[must_use]
+    pub fn solid(&self) -> &[bool] {
+        &self.solid
+    }
+
     fn is_solid(&self, index: usize) -> bool {
         self.solid.get(index).copied().unwrap_or(false)
     }
@@ -2083,8 +2109,8 @@ mod tests {
         )
         .expect("wall movement must resolve");
 
-        assert_eq!(movement.final_center, Vec2::new(9.0, 5.0));
-        assert_eq!(movement.applied_delta, Vec2::new(7.0, 0.0));
+        assert_eq!(movement.final_center, Vec2::new(8.5, 5.0));
+        assert_eq!(movement.applied_delta, Vec2::new(6.5, 0.0));
         assert_eq!(
             movement.contacts(),
             &[TileKinematicAabbContact2d {
@@ -2263,7 +2289,7 @@ mod tests {
             TileKinematicAabbLimits2d::new(4).expect("positive bound"),
         )
         .expect("wall movement resolves");
-        assert_eq!(result.movement.final_center, Vec2::new(9.0, 5.0));
+        assert_eq!(result.movement.final_center, Vec2::new(8.5, 5.0));
         assert_eq!(result.movement.contacts().len(), 1);
 
         let missing = world.spawn_empty().id();

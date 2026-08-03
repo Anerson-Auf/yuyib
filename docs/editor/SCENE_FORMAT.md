@@ -163,6 +163,22 @@ Optional: `required_action` (default `game.use`). Play: sphere query + **E**.
 Play: `overlap_spheres_3d` vs player → EmitSignal `trigger.<id>` with
 `phase` ∈ `entered` | `stayed` | `exited`.
 
+### `yuyib.render3d` / `yuyib.collision3d`
+
+```json
+{ "schema": "yuyib.render3d", "version": 1, "payload": { "draw": false } }
+```
+
+```json
+{
+  "schema": "yuyib.collision3d",
+  "version": 1,
+  "payload": { "enabled": false, "layer": "ghost", "collide_with": "" }
+}
+```
+
+Draw and solid collision are independent. See [`SOURCE_OF_TRUTH.md`](SOURCE_OF_TRUTH.md).
+
 ## Import settings envelope
 
 Asset metadata хранит identity отдельно от import result:

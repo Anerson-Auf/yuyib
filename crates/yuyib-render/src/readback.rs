@@ -81,7 +81,7 @@ pub fn read_texture_rgba8(
         .ok_or(TextureReadbackError::BufferSizeOverflow { width, height })?;
     let output_len = usize::try_from(width)
         .ok()
-        .and_then(|w| usize::try_from(height).ok().map(|h| (w, h)))
+        .zip(usize::try_from(height).ok())
         .and_then(|(w, h)| w.checked_mul(h))
         .and_then(|texels| texels.checked_mul(usize::try_from(bytes_per_pixel).ok()?))
         .ok_or(TextureReadbackError::BufferSizeOverflow { width, height })?;

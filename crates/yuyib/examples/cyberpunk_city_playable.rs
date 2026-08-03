@@ -19,11 +19,19 @@
 //! ```text
 //! cargo run -p yuyib --example cyberpunk_city_playable
 //! ```
+//!
+//! Character look A/B (front≠back skin). Orbit yaw after each toggle:
+//! - `F1` — SSAO on/off (map AO pass)
+//! - `F2` — morph/cloth on/off (skin only when off)
+//! - `F3` — character flat lighting: normal key vs pure white ×1
+//! - Startup: `YUYIB_CHAR_DIAG_NO_SSAO=1`, `YUYIB_CHAR_DIAG_NO_MORPH=1`,
+//!   `YUYIB_CHAR_DIAG_NO_POST=1` (no bloom/filmic/FXAA)
 
 mod support;
 
 use std::{
     cell::RefCell,
+    env,
     error::Error,
     path::Path,
     rc::Rc,
@@ -40,8 +48,14 @@ use yuyib::{
         PlayableLoop3d, PlayableLoopDesc3d, PlayableLoopError3d,
     },
     render::{BloomConfig, ClearColor, ColorGradeConfig, ColorPostProcess, FxaaConfig},
-    render_3d::{GltfSceneGpuProgress, ModelUploadBudget3d},
+    render_3d::{
+        GltfSceneGpuProgress, LambertLighting3d, ModelUploadBudget3d, SsaoPolicy,
+    },
     tasks::{TaskPool, TaskPoolConfig},
+};
+use yuyib_platform::winit::{
+    event::{ElementState, WindowEvent},
+    keyboard::{KeyCode, PhysicalKey},
 };
 
 use support::{LoadingScreen, playable_character, street_city};
@@ -53,6 +67,13 @@ const CAMERA_INITIAL_HEIGHT: f32 = 0.25;
 const CHARACTER_TURN_SPEED_RADIANS_PER_SECOND: f32 = std::f32::consts::TAU * 1.25;
 const CHARACTER_TEXTURE_SLOTS_PER_FRAME: usize = 2;
 const CHARACTER_TEXTURE_BYTES_PER_FRAME: u64 = 8 * 1024 * 1024;
+
+fn env_flag(name: &str) -> bool {
+    env::var_os(name).is_some_and(|value| {
+        let text = value.to_string_lossy();
+        !(text.is_empty() || text == "0" || text.eq_ignore_ascii_case("false"))
+    })
+}
 
 #[allow(
     clippy::too_many_lines,
@@ -68,26 +89,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     let render_state = Rc::clone(&state);
     let loading_renderer = Rc::new(RefCell::new(LoadingScreen::default()));
     let render_loading_renderer = Rc::clone(&loading_renderer);
+    let no_post = env_flag("YUYIB_CHAR_DIAG_NO_POST");
     // Filmic is on for M1, but keep EV neutral/slightly down so white albedo
     // (dress) does not read as Sketchfab "fullbright".
-    let post_process = ColorPostProcess::filmic()
-        .with_exposure_ev(-0.25)?
-        .with_bloom(BloomConfig::street_city())
-        .with_color_grade(ColorGradeConfig::street_city())
-        .with_fxaa(FxaaConfig::street_city());
+    let post_process = if no_post {
+        eprintln!("YUYIB_CHAR_DIAG_NO_POST: bloom/filmic/FXAA disabled");
+        None
+    } else {
+        Some(
+            ColorPostProcess::filmic()
+                .with_exposure_ev(-0.25)?
+                .with_bloom(BloomConfig::street_city())
+                .with_color_grade(ColorGradeConfig::street_city())
+                .with_fxaa(FxaaConfig::street_city()),
+        )
+    };
 
-    Application::new()
+    let mut app = Application::new()
         .window(WindowConfig {
             title: "Yuyib — playable street city".to_owned(),
             mode: yuyib_platform::WindowMode::Fullscreen,
             ..Default::default()
         })
         .clear_color(ClearColor::linear(0.45, 0.58, 0.72, 1.0))
-        .color_post_process(post_process)
         .render_loop(RenderLoop::Continuous)
-        .cursor_control(CursorControl::Released)
-        .on_window_event(move |event, context| {
+        .cursor_control(CursorControl::Released);
+    if let Some(post) = post_process {
+        app = app.color_post_process(post);
+    }
+    app.on_window_event(move |event, context| {
             if let DemoState::Playing(city) = &mut *window_state.borrow_mut() {
+                if let WindowEvent::KeyboardInput { event: key, .. } = event
+                    && key.state == ElementState::Pressed
+                    && !key.repeat
+                {
+                    city.handle_look_diag_key(key.physical_key);
+                }
                 let result = city.playable.handle_window_event(event);
                 if let Some(cursor) = result.cursor_control {
                     context.set_cursor_control(cursor);
@@ -206,11 +243,45 @@ struct PlayableCity {
     map_gpu: GltfSceneGpuProgress,
     playable: PlayableLoop3d,
     dynamics: DynamicsOverlay3d,
+    look_diag: CharacterLookDiag,
+}
+
+/// Runtime A/B for front≠back character look (see module docs).
+struct CharacterLookDiag {
+    ssao: bool,
+    morph: bool,
+    white_light: bool,
+    normal_light: LambertLighting3d,
+}
+
+impl CharacterLookDiag {
+    fn new(normal_light: LambertLighting3d) -> Self {
+        Self {
+            ssao: !env_flag("YUYIB_CHAR_DIAG_NO_SSAO"),
+            morph: !env_flag("YUYIB_CHAR_DIAG_NO_MORPH"),
+            white_light: false,
+            normal_light,
+        }
+    }
+
+    fn log_help() {
+        eprintln!(
+            "character look diag: F1=SSAO  F2=morph/cloth  F3=white flat light  \
+             (orbit yaw after each toggle; note front vs back)"
+        );
+    }
+
+    fn log_state(&self) {
+        eprintln!(
+            "character look diag: ssao={} morph={} white_light={}",
+            self.ssao, self.morph, self.white_light
+        );
+    }
 }
 
 impl PlayableCity {
     fn new(
-        profile: Game3dProfile,
+        mut profile: Game3dProfile,
         character: AnimatedCharacter3d,
     ) -> Result<Self, Box<dyn Error>> {
         let solid_collider_id = street_city::solid_layer_id()?;
@@ -241,6 +312,7 @@ impl PlayableCity {
             near: 0.08,
             ..PlayerCharacterControlConfig3d::default()
         };
+        let normal_light = street_city::character_key_light()?;
         let desc = PlayableLoopDesc3d::new(
             solid_collider_id.clone(),
             street_collider_id,
@@ -258,14 +330,27 @@ impl PlayableCity {
                 CAMERA_MAX_HEIGHT_ABOVE_FEET,
             )))
             .with_camera_initial_height(CAMERA_INITIAL_HEIGHT)
-            .with_character_lighting(Some(street_city::character_key_light()?))
+            .with_character_lighting(Some(normal_light))
             .with_upload_budget(ModelUploadBudget3d {
                 maximum_texture_slots: CHARACTER_TEXTURE_SLOTS_PER_FRAME,
                 target_texture_bytes: CHARACTER_TEXTURE_BYTES_PER_FRAME,
                 ..ModelUploadBudget3d::default()
             });
 
-        let (playable, report) = PlayableLoop3d::new(&profile, character, desc)?;
+        let (mut playable, report) = PlayableLoop3d::new(&profile, character, desc)?;
+        let look_diag = CharacterLookDiag::new(normal_light);
+        CharacterLookDiag::log_help();
+        if !look_diag.ssao {
+            profile.scene_mut().set_ssao(None);
+            eprintln!("YUYIB_CHAR_DIAG_NO_SSAO: SSAO off at start");
+        }
+        if !look_diag.morph {
+            let mask = playable.character().morph_hidden_visibility();
+            playable.set_character_visibility(mask);
+            eprintln!("YUYIB_CHAR_DIAG_NO_MORPH: cloth morph hidden at start");
+        }
+        look_diag.log_state();
+
         let spawn_pos = playable.controller().position();
         eprintln!(
             "Street-city player spawned grounded={} at ({:.2}, {:.2}, {:.2}); \
@@ -293,7 +378,52 @@ impl PlayableCity {
             map_gpu: GltfSceneGpuProgress::default(),
             playable,
             dynamics,
+            look_diag,
         })
+    }
+
+    fn handle_look_diag_key(&mut self, key: PhysicalKey) {
+        let PhysicalKey::Code(code) = key else {
+            return;
+        };
+        match code {
+            KeyCode::F1 => {
+                self.look_diag.ssao = !self.look_diag.ssao;
+                if self.look_diag.ssao {
+                    self.profile
+                        .scene_mut()
+                        .set_ssao(Some(SsaoPolicy::street_city()));
+                } else {
+                    self.profile.scene_mut().set_ssao(None);
+                }
+            }
+            KeyCode::F2 => {
+                self.look_diag.morph = !self.look_diag.morph;
+                if self.look_diag.morph {
+                    self.playable.clear_character_visibility();
+                } else {
+                    let mask = self.playable.character().morph_hidden_visibility();
+                    self.playable.set_character_visibility(mask);
+                }
+            }
+            KeyCode::F3 => {
+                self.look_diag.white_light = !self.look_diag.white_light;
+                let lighting = if self.look_diag.white_light {
+                    LambertLighting3d::artistic(
+                        [-0.35, -1.0, -0.25],
+                        [1.0, 1.0, 1.0],
+                        0.0,
+                        [1.0, 1.0, 1.0],
+                    )
+                    .unwrap_or(self.look_diag.normal_light)
+                } else {
+                    self.look_diag.normal_light
+                };
+                self.playable.character_mut().set_lighting(lighting);
+            }
+            _ => return,
+        }
+        self.look_diag.log_state();
     }
 
     fn is_gpu_ready(&self) -> bool {

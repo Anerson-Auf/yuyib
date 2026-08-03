@@ -33,6 +33,22 @@
       "target_milestone": "typed-adapter-and-coverage-gate"
     },
     {
+      "id": "yuyib.collision3d",
+      "title": "Collision3d (nocollide)",
+      "surfaces": [
+        "visual"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null
+    },
+    {
       "id": "yuyib.custom-render-passes",
       "title": "Custom render graph passes",
       "surfaces": [
@@ -263,6 +279,22 @@
       "target_milestone": null
     },
     {
+      "id": "yuyib.render3d",
+      "title": "Render3d (nodraw)",
+      "surfaces": [
+        "visual"
+      ],
+      "owner": "yuyib.game-3d",
+      "documentation": "crates/yuyib-game-3d/src/lib.rs",
+      "source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "unavailable_reason": null,
+      "target_milestone": null
+    },
+    {
       "id": "yuyib.sprite2d",
       "title": "Sprite2d",
       "surfaces": [
@@ -351,6 +383,55 @@
       ],
       "runtime_source": {
         "file": "crates/yuyib-game-2d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.collision3d",
+      "capability": "yuyib.collision3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "enabled",
+          "title": "Enabled (false = nocollide)",
+          "kind": {
+            "kind": "bool"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "layer",
+          "title": "Layer tag",
+          "kind": {
+            "kind": "string"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        },
+        {
+          "path": "collide_with",
+          "title": "Collide with tags (empty = all; include player for locomotion mesh)",
+          "kind": {
+            "kind": "string"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
         "line": null,
         "column": null
       },
@@ -777,6 +858,31 @@
           "title": "Parent",
           "kind": {
             "kind": "entity_reference"
+          },
+          "unit": null,
+          "read_only": false,
+          "apply_play_changes": false,
+          "documentation": null,
+          "source": null
+        }
+      ],
+      "runtime_source": {
+        "file": "crates/yuyib-game-3d/src/lib.rs",
+        "line": null,
+        "column": null
+      },
+      "authoring_source": null
+    },
+    {
+      "id": "yuyib.render3d",
+      "capability": "yuyib.render3d",
+      "current_version": 1,
+      "fields": [
+        {
+          "path": "draw",
+          "title": "Draw (false = nodraw)",
+          "kind": {
+            "kind": "bool"
           },
           "unit": null,
           "read_only": false,

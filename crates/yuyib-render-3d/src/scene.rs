@@ -655,7 +655,7 @@ impl Game3dScene {
         if self.config.propagate_hierarchy {
             propagate_world_transforms(world)?;
         }
-        let mut extracted = if self.config.select_lod {
+        let extracted = if self.config.select_lod {
             extract_models_with_lod_3d(world, self.config.camera.position)?
         } else {
             extract_models(world)
@@ -666,21 +666,26 @@ impl Game3dScene {
                 actual: extracted.model_count(),
             });
         }
+        // Overlays (gizmos, trigger markers) must not share camera-frustum cull
+        // with world geometry: a volume marker just outside the view frustum —
+        // or with stale/tight bounds — would flicker out while still authored
+        // visible. Shadows also ignore overlays.
+        let (mut scene_extracted, overlay_extracted) = extracted.partition_overlay();
+        let shadow_casters = scene_extracted.clone();
         let view_projection = self.config.camera.view_projection(frame.draw_size())?;
         let mut frustum = FrustumCullingStats3d {
-            input_draws: extracted.model_count(),
-            visible_draws: extracted.model_count(),
+            input_draws: scene_extracted.model_count(),
+            visible_draws: scene_extracted.model_count(),
             ..FrustumCullingStats3d::default()
         };
         let mut mesh_frustum = MeshFrustumCullingStats3d::default();
         if self.config.frustum_culling {
             let (visible, draw_stats, mesh_stats) =
-                self.filter_visible_meshes(models, &extracted, view_projection)?;
+                self.filter_visible_meshes(models, &scene_extracted, view_projection)?;
             frustum = draw_stats;
             mesh_frustum = mesh_stats;
-            extracted = visible;
+            scene_extracted = visible;
         }
-        let (scene_extracted, overlay_extracted) = extracted.partition_overlay();
         let (draw, directional_lights, used_scene_light) = match self.config.shading {
             Game3dShading::Unlit => {
                 let renderer = self.unlit.get_or_insert_with(|| {
@@ -757,7 +762,7 @@ impl Game3dScene {
                     lighting,
                     models,
                     &scene_extracted,
-                    None,
+                    Some(&shadow_casters),
                     true,
                 )?;
                 if !overlay_extracted.is_empty() {
@@ -1436,7 +1441,9 @@ impl PbrSceneRenderer {
         let mut stats = SceneDrawStats::default();
         self.textured_renderer.reset_batch_uniform_ring();
         self.ensure_models_uploaded(frame, models, scene, &mut stats)?;
-        let _ = shadow_casters;
+        if let Some(casters) = shadow_casters {
+            self.ensure_models_uploaded(frame, models, casters, &mut stats)?;
+        }
 
         let mut factor_opaque_requests = Vec::new();
         let mut opaque_requests = Vec::new();
@@ -1450,18 +1457,41 @@ impl PbrSceneRenderer {
             &mut stats,
         )?;
 
-        // Cast the same opaque set we shade. GPU ortho clips outside the map.
-        // Do not CPU-coverage-filter here: a tight centre test previously wiped
-        // the caster list for large glTF meshes whose translation sits far from
-        // the mesh surface.
+        // Prefer an unculled caster list from the scene (pre camera-frustum).
+        // Falling back to the shaded opaque set recreates angle-dependent shadow
+        // pops when a caster leaves the view while its receivers stay visible.
+        // GPU ortho still clips outside the shadow map; do not CPU-coverage-filter
+        // by translation alone (that previously dropped large glTF meshes).
         if rebuild_shadows {
-            self.prepare_directional_shadow(
-                frame,
-                camera,
-                lighting,
-                &factor_opaque_requests,
-                &opaque_requests,
-            )?;
+            if let Some(casters) = shadow_casters {
+                let mut factor_casters = Vec::new();
+                let mut textured_casters = Vec::new();
+                let mut transparent_ignored = Vec::new();
+                let mut caster_stats = SceneDrawStats::default();
+                self.collect_pbr_draw_requests(
+                    camera,
+                    casters,
+                    &mut factor_casters,
+                    &mut textured_casters,
+                    &mut transparent_ignored,
+                    &mut caster_stats,
+                )?;
+                self.prepare_directional_shadow(
+                    frame,
+                    camera,
+                    lighting,
+                    &factor_casters,
+                    &textured_casters,
+                )?;
+            } else {
+                self.prepare_directional_shadow(
+                    frame,
+                    camera,
+                    lighting,
+                    &factor_opaque_requests,
+                    &opaque_requests,
+                )?;
+            }
         }
         let shadow = self.directional_shadow.as_ref();
 

@@ -2469,6 +2469,14 @@ function updateDiagnostics(items) {
     });
     panel.append(row);
     existing.push(copyText);
+
+    const msg = String(item.message || "");
+    if (item.source === "play" && /yuyib-play:.*(signal|use accepted|use miss|materialized|interactable)/i.test(msg)) {
+      appendOutput("play", msg.replace(/^yuyib-play:\s*/, ""));
+      if (/signal|use accepted/i.test(msg)) {
+        showToast("Play", msg.replace(/^yuyib-play:\s*/, "").slice(0, 140), "info");
+      }
+    }
   });
   state.diagnosticsCopyBuffer = existing.join("\n");
   const total = panel.querySelectorAll(".diagnostic-row").length;

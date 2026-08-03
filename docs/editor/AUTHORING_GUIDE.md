@@ -1,8 +1,10 @@
 # Authoring guide: Scene, Play interactions, Intent Bridge
 
 Практический гайд для текущего Editor / Play среза (2026-08).  
+**SoT:** [`SOURCE_OF_TRUTH.md`](SOURCE_OF_TRUTH.md).  
 Нормативные контракты: [`ENGINE_INTEGRATION.md`](ENGINE_INTEGRATION.md),
-[`SCENE_FORMAT.md`](SCENE_FORMAT.md). Статус фич: [`ENGINE_HANDOFF.md`](ENGINE_HANDOFF.md).
+[`SCENE_FORMAT.md`](SCENE_FORMAT.md). Статус: [`ENGINE_HANDOFF.md`](ENGINE_HANDOFF.md).
+Checklist: [`GAME_LOOP_3D.md`](GAME_LOOP_3D.md).
 
 Цель документа: **показать API и payloads**, чтобы можно было тестировать
 функционал без угадывания. Ручная правка `.yscene` не обязательна — Inspector
@@ -25,11 +27,10 @@ Add Component уже отдаёт зарегистрированные schemas.
 Откройте `project.yuyib` в Editor → Play → подойдите к TalkNpc (**E**) или
 войдите в ExitVolume (лог `trigger.level.exit`).
 
-**Observable:** Play stderr печатает каждый drained signal
-(`signal trigger id=… phase=…`, `signal \`world.talk_npc\` …`).
-В Editor toast/output — `host.scene.interaction.signal` (для bridge apply из
-host, не из Play window). Inspector Add Component включает Interactable /
-Trigger Volume; fields editable (`Visual` coverage).
+**Observable:** Play пишет в **Diagnostics** с `source=play` (не в mock
+«Imported asset» rows). Строки также toast'ятся / идут в Output при
+`signal` / `use accepted`. Parent PowerShell Editor **не** показывает Play
+stderr (отдельный piped process) — смотрите нижнюю панель Diagnostics.
 
 ---
 
@@ -109,6 +110,24 @@ Phases: `entered` | `stayed` | `exited`.
 `RapierDynamicsWorld3d`. Sphere-query path — основной для Editor Play.
 Игры, которые сами держат Rapier рядом с CharacterController, могут кормить
 `TriggerOverlapTracker` теми же `trigger.*` intents (без physics-mode switch).
+
+---
+
+### `yuyib.render3d` (nodraw)
+
+| Field | Meaning |
+|---|---|
+| `draw` | `false` = hide from render; collision unchanged |
+
+### `yuyib.collision3d` (nocollide / selective)
+
+| Field | Meaning |
+|---|---|
+| `enabled` | `false` = exclude from player locomotion mesh |
+| `layer` | optional tag (`door`, `prop`, …) |
+| `collide_with` | empty = all; else comma/list — must include `player` to stay in Play mesh |
+
+Prop↔prop selective collision is **not** on the CharacterController trimesh path.
 
 ---
 

@@ -11,6 +11,8 @@ use yuyib_render_2d::Camera2d;
 pub struct CameraFollow2d {
     /// Added to the target before writing the camera position.
     offset: [f32; 2],
+    /// When false, [`Self::apply`] leaves the camera untouched (fixed shot).
+    enabled: bool,
 }
 
 impl Default for CameraFollow2d {
@@ -25,6 +27,16 @@ impl CameraFollow2d {
     pub const fn new() -> Self {
         Self {
             offset: [0.0, 0.0],
+            enabled: true,
+        }
+    }
+
+    /// Fixed camera: playable loops will not overwrite [`Camera2d::position`].
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            offset: [0.0, 0.0],
+            enabled: false,
         }
     }
 
@@ -39,6 +51,12 @@ impl CameraFollow2d {
     #[must_use]
     pub const fn offset(self) -> [f32; 2] {
         self.offset
+    }
+
+    /// Returns whether follow is active.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        self.enabled
     }
 
     /// Computes the camera position for `target`.
@@ -57,8 +75,11 @@ impl CameraFollow2d {
         }
     }
 
-    /// Writes [`Self::camera_position`] into `camera`.
+    /// Writes [`Self::camera_position`] into `camera` when follow is enabled.
     pub fn apply(self, camera: &mut Camera2d, target: [f32; 2]) {
+        if !self.enabled {
+            return;
+        }
         camera.position = self.camera_position(target);
     }
 }
@@ -75,5 +96,12 @@ mod tests {
             .with_offset([10.0, -5.0])
             .apply(&mut camera, [100.0, 200.0]);
         assert_eq!(camera.position, [110.0, 195.0]);
+    }
+
+    #[test]
+    fn disabled_follow_leaves_camera() {
+        let mut camera = Camera2d::new([1.0, 2.0], 1.0);
+        CameraFollow2d::disabled().apply(&mut camera, [99.0, 99.0]);
+        assert_eq!(camera.position, [1.0, 2.0]);
     }
 }

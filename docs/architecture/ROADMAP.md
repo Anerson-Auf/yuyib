@@ -24,14 +24,14 @@
 | Windows application | partial | multi-window, device-loss recovery, production diagnostics |
 | Game/ECS lifecycle | foundation + M5.1 profiles | Deep 2D HL started (`PlayableLoop2d`); save/load |
 | Tasks/assets/importers | strong foundation | hot reload UI, eviction, shipping without importers |
-| 2D | partial + Deep 2D A | PlayableLoop2d/camera follow; platformer HL, Tiled, UI slices |
+| 2D | partial + Deep 2D A–E + M7 objects/locations/composer | Loop/platformer/HUD/animator + Tiled objects + `LocationStack2d` + `TileMapComposer2d`; TMX/LDtk later |
 | 3D/glTF/animation | strong partial | compatibility tail, material overrides, animation authoring |
 | 3D rendering | usable MVP | validated CSM, TAA/GTAO, GPU instancing, timestamps |
 | Shader API | not as planned | high-level effects/material templates |
 | Physics | usable MVP (Rapier 3D/2D + platformer controller) | editor physics UI, tile broadphase cache |
 | Navigation | early partial | agent navmesh, smoothing, dynamic obstacles |
 | Gameplay | partial | persistence, UI composition, authority/replication |
-| Native UI | early partial | ScrollView+thumb done; drag/IME/a11y/images open |
+| Native UI | early partial | ScrollView+thumb + pause overlay active-flag; drag/IME/a11y/images open |
 | WebView | partial | facade decision, focus/accessibility/composition |
 | Audio | partial | spatial audio, buses, streaming and device policy |
 | Networking | early partial | TLS/auth, replication, prediction and observability |
@@ -266,8 +266,10 @@ wiring without hiding budgets/errors:
 Definition of Done (remaining): migrate more playables onto profiles where
 policy is stable (`cyberpunk_city_playable` uses `Game3dProfile` +
 `AnimatedCharacter3d` + `PlayableLoop3d` + `DynamicsOverlay3d`). **Current:**
-Deep 2D A (`PlayableLoop2d` / `CameraFollow2d`). Audio/interaction remain
-opt-in adapters.
+Deep 2D A/B/C/D (`PlayableLoop2d` / `PlatformerPlayable2d` / pause HUD /
+`SpriteAnimator2d`) + M7 Tiled objects / locations / composer (`yuyib-tiled`
+object layers, `LocationStack2d`, `TileMapComposer2d`).
+Audio/interaction remain opt-in adapters.
 
 ## Ближайший порядок работ
 
@@ -288,9 +290,28 @@ opt-in adapters.
 3. **Deep 2D** — HL-паттерны как M5.2 3D:
    - A. `PlayableLoop2d` + `CameraFollow2d` (**done**, smoke
      `playable_loop_2d_smoke`; `two_d_tile_playground` migrated);
-   - дальше: platformer HL / sprite↔body sync; thin UI (pause/HUD); Tiled/LDtk
-     (M7) → `TileMap2d`.
-   Rapier2D facade / `PlatformerController2d` / `Game2dProfile` smokes уже есть.
+   - B. `PlatformerPlayable2d` (**done**, feature `character-2d`; smoke
+     `platformer_playable_2d_smoke`; windowed `two_d_platformer_playable`);
+   - C. thin UI pause/HUD (**done**: `ApplicationUi::with_active_flag` +
+     `pause_overlay_tree`; smoke `playable_hud_2d_smoke`; windowed
+     `two_d_playable_hud`);
+   - D. AnimationSet + State Machine + `play("walk")` + velocity/facing
+     (**done**: `yuyib-animation`, `SpriteAnimator2d`; smoke
+     `sprite_animator_2d_smoke`; windowed `two_d_animator_playable` — playground
+     not rewritten);
+   - E. Tiled JSON → `TileMap2d` (**done first slice + objects + external `.tsj`**:
+     `yuyib-tiled` orthogonal embedded/external JSON tileset + `objectgroup`;
+     smoke `tiled_map_2d_smoke`; windowed `two_d_tiled_playable`; fixtures
+     `tiled_unit_room.json` / `tiled_external_tileset_room.json`). Still open:
+     TMX/TSX XML, flips, multi-tileset, LDtk.
+   - F. Location stack + map composer (**done slice**: `LocationStack2d`
+     push/pop; `TileMapComposer2d` fill/stamp/border; smoke
+     `location_stack_2d_smoke`; farm demo door → composer interior via `E`).
+   - дальше: richer Tiled/LDtk (M7) / content formats.
+  Rapier2D facade / `PlatformerController2d` / `Game2dProfile` smokes уже есть.
+
+End-game / later (не в текущем HL-базисе): particles/FX, weapon attach sockets,
+dash/attack timelines beyond simple once→idle, blend trees / crossfades.
 
 ### M6 — Application capability completion
 
@@ -310,7 +331,10 @@ virtualization, IME, accessibility, images/icons.
 
 Только после M3:
 
-1. Tiled JSON/TMX или LDtk;
+1. Tiled JSON/TMX или LDtk — **JSON + objects + locations/composer + external
+   `.tsj`** (`yuyib-tiled` orthogonal → `TileMap2d` + objectgroup;
+   `import_map_with_external_tilesets`; `LocationStack2d`; `TileMapComposer2d`;
+   TMX/TSX XML / multi-tileset / LDtk open);
 2. Source 1 VMF material/UV/entity completion;
 3. BSP/VPK/lightmaps/displacements/props;
 4. TrenchBroom MAP;

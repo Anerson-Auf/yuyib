@@ -11,7 +11,6 @@
 
 mod interaction_bridge;
 mod trigger_signals;
-mod trigger_volumes;
 mod use_interaction;
 
 use std::{
@@ -34,7 +33,10 @@ use yuyib::{
         CharacterSpawnAnchor3d, CharacterSpawnOptions3d, CharacterSpawnReport3d,
         CharacterSpawnSurfaceSelection3d,
     },
-    game_3d::{DirectionalLight3d, LocalTransform3d, Model3d, Transform3d, WorldTransform3d},
+    game_3d::{
+        CollisionFlags3d, DirectionalLight3d, LocalTransform3d, Model3d, Transform3d,
+        WorldTransform3d,
+    },
     input::{
         CharacterFollowCamera3d, PlayerCharacterBindings3d, PlayerCharacterControlConfig3d,
         PlayerCharacterControls3d,
@@ -55,7 +57,9 @@ use yuyib_game_3d::{
     build_static_scene_collider_3d, scene_bounds_3d, set_parent_3d,
 };
 use yuyib_game_3d_authoring::materialize_transform_scene;
-use yuyib_gameplay::ActionStates;
+use yuyib_gameplay::{
+    ActionStates, ObjectiveId, QuestBook, QuestDefinition, QuestId, QuestObjective,
+};
 use yuyib_platform::winit::{
     event::{ElementState, WindowEvent},
     keyboard::{KeyCode, PhysicalKey},
@@ -63,14 +67,43 @@ use yuyib_platform::winit::{
 use yuyib_scene::{SceneSelection, spawn_scene};
 
 use interaction_bridge::PlayInteractionHost;
-use trigger_volumes::{
-    EntityTriggerTracker, materialize_triggers, step_trigger_volumes, sync_trigger_positions,
-};
 use use_interaction::{
     materialize_interactables, sync_interactable_positions, try_use_interaction,
 };
+use yuyib_play::{
+    play_log::play_log,
+    scene_flags::{hide_player_visual, materialize_render_collision_flags},
+    trigger_volumes::{
+        EntityTriggerTracker, materialize_triggers, step_trigger_volumes, sync_trigger_positions,
+    },
+};
 
 const MAX_FIXED_STEPS_PER_FRAME: u32 = 8;
+
+fn install_quest_smoke(host: &mut PlayInteractionHost) {
+    let quest_id = QuestId::new("smoke.talk");
+    let objective_id = ObjectiveId::new("talk_npc");
+    let mut book = QuestBook::default();
+    if book
+        .register(
+            QuestDefinition::new(
+                quest_id.clone(),
+                vec![
+                    QuestObjective::new(objective_id, "world.talk_npc", 1).expect("objective"),
+                ],
+            )
+            .expect("definition"),
+        )
+        .is_err()
+    {
+        return;
+    }
+    let _ = book.start(&quest_id);
+    host.set_quest_book(book);
+    play_log(
+        "yuyib-play: QuestBook smoke ready — E on TalkNpc advances smoke.talk / talk_npc",
+    );
+}
 
 /// Code entry-point for Play player feel. Remap keys / retune speeds here
 /// (Inspector schema can mirror this later). Defaults: W/A/S/D move, Space jump,
@@ -220,9 +253,13 @@ fn run() -> Result<(), String> {
     apply_world_light_directions(&mut world, &document, &materialized.entities);
     materialize_interactables(&document, &mut world, &materialized.entities);
     materialize_triggers(&document, &mut world, &materialized.entities);
+    materialize_render_collision_flags(&document, &mut world, &materialized.entities);
 
     let player_config = player_control_config();
     let player_entity = find_player_entity(&document, &materialized.entities);
+    if let Some(player) = player_entity {
+        hide_player_visual(&mut world, player);
+    }
     let player_body = build_player_body(&mut world, &models, player_entity, &player_config);
 
     let controls = PlayerCharacterControls3d::new(player_config)
@@ -310,6 +347,10 @@ fn run() -> Result<(), String> {
         pending_use: false,
         trigger_tracker: EntityTriggerTracker::default(),
     }));
+    {
+        let mut runtime = play.borrow_mut();
+        install_quest_smoke(&mut runtime.interaction);
+    }
 
     let event_play = Rc::clone(&play);
     let device_play = Rc::clone(&play);
@@ -589,16 +630,16 @@ impl PlayRuntime {
             Ok(batch) if batch.submitted > 0 => {
                 let _ = yuyib_game_3d::propagate_world_transforms(world);
                 if batch.applied > 0 || !batch.signals.is_empty() {
-                    eprintln!(
+                    play_log(format!(
                         "yuyib-play: interaction flush submitted={} applied={} signals={}",
                         batch.submitted,
                         batch.applied,
                         batch.signals.len()
-                    );
+                    ));
                 }
             }
             Ok(_) => {}
-            Err(error) => eprintln!("yuyib-play: interaction flush failed: {error}"),
+            Err(error) => play_log(format!("yuyib-play: interaction flush failed: {error}")),
         }
         self.interaction.advance_signals();
         self.interaction.consume_signals();
@@ -751,17 +792,17 @@ fn build_player_body(
         ..CharacterControllerConfig3d::default()
     };
 
-    let mut hidden = false;
-    if let Some(mut model) = world.get_mut::<Model3d>(entity) {
-        if model.visible {
-            *model = model.clone().with_visible(false);
-            hidden = true;
-        }
-    }
+    let previous_collision = world.get::<CollisionFlags3d>(entity).cloned();
+    world
+        .entity_mut(entity)
+        .insert(CollisionFlags3d::nocollide());
     let collider = build_static_scene_collider_3d(world, models);
-    if hidden {
-        if let Some(mut model) = world.get_mut::<Model3d>(entity) {
-            *model = model.clone().with_visible(true);
+    match previous_collision {
+        Some(flags) => {
+            world.entity_mut(entity).insert(flags);
+        }
+        None => {
+            world.entity_mut(entity).remove::<CollisionFlags3d>();
         }
     }
 

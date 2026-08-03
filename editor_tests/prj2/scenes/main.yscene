@@ -278,6 +278,107 @@
           }
         }
       ]
+    },
+    {
+      "guid": "a7b1c203-3333-4333-8333-000000000203",
+      "name": "NoDrawSolid",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              -1.3166751861572266,
+              1.0,
+              19.5
+            ]
+          }
+        },
+        {
+          "schema": "yuyib.model3d",
+          "version": 1,
+          "payload": {
+            "mesh": null,
+            "model": "builtin:cube",
+            "render_order": 0,
+            "visible": true
+          }
+        },
+        {
+          "schema": "yuyib.render3d",
+          "version": 1,
+          "payload": {
+            "draw": false
+          }
+        },
+        {
+          "schema": "yuyib.collision3d",
+          "version": 1,
+          "payload": {
+            "collide_with": "player",
+            "enabled": true,
+            "layer": "secret_wall"
+          }
+        }
+      ]
+    },
+    {
+      "guid": "a7b1c204-4444-4444-8444-000000000204",
+      "name": "GhostProp",
+      "components": [
+        {
+          "schema": "yuyib.transform3d",
+          "version": 1,
+          "payload": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              2.0,
+              0.699999988079071,
+              21.631820678710938
+            ]
+          }
+        },
+        {
+          "schema": "yuyib.model3d",
+          "version": 1,
+          "payload": {
+            "mesh": null,
+            "model": "builtin:cube",
+            "render_order": 0,
+            "visible": true
+          }
+        },
+        {
+          "schema": "yuyib.collision3d",
+          "version": 1,
+          "payload": {
+            "collide_with": "",
+            "enabled": false,
+            "layer": "ghost"
+          }
+        }
+      ]
     }
   ]
 }

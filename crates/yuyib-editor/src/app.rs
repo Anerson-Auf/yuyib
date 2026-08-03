@@ -31,9 +31,9 @@ use yuyib_editor_core::{
     resolve_tracked_asset, save_tracked_import_settings, scaffold_project,
 };
 use yuyib_game_3d::{
-    DirectionalLight3d, DirectionalLightDraw, LocalTransform3d, Model3d, Parent3d,
-    SceneBoundsResult3d, Transform3d, WorldTransform3d, propagate_world_transforms, scene_bounds_3d,
-    set_parent_3d,
+    CollisionFlags3d, DirectionalLight3d, DirectionalLightDraw, LocalTransform3d, Model3d, Parent3d,
+    RenderFlags3d, SceneBoundsResult3d, Transform3d, WorldTransform3d, propagate_world_transforms,
+    scene_bounds_3d, set_parent_3d,
 };
 use yuyib_game_3d_authoring::{
     coerce_transform_field_value, json_f32, materialize_transform_scene,
@@ -3623,6 +3623,16 @@ impl EditorApp {
                     .insert(Model3d::new(self.proxy_model));
             }
             self.world = world;
+            if let Some(record) = self.authored_scene.as_ref().and_then(|scene| {
+                scene
+                    .document()
+                    .entities
+                    .iter()
+                    .find(|entity_record| entity_record.guid == guid)
+            }) {
+                apply_authored_render_collision_flags(&mut self.world, entity, record);
+                apply_authored_trigger_overlay(&mut self.world, entity, record);
+            }
             return;
         }
         let handle = self
@@ -3639,6 +3649,19 @@ impl EditorApp {
             model = model.with_render_order(order as i32);
         }
         self.world.entity_mut(entity).insert(model);
+        // Model3d payload always carries visible:true for builtins; nodraw lives on
+        // yuyib.render3d. Re-apply after every model refresh or NoDrawSolid / Player
+        // helpers come back as ordinary frustum-popping cubes under yaw.
+        if let Some(record) = self.authored_scene.as_ref().and_then(|scene| {
+            scene
+                .document()
+                .entities
+                .iter()
+                .find(|entity_record| entity_record.guid == guid)
+        }) {
+            apply_authored_render_collision_flags(&mut self.world, entity, record);
+            apply_authored_trigger_overlay(&mut self.world, entity, record);
+        }
     }
 
     fn canonicalize_model_ref(&mut self, raw: &str) -> Option<String> {
@@ -3771,6 +3794,9 @@ impl EditorApp {
                             world.entity_mut(*entity).insert(model);
                         }
                     }
+
+                    apply_authored_render_collision_flags(&mut world, *entity, record);
+                    apply_authored_trigger_overlay(&mut world, *entity, record);
 
                     if let Some(light_component) = record.components.iter().find(|component| {
                         component.schema().as_str() == "yuyib.directional-light3d"
@@ -6775,9 +6801,43 @@ fn validate_component_field_edit(
         }
         "yuyib.interactable" => validate_interactable_field(field_path, value),
         "yuyib.trigger" => validate_trigger_field(field_path, value),
+        "yuyib.render3d" => validate_render3d_field(field_path, value),
+        "yuyib.collision3d" => validate_collision3d_field(field_path, value),
         _ => Err(format!(
             "Component editing for {component_id} remains read-only until its typed validation/materialization adapter closes Visual coverage."
         )),
+    }
+}
+
+fn validate_render3d_field(field_path: &str, value: &Value) -> Result<(), String> {
+    match field_path {
+        "draw" => {
+            if value.as_bool().is_none() {
+                return Err("yuyib.render3d.draw requires a bool".to_owned());
+            }
+            Ok(())
+        }
+        _ => Err(format!("unknown yuyib.render3d field `{field_path}`")),
+    }
+}
+
+fn validate_collision3d_field(field_path: &str, value: &Value) -> Result<(), String> {
+    match field_path {
+        "enabled" => {
+            if value.as_bool().is_none() {
+                return Err("yuyib.collision3d.enabled requires a bool".to_owned());
+            }
+            Ok(())
+        }
+        "layer" | "collide_with" => {
+            if !(value.is_string() || value.is_null() || value.is_array()) {
+                return Err(format!(
+                    "yuyib.collision3d.{field_path} requires a string, string array, or null"
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(format!("unknown yuyib.collision3d field `{field_path}`")),
     }
 }
 
@@ -6848,6 +6908,8 @@ fn default_component_allowed(component_id: &str) -> Result<(), String> {
         | "yuyib.parent3d"
         | "yuyib.model3d"
         | "yuyib.directional-light3d"
+        | "yuyib.render3d"
+        | "yuyib.collision3d"
         | "yuyib.interactable"
         | "yuyib.trigger" => Ok(()),
         _ => Err(format!(
@@ -6863,9 +6925,93 @@ fn available_components() -> Vec<Value> {
         json!({ "id": "yuyib.parent3d", "label": "Parent 3D" }),
         json!({ "id": "yuyib.model3d", "label": "Model 3D" }),
         json!({ "id": "yuyib.directional-light3d", "label": "Directional Light 3D" }),
+        json!({ "id": "yuyib.render3d", "label": "Render 3D (nodraw)" }),
+        json!({ "id": "yuyib.collision3d", "label": "Collision 3D (nocollide)" }),
         json!({ "id": "yuyib.interactable", "label": "Interactable" }),
         json!({ "id": "yuyib.trigger", "label": "Trigger Volume" }),
     ]
+}
+
+fn apply_authored_render_collision_flags(
+    world: &mut yuyib_ecs::prelude::World,
+    entity: yuyib_ecs::prelude::Entity,
+    record: &yuyib_authoring::SceneEntityRecord,
+) {
+    if let Some(component) = record
+        .components
+        .iter()
+        .find(|component| component.schema().as_str() == "yuyib.render3d")
+    {
+        let draw = component
+            .payload()
+            .get("draw")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        world.entity_mut(entity).insert(RenderFlags3d::new(draw));
+        if !draw {
+            if let Some(mut model) = world.get_mut::<Model3d>(entity) {
+                *model = model.clone().with_visible(false);
+            }
+        }
+    }
+    if let Some(component) = record
+        .components
+        .iter()
+        .find(|component| component.schema().as_str() == "yuyib.collision3d")
+    {
+        let enabled = component
+            .payload()
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let layer = component
+            .payload()
+            .get("layer")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let collide_with = match component.payload().get("collide_with") {
+            Some(Value::String(text)) => text
+                .split([',', ';', ' '])
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        };
+        world.entity_mut(entity).insert(CollisionFlags3d {
+            enabled,
+            collide_with,
+            layer,
+        });
+    }
+}
+
+/// Trigger volume markers stay in extract but skip camera frustum so they do
+/// not "pop in" under yaw the way ordinary scene cubes do.
+fn apply_authored_trigger_overlay(
+    world: &mut yuyib_ecs::prelude::World,
+    entity: yuyib_ecs::prelude::Entity,
+    record: &yuyib_authoring::SceneEntityRecord,
+) {
+    let has_trigger = record
+        .components
+        .iter()
+        .any(|component| component.schema().as_str() == "yuyib.trigger");
+    if !has_trigger {
+        return;
+    }
+    if let Some(mut model) = world.get_mut::<Model3d>(entity) {
+        *model = model.clone().with_overlay(true);
+    }
 }
 
 fn extract_model_path(payload: &Value) -> Option<String> {
@@ -7169,6 +7315,8 @@ mod tests {
                 "yuyib.parent3d",
                 "yuyib.model3d",
                 "yuyib.directional-light3d",
+                "yuyib.render3d",
+                "yuyib.collision3d",
                 "yuyib.interactable",
                 "yuyib.trigger",
             ]

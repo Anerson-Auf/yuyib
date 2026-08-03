@@ -9,6 +9,10 @@
 
 #[cfg(feature = "two-d")]
 pub use yuyib_2d as two_d;
+#[cfg(feature = "two-d")]
+pub use yuyib_animation as animation;
+#[cfg(feature = "two-d")]
+pub use yuyib_tiled as tiled;
 #[cfg(feature = "app")]
 pub use yuyib_app as app;
 #[cfg(feature = "assets")]
@@ -37,7 +41,7 @@ pub use yuyib_game_3d as game_3d;
 pub use yuyib_gameplay as gameplay;
 #[cfg(feature = "three-d")]
 pub use yuyib_gltf as gltf;
-#[cfg(feature = "two-d")]
+#[cfg(any(feature = "two-d", feature = "three-d"))]
 pub use yuyib_image as image;
 #[cfg(feature = "three-d")]
 pub use yuyib_input as input;
@@ -97,6 +101,7 @@ pub mod prelude {
     #[cfg(feature = "ui")]
     pub use crate::app::{
         ApplicationUi, NativeUiTextConfig, NativeUiTextError, NativeUiTextInitError,
+        pause_overlay_tree,
     };
     #[cfg(feature = "webview")]
     pub use crate::app::{ApplicationWebView, ApplicationWebViewHandle};
@@ -141,8 +146,14 @@ pub mod prelude {
     };
     #[cfg(feature = "two-d")]
     pub use crate::profile_2d::{
-        CameraFollow2d, Game2dProfile, Game2dProfileError, PlayableLoop2d, PlayableLoopDesc2d,
-        PlayableLoopError2d,
+        CameraFollow2d, Game2dProfile, Game2dProfileError, LocationFrame2d, LocationPortal2d,
+        LocationPortalAction2d, LocationStack2d, LocationStackError2d, PlayableLoop2d,
+        PlayableLoopDesc2d, PlayableLoopError2d,
+    };
+    #[cfg(all(feature = "two-d", feature = "character-2d"))]
+    pub use crate::profile_2d::{
+        PlatformerPlayable2d, PlatformerPlayableDesc2d, PlatformerPlayableError2d,
+        physics_to_sprite,
     };
     #[cfg(feature = "core")]
     pub use crate::core::{FrameEvents, FrameInfo, Runtime, RuntimeEvent};
@@ -154,26 +165,34 @@ pub mod prelude {
         GamePlugin, GameSchedule, GameTime,
     };
     #[cfg(feature = "two-d")]
+    pub use crate::animation::{
+        AnimationError, AnimationSet, AnimationStateDef, AnimationStateMachine, PlayOutcome,
+    };
+    #[cfg(feature = "two-d")]
     pub use crate::game_2d::{
         AnimatedSprite2d, DrawBudget2d, Game2dScene, Game2dSceneConfig, Game2dSceneError,
         Game2dSceneStats, KinematicSpriteController2d, KinematicSpriteControllerError2d,
-        KinematicSpriteMove2d, Sprite2d, SpriteAnimationEvent2d, SpriteExtractionLimits2d,
-        SpriteMoveInput2d, SpriteViewport2d, TextureCacheConfig2d, TextureQueueError2d,
-        TileCollision2d, TileKinematicAabbContact2d, TileKinematicAabbLimits2d,
-        TileKinematicAabbMove2d, TileMap2d, TileViewport2d, build_tile_static_colliders_2d,
-        extract_tile_collisions_2d, extract_tiles_2d, extract_tiles_chunked_2d,
-        extract_visible_sprites_2d, resolve_kinematic_tilemap_aabb_2d,
-        step_kinematic_sprite_controller_2d, step_sprite_animations_2d,
-        step_tile_map_animations_2d,
+        KinematicSpriteMove2d, Sprite2d, SpriteAnimationEvent2d, SpriteAnimator2d,
+        SpriteAnimatorError2d, SpriteExtractionLimits2d, SpriteFacing2d, SpriteMoveInput2d,
+        SpriteViewport2d, TextureCacheConfig2d, TextureQueueError2d, TileCollision2d,
+        TileKinematicAabbContact2d, TileKinematicAabbLimits2d, TileKinematicAabbMove2d, TileMap2d,
+        TileMapComposer2d, TileMapComposerError2d, TileStamp2d, TileViewport2d,
+        VelocityFacingPolicy2d, VelocityFacingPose2d, apply_cardinal_clips_2d,
+        apply_velocity_facing_2d, build_tile_static_colliders_2d, extract_tile_collisions_2d,
+        extract_tiles_2d, extract_tiles_chunked_2d, extract_visible_sprites_2d,
+        resolve_cardinal_clips_2d, resolve_kinematic_tilemap_aabb_2d, resolve_velocity_facing_2d,
+        step_kinematic_sprite_controller_2d, step_sprite_animations_2d, step_sprite_animators_2d,
+        step_tile_map_animations_2d, Cardinal2d, CardinalClipPolicy2d,
     };
     #[cfg(feature = "three-d")]
     pub use crate::game_3d::{
-        DirectionalLight3d, LocalMatrixTransform3d, LocalTransform3d, LodGroup3d, LodLevel3d,
-        Model3d, Parent3d, SceneBounds3d, SceneBoundsError3d, SceneBoundsResult3d,
-        SceneCollisionBuildLimits3d, SceneCollisionError3d, SceneCollisionLimitResource3d,
-        StaticSceneCollider3d, StaticSceneCollisionDraw3d, StaticSceneCollisionPrimitive3d,
-        Transform3d, WorldTransform3d, build_static_scene_collider_3d,
-        build_static_scene_collider_3d_from_draws_with, extract_models_with_lod_3d,
+        CollisionFlags3d, DirectionalLight3d, LocalMatrixTransform3d, LocalTransform3d, LodGroup3d,
+        LodLevel3d, Model3d, Parent3d, RenderFlags3d, SceneBounds3d, SceneBoundsError3d,
+        SceneBoundsResult3d, SceneCollisionBuildLimits3d, SceneCollisionError3d,
+        SceneCollisionLimitResource3d, StaticSceneCollider3d, StaticSceneCollisionDraw3d,
+        StaticSceneCollisionPrimitive3d, Transform3d, WorldTransform3d,
+        build_static_scene_collider_3d, build_static_scene_collider_3d_from_draws_with,
+        extract_models, extract_models_for_static_collision, extract_models_with_lod_3d,
         scene_bounds_3d,
     };
     #[cfg(feature = "gameplay")]
@@ -199,10 +218,11 @@ pub mod prelude {
         import_scene_bytes_embedded, import_scene_path, import_scene_path_with_options,
         sample_animation, GLTF_IMPORTED_COOKER_ID, GLTF_IMPORTED_COOK_SCHEMA,
     };
-    #[cfg(feature = "two-d")]
+    #[cfg(any(feature = "two-d", feature = "three-d"))]
     pub use crate::image::{
         DecodePolicy, DecodedImage, ImageEncodeError, ImageFormat, ImageFormatPolicy,
-        Rgba8ReferenceMetrics, encode_png_rgba8, reference_metrics_rgba8, write_png_rgba8,
+        Rgba8ReferenceMetrics, compress_rgba8_luminance, encode_png_rgba8, reference_metrics_rgba8,
+        rgba8_luminance, write_png_rgba8,
     };
     #[cfg(feature = "three-d")]
     pub use crate::input::{
@@ -299,6 +319,13 @@ pub mod prelude {
         SpriteAtlasBindError, SpriteAtlasImportError, SpriteAtlasImportLimits,
         SpriteAtlasImportLimitsError, SpriteAtlasImporter, SpriteSheet, Texture, TextureHandle,
         TextureRegion, register_sprite_atlas_importer,
+    };
+    #[cfg(feature = "two-d")]
+    pub use crate::tiled::{
+        BoundTiledMap2d, ImportedTiledMap, ImportedTiledObject2d, ImportedTiledObjectLayer2d,
+        TiledBindError, TiledImportError, TiledImportLimits, TiledImportLimitsError,
+        TiledMapImporter, TiledPropertyValue, register_tiled_map_importer, world_from_tiled_px,
+        ExternalTilesetBytes,
     };
     #[cfg(feature = "ui")]
     pub use crate::ui::{

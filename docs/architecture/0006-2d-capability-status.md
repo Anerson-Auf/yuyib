@@ -28,12 +28,12 @@ Runnable `two_d_tile_playground` проверяет этот вертикаль�
 |---|---|---|
 | Изображение | bounded PNG/JPEG/WebP decode, RGBA8 upload | `image` низкий, `AssetLoader` — async shell |
 | Sprite source | одиночный image, regular sheet, произвольные regions/кадры | `two_d` |
-| Animation | разные duration, loop/once/ping-pong, ECS frame/finish events | `SpriteAnimation`, `AnimatedSprite2d` |
+| Animation | mid: frames + events; HL: named set + opt-in SM + `play` + facing | `SpriteAnimation`, `AnimatedSprite2d`; `AnimationSet` / `AnimationStateMachine` (`yuyib-animation`); `SpriteAnimator2d` / `VelocityFacingPolicy2d` |
 | Rendering | instanced alpha sprite pass, camera, stable painter order | `SpriteRenderer` низкий; ECS extraction — средний |
 | Видимость | ordinary sprite viewport, tile viewport и chunk CPU culling | `game_2d` |
 | Tile collision | static AABB snapshot, contacts tile↔physics | средний и низкий API |
-| Playable 2D | движение sprite с нормализацией диагонали и tile walls | `KinematicSpriteController2d` высокий API |
-| UI/input | native UI, keyboard event boundary, pointer interaction 2D | общие `app`, `input`, `gameplay` crates |
+| Playable 2D | движение sprite с нормализацией диагонали и tile walls; Rapier platformer HL | `KinematicSpriteController2d` / `PlayableLoop2d`; `PlatformerPlayable2d` (`character-2d`) |
+| UI/input | pause overlay HL + native keyboard; richer HUD/menus later | `ApplicationUi::with_active_flag` / `pause_overlay_tree`; common `app`, `input` |
 
 ## Не реализовано или сделано не по целевому плану
 
@@ -101,10 +101,18 @@ click-to-move систем.
 
 ### Приоритет 6 — карты редакторов
 
-Tiled/LDtk importer, tileset metadata, layers, object layers, parallax,
-tile animation и navigation отсутствуют. Это заметное расхождение с RFC 0002.
-Первым нужен Tiled JSON/TMX importer plugin в neutral TileMap2d representation;
-не надо делать runtime dependency на редактор.
+**Started (M7 objects / locations / composer / external `.tsj`):** `yuyib-tiled`
+импортирует orthogonal Tiled JSON (embedded **или** external JSON tileset via
+host-resolved `ExternalTilesetBytes` / `import_map_with_external_tilesets`), one
+visual tile layer, `solid` tile property and/or `collision` layer, `objectgroup`
+point/rect + bounded properties → `ImportedTiledMap` → `bind_texture` →
+`TileMap2d` + `TileCollision2d` + object layers. `LocationStack2d` push/pop;
+`TileMapComposer2d` fill/stamp/border. Smoke: `tiled_map_2d_smoke` (embedded +
+external), `location_stack_2d_smoke`; windowed `two_d_tiled_playable`.
+
+Ещё нет: TMX/TSX XML, multi-tileset/multi-texture, flip flags,
+ellipse/polygon/tile-gid objects, parallax, tile animation из Tiled,
+navigation, LDtk. Interpretation object classes остаётся game plugin (RFC 0002).
 
 ## Правило дальнейшего развития
 

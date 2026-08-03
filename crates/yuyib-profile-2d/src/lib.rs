@@ -2,16 +2,29 @@
 //!
 //! [`Game2dProfile`] owns the repeated playground wiring: one ECS [`World`] and
 //! one [`Game2dScene`]. [`PlayableLoop2d`] adds top-down input → kinematic step
-//! → animation → camera follow → render. Rapier platformer remains a separate
-//! opt-in path (not folded into this profile yet).
+//! → animation → camera follow → render. With feature `character-2d`,
+//! [`PlatformerPlayable2d`] adds Rapier gravity/jump with sprite↔body sync.
+//! Opt-in [`yuyib_game_2d::SpriteAnimator2d`] state machines are stepped from
+//! [`Game2dProfile::step_animations`].
 
 #![forbid(unsafe_code)]
 
 mod camera_follow;
+mod location_stack;
 mod playable_loop;
+#[cfg(feature = "character-2d")]
+mod platformer_playable;
 
 pub use camera_follow::CameraFollow2d;
+pub use location_stack::{
+    LocationFrame2d, LocationPortal2d, LocationPortalAction2d, LocationStack2d,
+    LocationStackError2d,
+};
 pub use playable_loop::{PlayableLoop2d, PlayableLoopDesc2d, PlayableLoopError2d};
+#[cfg(feature = "character-2d")]
+pub use platformer_playable::{
+    PlatformerPlayable2d, PlatformerPlayableDesc2d, PlatformerPlayableError2d, physics_to_sprite,
+};
 
 use std::{error::Error, fmt, time::Duration};
 
@@ -19,7 +32,7 @@ use yuyib_2d::TextureHandle;
 use yuyib_ecs::prelude::World;
 use yuyib_game_2d::{
     Game2dScene, Game2dSceneConfig, Game2dSceneError, Game2dSceneStats, TextureQueueError2d,
-    step_sprite_animations_2d,
+    step_sprite_animators_2d,
 };
 use yuyib_image::DecodedImage;
 use yuyib_render::RenderFrame;
@@ -78,8 +91,11 @@ impl Game2dProfile {
     }
 
     /// Advances sprite animations in the owned world by `delta`.
+    ///
+    /// Drives opt-in [`yuyib_game_2d::SpriteAnimator2d`] state machines when
+    /// present, then steps every [`yuyib_game_2d::AnimatedSprite2d`].
     pub fn step_animations(&mut self, delta: Duration) {
-        step_sprite_animations_2d(&mut self.world, delta);
+        step_sprite_animators_2d(&mut self.world, delta);
     }
 
     /// Renders the owned world through [`Game2dScene`].

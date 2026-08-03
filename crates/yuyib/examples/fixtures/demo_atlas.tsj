@@ -1,0 +1,21 @@
+{
+  "type": "tileset",
+  "name": "demo_atlas",
+  "image": "demo_atlas.png",
+  "imagewidth": 32,
+  "imageheight": 16,
+  "margin": 0,
+  "spacing": 0,
+  "tilewidth": 8,
+  "tileheight": 16,
+  "tilecount": 4,
+  "columns": 4,
+  "tiles": [
+    {
+      "id": 2,
+      "properties": [
+        { "name": "solid", "type": "bool", "value": true }
+      ]
+    }
+  ]
+}

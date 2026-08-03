@@ -1,0 +1,50 @@
+{
+  "type": "map",
+  "orientation": "orthogonal",
+  "renderorder": "right-down",
+  "width": 4,
+  "height": 3,
+  "tilewidth": 8,
+  "tileheight": 16,
+  "infinite": false,
+  "tilesets": [
+    {
+      "firstgid": 1,
+      "source": "demo_atlas.tsj"
+    }
+  ],
+  "layers": [
+    {
+      "type": "tilelayer",
+      "name": "ground",
+      "width": 4,
+      "height": 3,
+      "visible": true,
+      "data": [3, 3, 3, 3, 3, 1, 1, 3, 3, 3, 3, 3]
+    },
+    {
+      "type": "tilelayer",
+      "name": "collision",
+      "width": 4,
+      "height": 3,
+      "visible": false,
+      "data": [1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1]
+    },
+    {
+      "type": "objectgroup",
+      "name": "objects",
+      "objects": [
+        {
+          "id": 1,
+          "name": "spawn",
+          "class": "player_spawn",
+          "x": 12.0,
+          "y": 24.0,
+          "width": 0.0,
+          "height": 0.0,
+          "point": true
+        }
+      ]
+    }
+  ]
+}

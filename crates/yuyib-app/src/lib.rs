@@ -7,6 +7,10 @@
 
 #[cfg(feature = "webview")]
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+#[cfg(all(feature = "ui", not(feature = "webview")))]
+use std::rc::Rc;
+#[cfg(feature = "ui")]
+use std::cell::Cell;
 use std::{error::Error, fmt};
 
 use yuyib_core::{FrameInfo, Runtime};
@@ -28,13 +32,14 @@ use yuyib_render::{
     ClearColor, ColorPostProcess, RenderFrame, RenderGraph, RenderGraphExecutionError,
     RenderStatus, Renderer, RendererInitError, SurfaceValidationError,
 };
-#[cfg(feature = "ui-text")]
-use yuyib_ui::{
-    Color as UiColor, ColorToken, LayoutWithMeasureError, UiMeasurer, Widget,
-    layout_with_measurer_and_input_state,
-};
 #[cfg(feature = "ui")]
-use yuyib_ui::{Size as UiSize, UiError, UiLayout, UiTokens, UiTree, layout_with_input_state};
+use yuyib_ui::{
+    Color as UiColor, ColorToken, Dimension, Insets, LayoutConstraints, LayoutKind, Point,
+    Size as UiSize, UiBuilder, UiError, UiLayout, UiTokens, UiTree, Widget, WidgetId, WidgetStyle,
+    layout_with_input_state,
+};
+#[cfg(feature = "ui-text")]
+use yuyib_ui::{LayoutWithMeasureError, UiMeasurer, layout_with_measurer_and_input_state};
 #[cfg(feature = "ui")]
 use yuyib_ui::{UiInputState, UiResponse};
 #[cfg(feature = "ui")]
@@ -832,6 +837,8 @@ pub struct ApplicationUi {
     #[cfg(feature = "ui-text")]
     text: Option<ApplicationUiText>,
     input: Option<ApplicationUiInput>,
+    /// When set, input/render no-op while the flag is `false` (pause overlay).
+    active: Option<Rc<Cell<bool>>>,
 }
 
 #[cfg(feature = "ui")]
@@ -1256,6 +1263,7 @@ impl ApplicationUi {
             #[cfg(feature = "ui-text")]
             text: None,
             input: None,
+            active: None,
         }
     }
 
@@ -1314,6 +1322,23 @@ impl ApplicationUi {
             pending_error: None,
         });
         self
+    }
+
+    /// Gates input and overlay drawing behind a shared boolean.
+    ///
+    /// When the cell is `false`, [`Application`] skips UI input emission and
+    /// the final UI render pass (useful for pause overlays that should only
+    /// appear while paused). Defaults to always-active when unset.
+    #[must_use]
+    pub fn with_active_flag(mut self, active: Rc<Cell<bool>>) -> Self {
+        self.active = Some(active);
+        self
+    }
+
+    /// Returns whether this UI is currently allowed to consume input / draw.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active.as_ref().is_none_or(|flag| flag.get())
     }
 
     /// Returns the retained UI tree.
@@ -1375,6 +1400,9 @@ impl ApplicationUi {
     }
 
     fn handle_window_event(&mut self, event: &WindowEvent) -> bool {
+        if !self.is_active() {
+            return false;
+        }
         let Some(input) = &mut self.input else {
             return false;
         };
@@ -1389,6 +1417,9 @@ impl ApplicationUi {
     }
 
     fn emit_input(&mut self, size: UiSize) -> Result<(), ApplicationUiError> {
+        if !self.is_active() {
+            return Ok(());
+        }
         if let Some(input) = &mut self.input
             && let Some(error) = input.pending_error.take()
         {
@@ -1419,6 +1450,9 @@ impl ApplicationUi {
     }
 
     fn render(&mut self, frame: &mut RenderFrame<'_>) -> Result<UiRenderStats, ApplicationUiError> {
+        if !self.is_active() {
+            return Ok(UiRenderStats::default());
+        }
         let [width, height] = frame.surface_size();
         self.layout_for(UiSize::new(width, height))?;
         let layout = self
@@ -1460,6 +1494,61 @@ impl ApplicationUi {
             .draw(frame, self.tree.root(), &layout, self.tokens, self.limits)
             .map_err(ApplicationUiError::Render)
     }
+}
+
+/// Builds a fullscreen dim + centred pause panel (title + resume hint).
+///
+/// Intended for [`ApplicationUi::with_active_flag`]: show only while paused.
+///
+/// # Errors
+///
+/// Returns [`UiError`] when widget IDs collide (should not happen for this fixed tree).
+#[cfg(feature = "ui")]
+pub fn pause_overlay_tree(
+    title: impl Into<String>,
+    resume_hint: impl Into<String>,
+) -> Result<UiTree, UiError> {
+    let dim = WidgetStyle::default().with_background(ColorToken::Custom(UiColor::rgba(
+        4, 8, 18, 160,
+    )));
+    let panel = WidgetStyle::default()
+        .with_background(ColorToken::Custom(UiColor::rgb(18, 28, 48)))
+        .with_padding(Insets::all(24))
+        .with_gap(12);
+    let title_style = WidgetStyle::default()
+        .with_foreground(ColorToken::Text)
+        .with_padding(Insets::all(4));
+    let hint_style = WidgetStyle::default()
+        .with_foreground(ColorToken::Custom(UiColor::rgb(160, 180, 210)))
+        .with_padding(Insets::all(4));
+
+    UiBuilder::new(WidgetId::from_key("pause-root"), LayoutKind::Absolute)
+        .child(
+            Widget::container(WidgetId::from_key("pause-dim"), LayoutKind::Absolute)
+                .with_constraints(
+                    LayoutConstraints::auto()
+                        .with_width(Dimension::Fill)
+                        .with_height(Dimension::Fill)
+                        .with_absolute_position(Point::new(0, 0)),
+                )
+                .with_style(dim),
+        )
+        .child(
+            Widget::container(WidgetId::from_key("pause-panel"), LayoutKind::Column)
+                .with_constraints(
+                    LayoutConstraints::auto()
+                        .with_width(Dimension::Points(420))
+                        .with_height(Dimension::Points(140))
+                        .with_absolute_position(Point::new(270, 200)),
+                )
+                .with_style(panel)
+                .with_children(vec![
+                    Widget::label(WidgetId::from_key("pause-title"), title).with_style(title_style),
+                    Widget::label(WidgetId::from_key("pause-hint"), resume_hint)
+                        .with_style(hint_style),
+                ]),
+        )
+        .build()
 }
 
 /// Failure while an [`ApplicationUi`] lifecycle phase is active.
@@ -2194,7 +2283,7 @@ impl ApplicationHandler for ApplicationHost {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "ui")]
-    use super::ApplicationUi;
+    use super::{ApplicationUi, pause_overlay_tree};
     use super::{Application, ApplicationHost, CursorControl, RenderLoop};
     #[cfg(feature = "webview")]
     use super::{
@@ -2449,6 +2538,19 @@ mod tests {
 
         let application = Application::new().ui(ui);
         assert!(application.ui.is_some());
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn optional_ui_active_flag_gates_is_active() {
+        use std::cell::Cell;
+
+        let tree = pause_overlay_tree("Paused", "Esc").expect("pause tree");
+        let active = Rc::new(Cell::new(false));
+        let ui = ApplicationUi::new(tree).with_active_flag(Rc::clone(&active));
+        assert!(!ui.is_active());
+        active.set(true);
+        assert!(ui.is_active());
     }
 
     #[cfg(feature = "ui")]

@@ -2,9 +2,11 @@
 
 Фактическое состояние authoring boundary и связанных engine slices.
 Нормативный contract — [`ENGINE_INTEGRATION.md`](ENGINE_INTEGRATION.md);
+**SoT** — [`SOURCE_OF_TRUTH.md`](SOURCE_OF_TRUTH.md);
 форматы — [`SCENE_FORMAT.md`](SCENE_FORMAT.md); policy coverage —
 [`CAPABILITY_COVERAGE.md`](CAPABILITY_COVERAGE.md).
-**Как пользоваться (API + payloads):** [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).
+**Как пользоваться:** [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).
+**3D checklist:** [`GAME_LOOP_3D.md`](GAME_LOOP_3D.md).
 
 Актуально на 2026-08-03.
 
@@ -99,7 +101,7 @@ owning capability или в companion crate.
 | glTF preview remainder | material factor + texture remap closed (base/MR/emissive/normal slots from model inventory) |
 | Apply Play Mode Changes | closed for Transform3d + LocalTransform3d whitelist (`play.apply_changes` + undoable transaction) |
 | Scene ↔ `.rs` projection | vertical #1 closed (known 3D schemas + watch); freeform Rust / entity create-delete from files / behavior scripts — open |
-| Script ↔ object Intent Bridge | foundation + QuestBook + Play model/light + Interactable use (E) + authored `yuyib.trigger` + Play AddComponent (transform/local/light) + Inspector Interactable/Trigger Visual closed; Play model/parent AddComponent / live Rapier world in default Play — open |
+| Script ↔ object Intent Bridge | playable MVP: interact/trigger/signals/QuestBook smoke + render3d/collision3d (nodraw/nocollide) closed; SoT + GAME_LOOP_3D docs closed; deferred before 2D: live Rapier default Play, shadow intents, LSP completion, wizard, Play AddComponent model/parent |
 | rust-analyzer / LSP | diagnostics-only closed (`host.lsp.status` / `host.lsp.diagnostics` → Monaco markers); completion/hover/rename open |
 | Coverage CI (GitHub Actions) | foundation gate + `editor-coverage-manifest` artifact upload closed (incremental) |
 | Field mutation без typed adapter | host блокирует edit |
@@ -148,7 +150,7 @@ passes используют `Load`.
 | M2 rendering baseline (IBL, shadows, bloom, FXAA, SSAO, grade, diagnostics) | Usable MVP |
 | M3.1 / M3.2 cook cache (glTF + external dep fingerprints) | Usable MVP |
 | M4 physics facade (mature backend) | M4.1–M4.13 usable MVP + `PlatformerController2d` (Rapier KCC); open: editor physics polish |
-| M5 high-level profiles | 3D M5.2 closed; Deep 2D A: PlayableLoop2d + CameraFollow2d |
+| M5 high-level profiles | 3D M5.2 closed; Deep 2D A–E + M7: loop/platformer/HUD/animator + Tiled objects/locations/composer + external `.tsj` |
 | M6 native UI completion | Early partial (`ScrollView` + glyph clip + thumb) |
 | Editor E1 remainder | Asset overlays / LSP / Actions CI |
 

@@ -16,6 +16,8 @@ use yuyib_scene_interaction::{
     ParsedTriggerPhase, SIGNAL_TRIGGER_PREFIX, SceneInteractionIntent,
 };
 
+use crate::play_log::play_log;
+
 /// Default authored trigger radius when `radius` is omitted / invalid.
 const DEFAULT_TRIGGER_RADIUS: f32 = 1.0;
 /// Player probe radius for volume tests (CharacterController capsule ≈).
@@ -80,6 +82,7 @@ pub fn materialize_triggers(
     world: &mut World,
     entities: &std::collections::BTreeMap<yuyib_authoring::EntityGuid, Entity>,
 ) {
+    let mut count = 0_usize;
     for (guid, &entity) in entities {
         let Some(record) = document
             .entities
@@ -96,10 +99,10 @@ pub fn materialize_triggers(
             continue;
         };
         let Some((trigger, radius)) = trigger_from_payload(component.payload()) else {
-            eprintln!(
+            play_log(format!(
                 "yuyib-play: skip invalid yuyib.trigger on `{}`",
                 record.name.as_deref().unwrap_or("<unnamed>")
-            );
+            ));
             continue;
         };
         let translation = entity_translation(world, entity).unwrap_or([0.0, 0.0, 0.0]);
@@ -111,11 +114,23 @@ pub fn materialize_triggers(
             continue;
         };
         let id = trigger.trigger.as_str().to_owned();
+        // Keep the authored marker mesh, but mark it overlay so Scene/Play do not
+        // frustum-flicker it with yaw. Do NOT strip Model3d — that hid ExitVolume
+        // entirely and was the wrong fix for the angle bug.
+        if let Some(mut model) = world.get_mut::<yuyib_game_3d::Model3d>(entity) {
+            *model = model.clone().with_overlay(true);
+        }
         world.entity_mut(entity).insert((trigger, position, sphere));
-        eprintln!(
-            "yuyib-play: materialized Trigger `{id}` on `{}`",
+        count += 1;
+        play_log(format!(
+            "yuyib-play: materialized Trigger `{id}` on `{}` (overlay marker)",
             record.name.as_deref().unwrap_or("<unnamed>")
-        );
+        ));
+    }
+    if count > 0 {
+        play_log(format!(
+            "yuyib-play: {count} trigger volume(s) ready — walk in/out (Diagnostics source=play)"
+        ));
     }
 }
 
@@ -200,8 +215,34 @@ fn entity_translation(world: &World, entity: Entity) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yuyib_game_3d::Transform3d;
+    use yuyib_assets::Assets;
+    use yuyib_game_3d::{Model3d, Transform3d, extract_models};
+    use yuyib_model::Model;
     use yuyib_scene_interaction::try_parse_trigger_signal;
+
+    #[test]
+    fn materialize_marks_trigger_cube_as_overlay_not_stripped() {
+        let mut models = Assets::new();
+        let cube = models.insert(Model::cube(0.7).expect("cube"));
+        let mut world = World::new();
+        let exit = world
+            .spawn((
+                Model3d::new(cube),
+                Transform3d::from_translation([4.5, 1.0, 19.5]),
+            ))
+            .id();
+        if let Some(mut model) = world.get_mut::<Model3d>(exit) {
+            *model = model.clone().with_overlay(true);
+        }
+        world.entity_mut(exit).insert((
+            Trigger::new("level.exit"),
+            Position3d::new(Vec3::new(4.5, 1.0, 19.5)).expect("pos"),
+            SphereCollider3d::new(1.5).expect("sphere"),
+        ));
+        let extracted = extract_models(&mut world);
+        assert_eq!(extracted.model_count(), 1);
+        assert!(extracted.batches()[0].draws()[0].overlay);
+    }
 
     #[test]
     fn entered_stayed_exited_around_player() {

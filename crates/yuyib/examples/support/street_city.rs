@@ -234,11 +234,13 @@ pub fn load_outdoor_equirect(
 /// Returns lighting validation failures.
 pub fn character_key_light() -> Result<LambertLighting3d, Box<dyn Error>> {
     // Zero direct term: shader uses ambient + radiance as a flat multiplier.
+    // Slightly above mid-grey so baked-dark body/hair UV islands stay readable
+    // next to the near-white cloth morph without reintroducing N·L yaw flips.
     Ok(LambertLighting3d::artistic(
         [-0.35, -1.0, -0.25],
         [1.0, 0.97, 0.92],
         0.0,
-        [0.78, 0.78, 0.80],
+        [0.92, 0.92, 0.94],
     )?)
 }
 

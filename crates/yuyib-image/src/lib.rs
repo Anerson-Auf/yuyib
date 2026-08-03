@@ -295,6 +295,68 @@ pub fn encode_png_rgba8(
     Ok(bytes)
 }
 
+/// Rec.709 luminance for one linearised sRGB channel triple in `0.0..=1.0`.
+#[must_use]
+#[inline]
+pub fn rgba8_luminance(r: f32, g: f32, b: f32) -> f32 {
+    0.2126_f32.mul_add(r, 0.7152_f32.mul_add(g, 0.0722_f32 * b))
+}
+
+/// Compresses opaque (`alpha > 0`) RGBA8 luminance toward the mean.
+///
+/// For each opaque pixel:
+/// - `L = 0.2126 R + 0.7152 G + 0.0722 B` (channels in `0..1`)
+/// - `L' = mean + (L - mean) * contrast`
+/// - `rgb' = rgb * (L' / max(L, ε))`, clamped to `0..255`
+///
+/// Transparent pixels (`alpha == 0`) and alpha channels are left unchanged.
+/// An empty opaque set is a no-op. Typical `contrast` for softening baked
+/// lighting islands in diffuse albedo is around `0.40`.
+///
+/// # Panics
+///
+/// Panics when `pixels.len()` is not a multiple of four.
+pub fn compress_rgba8_luminance(pixels: &mut [u8], contrast: f32) {
+    assert!(
+        pixels.len() % 4 == 0,
+        "RGBA8 luminance compress requires a multiple of 4 bytes, got {}",
+        pixels.len()
+    );
+
+    let mut luminance_sum = 0.0_f32;
+    let mut opaque_count = 0_usize;
+    for pixel in pixels.chunks_exact(4) {
+        if pixel[3] == 0 {
+            continue;
+        }
+        let r = f32::from(pixel[0]) / 255.0;
+        let g = f32::from(pixel[1]) / 255.0;
+        let b = f32::from(pixel[2]) / 255.0;
+        luminance_sum += rgba8_luminance(r, g, b);
+        opaque_count += 1;
+    }
+    if opaque_count == 0 {
+        return;
+    }
+    let mean = luminance_sum / opaque_count as f32;
+    const EPSILON: f32 = 1.0e-6;
+
+    for pixel in pixels.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            continue;
+        }
+        let r = f32::from(pixel[0]) / 255.0;
+        let g = f32::from(pixel[1]) / 255.0;
+        let b = f32::from(pixel[2]) / 255.0;
+        let luminance = rgba8_luminance(r, g, b);
+        let compressed = mean + (luminance - mean) * contrast;
+        let scale = compressed / luminance.max(EPSILON);
+        pixel[0] = (r * scale * 255.0).round().clamp(0.0, 255.0) as u8;
+        pixel[1] = (g * scale * 255.0).round().clamp(0.0, 255.0) as u8;
+        pixel[2] = (b * scale * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
 /// Writes tightly packed RGBA8 pixels to a PNG file.
 ///
 /// # Errors
@@ -753,6 +815,40 @@ mod tests {
         let encoded = encode_png_rgba8(2, 1, &pixels).expect("encode");
         let decoded = decode_bytes(&encoded, DecodePolicy::default()).expect("decode");
         assert_eq!(decoded.pixels(), pixels);
+    }
+
+    #[test]
+    fn compress_luminance_pulls_bright_and_dark_toward_mean() {
+        let mut pixels = [
+            255, 255, 255, 255, // bright
+            10, 10, 10, 255, // dark
+            0, 0, 0, 0, // transparent — ignored
+        ];
+        let bright_l = rgba8_luminance(1.0, 1.0, 1.0);
+        let dark_l = rgba8_luminance(10.0 / 255.0, 10.0 / 255.0, 10.0 / 255.0);
+        let mean = (bright_l + dark_l) * 0.5;
+        let contrast = 0.40_f32;
+
+        compress_rgba8_luminance(&mut pixels, contrast);
+
+        let after_bright = rgba8_luminance(
+            f32::from(pixels[0]) / 255.0,
+            f32::from(pixels[1]) / 255.0,
+            f32::from(pixels[2]) / 255.0,
+        );
+        let after_dark = rgba8_luminance(
+            f32::from(pixels[4]) / 255.0,
+            f32::from(pixels[5]) / 255.0,
+            f32::from(pixels[6]) / 255.0,
+        );
+        let expected_bright = mean + (bright_l - mean) * contrast;
+        let expected_dark = mean + (dark_l - mean) * contrast;
+
+        assert!((after_bright - expected_bright).abs() < 0.01);
+        assert!((after_dark - expected_dark).abs() < 0.01);
+        assert!(after_bright < bright_l);
+        assert!(after_dark > dark_l);
+        assert_eq!(&pixels[8..12], &[0, 0, 0, 0]);
     }
 
     #[test]

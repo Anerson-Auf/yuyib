@@ -32,7 +32,7 @@ use yuyib_tasks::{TaskPool, TaskPoolConfig, TaskPoolCreateError};
 use crate::{
     Camera3d, DepthLoad, Game3dScene, Game3dSceneError, Game3dSceneStats, Game3dShading,
     ModelUploadBudget3d, ModelUploadProgress3d, SkeletalTextureResources,
-    TexturedSkeletalSceneRenderError, TexturedSkeletalSceneRenderer3d,
+    SkeletalVisibilityMask3d, TexturedSkeletalSceneRenderError, TexturedSkeletalSceneRenderer3d,
     TexturedSkeletalSceneUploadError,
 };
 use yuyib_gltf::AnimationSnapshot;
@@ -1457,6 +1457,32 @@ impl GltfAnimationPreviewGpu {
         root_transform: [f32; 16],
         depth_load: DepthLoad,
     ) -> Result<(), GltfAnimationPreviewGpuError> {
+        self.draw_with_root_transform_and_visibility(
+            frame,
+            camera,
+            scene,
+            pose,
+            root_transform,
+            depth_load,
+            &SkeletalVisibilityMask3d::new(),
+        )
+    }
+
+    /// Like [`Self::draw_with_root_transform`], with a reusable visibility mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns when GPU residency is incomplete or a draw fails.
+    pub fn draw_with_root_transform_and_visibility(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        scene: &ImportedScene,
+        pose: &AnimationSnapshot,
+        root_transform: [f32; 16],
+        depth_load: DepthLoad,
+        visibility: &SkeletalVisibilityMask3d,
+    ) -> Result<(), GltfAnimationPreviewGpuError> {
         let renderer = self
             .renderer
             .as_ref()
@@ -1466,7 +1492,7 @@ impl GltfAnimationPreviewGpu {
             .as_ref()
             .ok_or(GltfAnimationPreviewGpuError::NotReady)?;
         renderer
-            .draw_with_root_transform_and_depth_load(
+            .draw_with_root_transform_depth_load_and_visibility(
                 frame,
                 camera,
                 scene,
@@ -1477,9 +1503,18 @@ impl GltfAnimationPreviewGpu {
                 },
                 root_transform,
                 depth_load,
+                visibility,
             )
             .map_err(GltfAnimationPreviewGpuError::Draw)?;
         Ok(())
+    }
+
+    /// Replaces flat character lighting after GPU residency (diag / A/B).
+    pub fn set_lighting(&mut self, lighting: crate::LambertLighting3d) {
+        self.lighting = Some(lighting);
+        if let Some(renderer) = self.renderer.take() {
+            self.renderer = Some(renderer.with_lighting(lighting));
+        }
     }
 }
 

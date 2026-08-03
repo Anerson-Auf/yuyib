@@ -16,6 +16,8 @@ use yuyib_scene_interaction::{
     translation_schemas, try_parse_quest_progress_signal, try_parse_trigger_signal, validate_intent,
 };
 
+use yuyib_play::play_log::play_log;
+
 /// Runtime bridge: intents mutate ECS; signals are returned in the batch result.
 pub struct PlayWorldBridge<'world> {
     world: &'world mut World,
@@ -372,15 +374,27 @@ pub fn apply_quest_signals(
 ) -> Vec<QuestTransition> {
     let mut transitions = Vec::new();
     for signal in signals {
-        let Some(parsed) = try_parse_quest_progress_signal(&signal.name, &signal.payload) else {
+        if let Some(parsed) = try_parse_quest_progress_signal(&signal.name, &signal.payload) {
+            match QuestSignal::new(parsed.event.as_str(), parsed.amount) {
+                Ok(quest_signal) => transitions.extend(book.apply_signal(&quest_signal)),
+                Err(error) => play_log(format!(
+                    "yuyib-play: skip quest signal `{}`: {error}",
+                    signal.name
+                )),
+            }
             continue;
-        };
-        match QuestSignal::new(parsed.event.as_str(), parsed.amount) {
-            Ok(quest_signal) => transitions.extend(book.apply_signal(&quest_signal)),
-            Err(error) => eprintln!(
-                "yuyib-play: skip quest signal `{}`: {error}",
-                signal.name
-            ),
+        }
+        // Interactable / custom EmitSignal often uses the event id as the name
+        // (`world.talk_npc`) with `{ "amount": 1 }` — map that onto QuestBook too.
+        if let Some(amount) = signal.payload.get("amount").and_then(|value| value.as_u64()) {
+            let amount = u32::try_from(amount).unwrap_or(0);
+            if amount == 0 {
+                continue;
+            }
+            match QuestSignal::new(signal.name.as_str(), amount) {
+                Ok(quest_signal) => transitions.extend(book.apply_signal(&quest_signal)),
+                Err(_) => {}
+            }
         }
     }
     transitions
@@ -550,36 +564,36 @@ impl PlayInteractionHost {
         if let Some(book) = self.quests.as_mut() {
             let transitions = apply_quest_signals(book, &self.current_signals);
             for transition in &transitions {
-                eprintln!("yuyib-play: quest transition {transition:?}");
+                play_log(format!("yuyib-play: quest transition {transition:?}"));
             }
         }
         for signal in &self.current_signals {
             if let Some(parsed) = try_parse_quest_progress_signal(&signal.name, &signal.payload) {
                 if self.quests.is_none() {
-                    eprintln!(
+                    play_log(format!(
                         "yuyib-play: signal quest event={} amount={} (no QuestBook attached)",
                         parsed.event, parsed.amount
-                    );
+                    ));
                 } else {
-                    eprintln!(
+                    play_log(format!(
                         "yuyib-play: signal quest event={} amount={}",
                         parsed.event, parsed.amount
-                    );
+                    ));
                 }
                 continue;
             }
             if let Some(parsed) = try_parse_trigger_signal(&signal.name, &signal.payload) {
-                eprintln!(
+                play_log(format!(
                     "yuyib-play: signal trigger id={} phase={}",
                     parsed.trigger_id,
                     parsed.phase.as_str()
-                );
+                ));
                 continue;
             }
-            eprintln!(
+            play_log(format!(
                 "yuyib-play: signal `{}` payload={}",
                 signal.name, signal.payload
-            );
+            ));
         }
     }
 }

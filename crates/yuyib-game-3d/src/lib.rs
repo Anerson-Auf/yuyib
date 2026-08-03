@@ -1031,6 +1031,93 @@ impl Model3d {
     }
 }
 
+/// Independent draw gate (**nodraw** when `draw == false`).
+///
+/// Separate from collision: a nodraw entity can still contribute to the static
+/// player mesh when [`CollisionFlags3d`] allows it. When absent, render uses
+/// [`Model3d::visible`] only.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderFlags3d {
+    /// When false, extraction skips this entity (nodraw).
+    pub draw: bool,
+}
+
+impl RenderFlags3d {
+    /// Visible / drawn.
+    pub const DRAW: Self = Self { draw: true };
+    /// Hidden from render (nodraw).
+    pub const NODRAW: Self = Self { draw: false };
+
+    /// Creates a draw flag.
+    #[must_use]
+    pub const fn new(draw: bool) -> Self {
+        Self { draw }
+    }
+}
+
+impl Default for RenderFlags3d {
+    fn default() -> Self {
+        Self::DRAW
+    }
+}
+
+/// Independent solid-collision gate for CharacterController mesh builds.
+///
+/// **nocollide** = `enabled == false`. Selective filter: non-empty
+/// [`collide_with`](Self::collide_with) must include `"player"` to stay in the
+/// default Play locomotion mesh. Prop↔prop filtering is out of scope for the
+/// single trimesh path (Rapier overlay later).
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub struct CollisionFlags3d {
+    /// When false, excluded from static player mesh (full nocollide).
+    pub enabled: bool,
+    /// Empty = collide with all mesh consumers. Non-empty = only listed tags.
+    pub collide_with: Vec<String>,
+    /// Optional semantic layer tag for this entity (`door`, `prop`, …).
+    pub layer: String,
+}
+
+impl CollisionFlags3d {
+    /// Solid collision vs every consumer (default when component absent).
+    #[must_use]
+    pub fn solid() -> Self {
+        Self {
+            enabled: true,
+            collide_with: Vec::new(),
+            layer: String::new(),
+        }
+    }
+
+    /// No solid mesh contribution.
+    #[must_use]
+    pub fn nocollide() -> Self {
+        Self {
+            enabled: false,
+            collide_with: Vec::new(),
+            layer: String::new(),
+        }
+    }
+
+    /// Whether this entity should be included in the Play player locomotion mesh.
+    #[must_use]
+    pub fn contributes_to_player_mesh(&self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        self.collide_with.is_empty()
+            || self
+                .collide_with
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case("player") || tag.eq_ignore_ascii_case("all"))
+    }
+}
+
+impl Default for CollisionFlags3d {
+    fn default() -> Self {
+        Self::solid()
+    }
+}
+
 /// Границы видимой 3D-сцены в мировых координатах.
 ///
 /// Это готовый результат [`scene_bounds_3d`]. Он уже учитывает иерархию,
@@ -2799,21 +2886,26 @@ pub fn filter_extracted_model_meshes_where_3d(
 /// A resolved [`WorldTransform3d`] takes precedence, so imported matrix nodes
 /// reach the renderer exactly. Standalone gameplay entities can still use the
 /// legacy [`Transform3d`]. Entities without either transform are skipped.
+/// [`RenderFlags3d::draw`] false forces a skip even when [`Model3d::visible`].
 #[must_use]
 pub fn extract_models(world: &mut World) -> ExtractedModels {
     let mut extracted: Vec<(u64, ModelDraw)> = world
         .query::<(
             Entity,
             &Model3d,
+            Option<&RenderFlags3d>,
             Option<&WorldTransform3d>,
             Option<&Transform3d>,
         )>()
         .iter(world)
-        .filter_map(|(entity, model, world_transform, transform)| {
+        .filter_map(|(entity, model, render_flags, world_transform, transform)| {
+            if !model_draw_enabled(model, render_flags) {
+                return None;
+            }
             let model_matrix = world_transform
                 .map(|transform| transform.column_major())
                 .or_else(|| transform.map(|transform| transform_matrix(*transform)))?;
-            model.visible.then_some((
+            Some((
                 entity.to_bits(),
                 ModelDraw {
                     model: model.model,
@@ -2840,6 +2932,62 @@ pub fn extract_models(world: &mut World) -> ExtractedModels {
         }
     }
 
+    ExtractedModels {
+        batches,
+        model_count,
+    }
+}
+
+/// Extracts models for **static player-mesh collision**, independent of nodraw.
+///
+/// Includes invisible / [`RenderFlags3d::NODRAW`] entities when
+/// [`CollisionFlags3d`] allows player mesh contribution (or the component is
+/// absent → solid by default). Skips entities that fail the filter.
+#[must_use]
+pub fn extract_models_for_static_collision(world: &mut World) -> ExtractedModels {
+    let mut extracted: Vec<(u64, ModelDraw)> = world
+        .query::<(
+            Entity,
+            &Model3d,
+            Option<&CollisionFlags3d>,
+            Option<&WorldTransform3d>,
+            Option<&Transform3d>,
+        )>()
+        .iter(world)
+        .filter_map(|(entity, model, collision, world_transform, transform)| {
+            if let Some(flags) = collision
+                && !flags.contributes_to_player_mesh()
+            {
+                return None;
+            }
+            let model_matrix = world_transform
+                .map(|transform| transform.column_major())
+                .or_else(|| transform.map(|transform| transform_matrix(*transform)))?;
+            Some((
+                entity.to_bits(),
+                ModelDraw {
+                    model: model.model,
+                    mesh: model.mesh,
+                    model_matrix,
+                    render_order: model.render_order,
+                    overlay: model.overlay,
+                },
+            ))
+        })
+        .collect();
+
+    extracted.sort_by_key(|(entity_bits, draw)| (draw.render_order, *entity_bits));
+    let model_count = extracted.len();
+    let mut batches: Vec<ModelDrawBatch> = Vec::new();
+    for (_, draw) in extracted {
+        match batches.last_mut() {
+            Some(batch) if batch.model == draw.model => batch.draws.push(draw),
+            _ => batches.push(ModelDrawBatch {
+                model: draw.model,
+                draws: vec![draw],
+            }),
+        }
+    }
     ExtractedModels {
         batches,
         model_count,
@@ -3161,7 +3309,7 @@ pub fn build_static_scene_collider_3d(
     models: &Assets<Model>,
 ) -> Result<StaticSceneCollider3d, SceneCollisionError3d> {
     propagate_world_transforms(world).map_err(SceneCollisionError3d::Hierarchy)?;
-    let extracted = extract_models(world);
+    let extracted = extract_models_for_static_collision(world);
     build_static_scene_collider_3d_from_extracted(&extracted, models)
 }
 
@@ -3636,6 +3784,7 @@ impl ExtractedLodModels3d {
 /// selection only: no culling, hysteresis state, asset existence check or GPU
 /// work happens here. Hysteresis is intentionally absent so selection is a
 /// pure deterministic function of this snapshot's camera position.
+/// Honours [`RenderFlags3d`] the same way as [`extract_models`].
 ///
 /// # Errors
 ///
@@ -3651,36 +3800,39 @@ pub fn extract_lod_models_3d(
         .query::<(
             Entity,
             &Model3d,
+            Option<&RenderFlags3d>,
             Option<&WorldTransform3d>,
             Option<&Transform3d>,
             Option<&LodGroup3d>,
         )>()
         .iter(world)
-        .filter_map(|(entity, model, world_transform, transform, lod)| {
-            if !model.visible {
-                return None;
-            }
-            let model_matrix = world_transform
-                .map(|transform| transform.column_major())
-                .or_else(|| transform.map(|transform| transform_matrix(*transform)))?;
-            let dx = model_matrix[12] - camera_position[0];
-            let dy = model_matrix[13] - camera_position[1];
-            let dz = model_matrix[14] - camera_position[2];
-            let distance = dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt();
-            let (selected, mesh) = match lod {
-                Some(group) => (group.select(distance).ok()?, None),
-                None => (model.model, model.mesh),
-            };
-            Some(LodModelDraw3d {
-                entity,
-                model: selected,
-                mesh,
-                model_matrix,
-                distance,
-                render_order: model.render_order,
-                overlay: model.overlay,
-            })
-        })
+        .filter_map(
+            |(entity, model, render_flags, world_transform, transform, lod)| {
+                if !model_draw_enabled(model, render_flags) {
+                    return None;
+                }
+                let model_matrix = world_transform
+                    .map(|transform| transform.column_major())
+                    .or_else(|| transform.map(|transform| transform_matrix(*transform)))?;
+                let dx = model_matrix[12] - camera_position[0];
+                let dy = model_matrix[13] - camera_position[1];
+                let dz = model_matrix[14] - camera_position[2];
+                let distance = dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt();
+                let (selected, mesh) = match lod {
+                    Some(group) => (group.select(distance).ok()?, None),
+                    None => (model.model, model.mesh),
+                };
+                Some(LodModelDraw3d {
+                    entity,
+                    model: selected,
+                    mesh,
+                    model_matrix,
+                    distance,
+                    render_order: model.render_order,
+                    overlay: model.overlay,
+                })
+            },
+        )
         .collect();
     draws.sort_by_key(|draw| (draw.render_order, draw.entity.to_bits()));
     Ok(ExtractedLodModels3d { draws })
@@ -3693,6 +3845,8 @@ pub fn extract_lod_models_3d(
 /// without [`LodGroup3d`] keep their original model and source
 /// `Model3d::mesh` sub-selection. An actual LOD selection targets the complete
 /// replacement model, so only that path intentionally clears the mesh.
+/// Visibility matches [`extract_models`]: [`RenderFlags3d::draw`] false skips
+/// the entity even when [`Model3d::visible`] remains true.
 ///
 /// # Errors
 ///
@@ -3724,6 +3878,12 @@ pub fn extract_models_with_lod_3d(
         batches,
         model_count,
     })
+}
+
+/// Shared draw gate for ordinary and LOD extraction.
+#[inline]
+fn model_draw_enabled(model: &Model3d, render_flags: Option<&RenderFlags3d>) -> bool {
+    render_flags.map_or(model.visible, |flags| flags.draw && model.visible)
 }
 
 /// A renderer-neutral infinitely distant light with parallel rays.
@@ -4062,6 +4222,113 @@ mod tests {
                     transform_matrix(Transform3d::from_translation([0.0, 0.0, -0.5]))
                 )
                 .expect("finite test")
+        );
+    }
+
+    /// Same look-at × ZeroToOne perspective as `Camera3d::view_projection`.
+    fn perspective_look_at(
+        eye: [f32; 3],
+        target: [f32; 3],
+        near: f32,
+        far: f32,
+        fov_y: f32,
+        aspect: f32,
+    ) -> [f32; 16] {
+        let forward = {
+            let d = [
+                target[0] - eye[0],
+                target[1] - eye[1],
+                target[2] - eye[2],
+            ];
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            [d[0] / len, d[1] / len, d[2] / len]
+        };
+        let up = [0.0_f32, 1.0, 0.0];
+        let side = {
+            let c = [
+                forward[1] * up[2] - forward[2] * up[1],
+                forward[2] * up[0] - forward[0] * up[2],
+                forward[0] * up[1] - forward[1] * up[0],
+            ];
+            let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+            [c[0] / len, c[1] / len, c[2] / len]
+        };
+        let actual_up = [
+            side[1] * forward[2] - side[2] * forward[1],
+            side[2] * forward[0] - side[0] * forward[2],
+            side[0] * forward[1] - side[1] * forward[0],
+        ];
+        let view = [
+            side[0],
+            actual_up[0],
+            -forward[0],
+            0.0,
+            side[1],
+            actual_up[1],
+            -forward[1],
+            0.0,
+            side[2],
+            actual_up[2],
+            -forward[2],
+            0.0,
+            -(side[0] * eye[0] + side[1] * eye[1] + side[2] * eye[2]),
+            -(actual_up[0] * eye[0] + actual_up[1] * eye[1] + actual_up[2] * eye[2]),
+            forward[0] * eye[0] + forward[1] * eye[1] + forward[2] * eye[2],
+            1.0,
+        ];
+        let focal = 1.0 / (fov_y * 0.5).tan();
+        let projection = [
+            focal / aspect,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            focal,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            far / (near - far),
+            -1.0,
+            0.0,
+            0.0,
+            (near * far) / (near - far),
+            0.0,
+        ];
+        let mut out = [0.0_f32; 16];
+        for col in 0..4 {
+            for row in 0..4 {
+                out[col * 4 + row] = (0..4)
+                    .map(|k| projection[k * 4 + row] * view[col * 4 + k])
+                    .sum();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn perspective_frustum_rejects_cube_clearly_behind_camera() {
+        // Camera at +Z looking at origin (−Z forward). A cube further +Z is
+        // behind the camera. Plane-only frustums often keep such boxes (infinite
+        // pyramid) — that shows up as huge cubes popping in under yaw.
+        let eye = [0.0_f32, 0.0, 3.0];
+        let vp = perspective_look_at(eye, [0.0, 0.0, 0.0], 0.1, 100.0, 1.0, 16.0 / 9.0);
+        let frustum =
+            Frustum3d::from_clip_matrix(vp, ClipDepthRange3d::ZeroToOne).expect("frustum");
+        let bounds = LocalAabb3d::new([-0.7; 3], [0.7; 3]).expect("cube");
+        let behind = transform_matrix(Transform3d::from_translation([0.0, 0.0, 8.0]));
+        let in_front = transform_matrix(Transform3d::from_translation([0.0, 0.0, 0.0]));
+        assert!(
+            frustum
+                .intersects_local_bounds(bounds.into(), in_front)
+                .expect("finite"),
+            "cube at look-at must stay visible"
+        );
+        assert!(
+            !frustum
+                .intersects_local_bounds(bounds.into(), behind)
+                .expect("finite"),
+            "cube behind camera must be culled (yaw pop source)"
         );
     }
 
@@ -4853,6 +5120,23 @@ mod tests {
         let extracted = extract_models(&mut world);
         assert!(extracted.is_empty());
         assert!(extracted.batches().is_empty());
+    }
+
+    #[test]
+    fn extraction_and_lod_skip_render_flags_nodraw_even_when_visible() {
+        let mut models = Assets::new();
+        let model = model(&mut models);
+        let mut world = World::new();
+        world.spawn((
+            Model3d::new(model),
+            RenderFlags3d::NODRAW,
+            Transform3d::IDENTITY,
+        ));
+        world.spawn((Model3d::new(model), Transform3d::IDENTITY));
+
+        assert_eq!(extract_models(&mut world).model_count(), 1);
+        let lod = extract_models_with_lod_3d(&mut world, [0.0; 3]).expect("lod extract");
+        assert_eq!(lod.model_count(), 1);
     }
 
     #[test]

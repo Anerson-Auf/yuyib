@@ -1,8 +1,8 @@
 # Integration fixtures
 
-Локальные `.glb` / `.yasset` **не коммитятся** в Git (см. корневой
-`.gitignore`). Нужны только на машине разработчика для examples / Editor /
-smokes. Перед распространением ассетов сверяйте лицензию источника.
+Локальные `.glb` / `.yasset` / тяжёлые PNG-паки **не коммитятся** в Git (см.
+корневой `.gitignore`). Нужны только на машине разработчика для examples /
+Editor / smokes. Перед распространением ассетов сверяйте лицензию источника.
 
 | Fixture (local) | Назначение |
 |---|---|
@@ -11,6 +11,7 @@ smokes. Перед распространением ассетов сверяй�
 | `no_i_am_not_a_human_location__map.glb` | Scene import, camera/light, LOD |
 | `street_city_7_for_games_free.glb` | Playable / M1 smoke map |
 | `outdoor_probe.hdr` | Tiny IBL equirect для street-city (в репо) |
+| `2d/` | Farm sprite pack for Tiled / animator demos (`Tileset`, `Character`, `Objects`, …) |
 
 Аудит одного локального GLB:
 
@@ -18,4 +19,5 @@ smokes. Перед распространением ассетов сверяй�
 cargo run -p xtask -- gltf-fixtures for_tests/velina_zzz.glb
 ```
 
-Default `cargo test` эти файлы не требует.
+Default `cargo test` эти файлы не требует. Windowed `two_d_tiled_playable`
+ожидает `for_tests/2d/Tileset/Tileset Spring.png` и Character/Objects PNGs.
