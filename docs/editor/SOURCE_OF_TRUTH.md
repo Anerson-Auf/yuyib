@@ -27,7 +27,8 @@ behavior / script ──Intent──▶ Editor document  OR  Play World
 2. **Whole-World serialize** или silent Play→document merge.
 3. **`Model3d.visible=false` как nocollide** — ломает независимость render/collision (см. ниже).
 4. CharacterController ↔ Rapier **mode switch** как prerequisite 2D.
-5. Shadow / render intents, LSP completion, project wizard — **deferred**; не блокируют 2D.
+5. Shadow / render intents — **deferred**; не блокируют 2D.
+   Project scaffold + Create Project exist; multi-step wizard UX is incremental.
 
 ## Render vs collision (3D Play)
 
@@ -40,7 +41,8 @@ behavior / script ──Intent──▶ Editor document  OR  Play World
 
 Triggers / Interactable — отдельные sphere queries; не зависят от mesh collider.
 
-Prop↔prop selective collision → Rapier overlay (open; не default Play).
+Prop↔prop selective collision → Rapier overlay (`yuyib-play --features physics-rapier`;
+authored prop markers still open for full selective layers).
 
 ## Game loop checklist (3D)
 

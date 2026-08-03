@@ -26,21 +26,25 @@
 
 ## Editor
 
-- Full Asset DoD для glTF preview не закрыт: collision / tangents / UV
-  overlays и animation selection ещё открыты (Bounds/Normals/mesh/material —
-  есть).
-- rust-analyzer / LSP sidecar не подключён; Monaco — UI без semantic
-  diagnostics.
-- Apply Play Mode Changes (reverse sync runtime → authored) выключен
-  намеренно до whitelist adapters.
-- Coverage gate есть в scoped tests; foundation GitHub Actions —
-  `.github/workflows/` (не полный workspace gate).
-- Component field mutation без typed adapter блокируется host-ом.
+- Full Asset DoD для glTF preview не закрыт (timeline / crossfade / scene
+  assignment). Preview overlays (Bounds/Collision/Normals/Tangents/UV) и
+  mesh/material/animation clip selection — closed thin.
+- LSP: diagnostics / completion / hover / **signature help** / definition /
+  references / rename / code actions / allowlisted `executeCommand`
+  (`rust-analyzer.*` only); broader command surface open.
+- Apply Play Mode Changes closed for Transform3d + LocalTransform3d whitelist.
+- Coverage gate: Asset evidence, Visual→schema (+ runtime source/fields),
+  capability docs/source, system source, migration `1→current`,
+  import-settings→Asset, Apply Play⇒Visual — enforced in scoped tests +
+  foundation Actions. Still open outside registry: materializer/command maps,
+  FS dangling paths, Cargo editor-dep lint.
+- Component field mutation без typed adapter: host `read_only` + Inspector tip.
 
 ## Native UI / WebView
 
-- Nested clipping, scrollbar/inertia, virtualization, IME и accessibility —
-  открыты (есть bounded `ScrollView` vertical).
+- Nested clipping stack, scroll inertia, virtualization, IME и accessibility —
+  открыты (есть bounded `ScrollView`: wheel + thumb drag/track jump + image
+  extract; GPU textured UI pass ещё нет).
 - WebView — native overlay, не GPU texture; composition hosting не в scope.
 
 ## Assets / cook

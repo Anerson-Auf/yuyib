@@ -4,7 +4,7 @@ use crate::{
     CapabilityDescriptor, CapabilityId, ComponentDescriptor, ComponentMigration, ComponentSchemaId,
     CoverageManifest, FieldKind, ImportSettingsDescriptor, ImportSettingsMigration,
     ImportSettingsSchemaId, MigrationError, MigrationRegistry, PreviewAdapter, PreviewDescriptor,
-    SystemDescriptor, SystemId,
+    SchemaVersion, SystemDescriptor, SystemId,
 };
 
 /// Duplicate or dangling authoring registration.
@@ -88,6 +88,79 @@ pub enum CoverageGateError {
         /// Unavailable preview capability.
         preview: String,
     },
+    /// Capability documentation is missing or blank.
+    CapabilityMissingDocumentation {
+        /// Capability missing documentation.
+        capability: String,
+    },
+    /// Capability source navigation is missing or blank.
+    CapabilityMissingSource {
+        /// Capability missing source.
+        capability: String,
+    },
+    /// A `Visual` capability has no registered component schema.
+    ///
+    /// Shell-level Visual surfaces (`yuyib.application`, `yuyib.game-lifecycle`)
+    /// are exempt; persisted Inspector Visuals must declare a schema.
+    VisualWithoutComponentSchema {
+        /// Capability missing a component schema.
+        capability: String,
+    },
+    /// A Visual component schema has no runtime source navigation.
+    VisualComponentMissingRuntimeSource {
+        /// Owning Visual capability.
+        capability: String,
+        /// Component schema id.
+        schema: String,
+    },
+    /// A Visual component schema declares no Inspector fields.
+    VisualComponentWithoutFields {
+        /// Owning Visual capability.
+        capability: String,
+        /// Component schema id.
+        schema: String,
+    },
+    /// Migration chain from version 1 to current is incomplete.
+    MigrationGap {
+        /// `"component"` or `"import-settings"`.
+        kind: &'static str,
+        /// Schema id.
+        schema: String,
+        /// Version where the gap starts.
+        from: u32,
+        /// Declared current version.
+        current: u32,
+    },
+    /// Migration path validation failed for a reason other than a missing edge.
+    MigrationInvalid {
+        /// `"component"` or `"import-settings"`.
+        kind: &'static str,
+        /// Schema id.
+        schema: String,
+        /// Stable explanation.
+        detail: String,
+    },
+    /// Import-settings schema points at a capability without an Asset surface.
+    ImportSettingsNotAsset {
+        /// Import-settings schema id.
+        schema: String,
+        /// Referenced capability id.
+        capability: String,
+    },
+    /// A field advertises Apply Play on a non-Visual capability.
+    ApplyPlayRequiresVisual {
+        /// Component schema id.
+        schema: String,
+        /// Owning capability id.
+        capability: String,
+        /// Field path with `apply_play_changes`.
+        field: String,
+    },
+    /// A registered system has no usable source-navigation target for Editor open.
+    SystemWithoutSource {
+        /// System missing source metadata.
+        system: String,
+    },
 }
 
 impl fmt::Display for CoverageGateError {
@@ -127,6 +200,79 @@ impl fmt::Display for CoverageGateError {
                 write!(
                     formatter,
                     "Asset capability {capability} evidence points at unavailable preview {preview}"
+                )
+            }
+            Self::CapabilityMissingDocumentation { capability } => {
+                write!(
+                    formatter,
+                    "capability {capability} is missing non-empty documentation"
+                )
+            }
+            Self::CapabilityMissingSource { capability } => {
+                write!(
+                    formatter,
+                    "capability {capability} is missing non-empty SourceNavigation"
+                )
+            }
+            Self::VisualWithoutComponentSchema { capability } => {
+                write!(
+                    formatter,
+                    "Visual capability {capability} has no ComponentDescriptor"
+                )
+            }
+            Self::VisualComponentMissingRuntimeSource { capability, schema } => {
+                write!(
+                    formatter,
+                    "Visual capability {capability} schema {schema} has no runtime SourceNavigation"
+                )
+            }
+            Self::VisualComponentWithoutFields { capability, schema } => {
+                write!(
+                    formatter,
+                    "Visual capability {capability} schema {schema} has no Inspector fields"
+                )
+            }
+            Self::MigrationGap {
+                kind,
+                schema,
+                from,
+                current,
+            } => {
+                write!(
+                    formatter,
+                    "{kind} schema {schema} migration gap from v{from} to v{current}"
+                )
+            }
+            Self::MigrationInvalid {
+                kind,
+                schema,
+                detail,
+            } => {
+                write!(
+                    formatter,
+                    "{kind} schema {schema} migration path invalid: {detail}"
+                )
+            }
+            Self::ImportSettingsNotAsset { schema, capability } => {
+                write!(
+                    formatter,
+                    "import-settings schema {schema} capability {capability} is not an Asset surface"
+                )
+            }
+            Self::ApplyPlayRequiresVisual {
+                schema,
+                capability,
+                field,
+            } => {
+                write!(
+                    formatter,
+                    "schema {schema} field `{field}` applies_play_changes but capability {capability} is not Visual"
+                )
+            }
+            Self::SystemWithoutSource { system } => {
+                write!(
+                    formatter,
+                    "system {system} has no SourceNavigation for Editor open"
                 )
             }
         }
@@ -396,24 +542,62 @@ impl AuthoringRegistry {
         }
     }
 
-    /// Validates that every [`CoverageStatus::Asset`] capability has closable
-    /// evidence: registered import settings, a non-Unavailable preview
-    /// capability with a live adapter, and at least one diagnostic code.
+    /// Validates coverage evidence across capabilities, schemas, migrations, and
+    /// systems.
+    ///
+    /// Enforced rules (incremental):
+    /// - every capability has non-empty documentation + [`crate::SourceNavigation`];
+    /// - every `Asset` surface has closable import-settings evidence (schema,
+    ///   diagnostics, non-Unavailable preview capability + adapter);
+    /// - every `Visual` surface (except shell allowlist `yuyib.application` /
+    ///   `yuyib.game-lifecycle`) has a [`ComponentDescriptor`] with runtime
+    ///   source and at least one Inspector field;
+    /// - every component / import-settings schema has a migration path from
+    ///   version 1 to its declared current version;
+    /// - every import-settings schema references an Asset capability;
+    /// - `apply_play_changes` fields only on Visual capability schemas;
+    /// - every system has non-empty source navigation.
     ///
     /// Call after the host finishes foundation + production adapter registration.
     ///
     /// # Errors
     ///
-    /// Returns the first gate violation in capability-id order.
+    /// Returns the first gate violation in deterministic id order.
     pub fn validate_coverage_gate(&self) -> Result<(), CoverageGateError> {
+        let visual_component_capabilities = self
+            .components
+            .values()
+            .map(ComponentDescriptor::capability)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let baseline = SchemaVersion::new(1).expect("schema version 1");
+        let limits = crate::MigrationLimits::new(64, 16 * 1024 * 1024).expect("migration limits");
+
         for capability in self.capabilities.values() {
+            let id = capability.id().to_string();
+            if capability
+                .documentation()
+                .is_none_or(|docs| docs.trim().is_empty())
+            {
+                return Err(CoverageGateError::CapabilityMissingDocumentation { capability: id });
+            }
+            if source_navigation_missing(capability.source()) {
+                return Err(CoverageGateError::CapabilityMissingSource { capability: id });
+            }
+            if capability
+                .surfaces()
+                .contains(&crate::CoverageStatus::Visual)
+                && !visual_capability_allows_missing_component(capability.id())
+                && !visual_component_capabilities.contains(capability.id())
+            {
+                return Err(CoverageGateError::VisualWithoutComponentSchema { capability: id });
+            }
             if !capability
                 .surfaces()
                 .contains(&crate::CoverageStatus::Asset)
             {
                 continue;
             }
-            let id = capability.id().to_string();
             let Some(evidence) = capability.asset_evidence() else {
                 return Err(CoverageGateError::MissingAssetEvidence { capability: id });
             };
@@ -452,6 +636,98 @@ impl AuthoringRegistry {
                 });
             }
         }
+
+        for component in self.components.values() {
+            let schema = component.id().to_string();
+            map_migration_path(
+                "component",
+                &schema,
+                self.migrations.validate_component_path(
+                    component.id(),
+                    baseline,
+                    component.current_version(),
+                    limits,
+                ),
+            )?;
+            let Some(capability) = self.capabilities.get(component.capability()) else {
+                continue;
+            };
+            if !capability
+                .surfaces()
+                .contains(&crate::CoverageStatus::Visual)
+                || visual_capability_allows_missing_component(capability.id())
+            {
+                continue;
+            }
+            let capability_id = capability.id().to_string();
+            if source_navigation_missing(component.runtime_source()) {
+                return Err(CoverageGateError::VisualComponentMissingRuntimeSource {
+                    capability: capability_id,
+                    schema,
+                });
+            }
+            if component.fields().is_empty() {
+                return Err(CoverageGateError::VisualComponentWithoutFields {
+                    capability: capability_id,
+                    schema,
+                });
+            }
+        }
+
+        for component in self.components.values() {
+            let Some(capability) = self.capabilities.get(component.capability()) else {
+                continue;
+            };
+            if capability
+                .surfaces()
+                .contains(&crate::CoverageStatus::Visual)
+            {
+                continue;
+            }
+            for field in component.fields() {
+                if field.applies_play_changes() {
+                    return Err(CoverageGateError::ApplyPlayRequiresVisual {
+                        schema: component.id().to_string(),
+                        capability: capability.id().to_string(),
+                        field: field.path().to_owned(),
+                    });
+                }
+            }
+        }
+
+        for settings in self.import_settings.values() {
+            let schema = settings.id().to_string();
+            map_migration_path(
+                "import-settings",
+                &schema,
+                self.migrations.validate_import_settings_path(
+                    settings.id(),
+                    baseline,
+                    settings.current_version(),
+                    limits,
+                ),
+            )?;
+            let Some(capability) = self.capabilities.get(settings.capability()) else {
+                continue;
+            };
+            if !capability
+                .surfaces()
+                .contains(&crate::CoverageStatus::Asset)
+            {
+                return Err(CoverageGateError::ImportSettingsNotAsset {
+                    schema,
+                    capability: capability.id().to_string(),
+                });
+            }
+        }
+
+        for system in self.systems.values() {
+            if source_navigation_missing(system.source()) {
+                return Err(CoverageGateError::SystemWithoutSource {
+                    system: system.id().to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -461,6 +737,38 @@ impl AuthoringRegistry {
         } else {
             Err(RegistrationError::MissingCapability(id.clone()))
         }
+    }
+}
+
+/// Shell Visual surfaces that intentionally have no persisted component schema.
+fn visual_capability_allows_missing_component(id: &CapabilityId) -> bool {
+    matches!(id.as_str(), "yuyib.application" | "yuyib.game-lifecycle")
+}
+
+fn source_navigation_missing(source: Option<&crate::SourceNavigation>) -> bool {
+    source.is_none_or(|navigation| navigation.file.trim().is_empty())
+}
+
+fn map_migration_path(
+    kind: &'static str,
+    schema: &str,
+    result: Result<(), MigrationError>,
+) -> Result<(), CoverageGateError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(MigrationError::MissingEdge { from, current, .. }) => {
+            Err(CoverageGateError::MigrationGap {
+                kind,
+                schema: schema.to_owned(),
+                from: from.get(),
+                current: current.get(),
+            })
+        }
+        Err(error) => Err(CoverageGateError::MigrationInvalid {
+            kind,
+            schema: schema.to_owned(),
+            detail: error.to_string(),
+        }),
     }
 }
 
@@ -526,7 +834,10 @@ fn validate_component_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CoverageStatus, PluginId, SchemaVersion};
+    use crate::{
+        CoverageStatus, FieldDescriptor, FieldKind, PluginId, ScheduleId, SchemaVersion,
+        SourceNavigation, SystemId,
+    };
 
     fn capability(id: &str) -> CapabilityDescriptor {
         CapabilityDescriptor::new(
@@ -535,6 +846,18 @@ mod tests {
             CoverageStatus::Visual,
             PluginId::new("yuyib.game-3d").expect("plugin"),
         )
+        .with_documentation("crates/yuyib-game-3d/src/lib.rs")
+        .with_source(SourceNavigation::file("crates/yuyib-game-3d/src/lib.rs"))
+    }
+
+    fn visual_component(id: &str) -> ComponentDescriptor {
+        ComponentDescriptor::new(
+            ComponentSchemaId::new(id).expect("id"),
+            CapabilityId::new(id).expect("id"),
+            SchemaVersion::new(1).expect("version"),
+        )
+        .with_runtime_source(SourceNavigation::file("crates/yuyib-game-3d/src/lib.rs"))
+        .with_field(FieldDescriptor::new("value", "Value", FieldKind::F32))
     }
 
     #[test]
@@ -633,6 +956,239 @@ mod tests {
         assert!(matches!(
             registry.register_component(descriptor),
             Err(RegistrationError::InvalidDescriptor { .. })
+        ));
+    }
+
+    #[test]
+    fn visual_without_component_schema_fails_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_capability(capability("yuyib.orphan-visual"))
+            .expect("capability");
+        assert!(matches!(
+            registry.validate_coverage_gate(),
+            Err(CoverageGateError::VisualWithoutComponentSchema { capability })
+                if capability == "yuyib.orphan-visual"
+        ));
+    }
+
+    #[test]
+    fn visual_with_component_schema_passes_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_capability(capability("yuyib.linked-visual"))
+            .expect("capability");
+        registry
+            .register_component(visual_component("yuyib.linked-visual"))
+            .expect("component");
+        registry
+            .validate_coverage_gate()
+            .expect("linked Visual must pass");
+    }
+
+    #[test]
+    fn shell_visual_without_component_is_allowlisted() {
+        let mut registry = AuthoringRegistry::new();
+        for id in ["yuyib.application", "yuyib.game-lifecycle"] {
+            registry
+                .register_capability(capability(id))
+                .expect("shell capability");
+        }
+        registry
+            .validate_coverage_gate()
+            .expect("shell Visual allowlist");
+    }
+
+    #[test]
+    fn system_without_source_fails_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_system(SystemDescriptor::new(
+                SystemId::new("yuyib.system.orphan").expect("id"),
+                PluginId::new("yuyib.game-3d").expect("plugin"),
+                ScheduleId::new("yuyib.schedule.caller-driven").expect("schedule"),
+            ))
+            .expect("system");
+        assert!(matches!(
+            registry.validate_coverage_gate(),
+            Err(CoverageGateError::SystemWithoutSource { system })
+                if system == "yuyib.system.orphan"
+        ));
+    }
+
+    #[test]
+    fn system_with_source_passes_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_system(
+                SystemDescriptor::new(
+                    SystemId::new("yuyib.system.navigable").expect("id"),
+                    PluginId::new("yuyib.game-3d").expect("plugin"),
+                    ScheduleId::new("yuyib.schedule.caller-driven").expect("schedule"),
+                )
+                .with_source(SourceNavigation::file("crates/yuyib-game-3d/src/lib.rs")),
+            )
+            .expect("system");
+        registry
+            .validate_coverage_gate()
+            .expect("system with source must pass");
+    }
+
+    #[test]
+    fn capability_without_documentation_fails_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        let descriptor = CapabilityDescriptor::new(
+            CapabilityId::new("yuyib.undocumented").expect("id"),
+            "Undocumented",
+            CoverageStatus::Unavailable,
+            PluginId::new("yuyib.game-3d").expect("plugin"),
+        )
+        .unavailable("not ready", "future")
+        .with_source(SourceNavigation::file("crates/yuyib-game-3d/src/lib.rs"));
+        registry
+            .register_capability(descriptor)
+            .expect("capability");
+        assert!(matches!(
+            registry.validate_coverage_gate(),
+            Err(CoverageGateError::CapabilityMissingDocumentation { capability })
+                if capability == "yuyib.undocumented"
+        ));
+    }
+
+    #[test]
+    fn visual_component_without_fields_fails_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_capability(capability("yuyib.empty-fields"))
+            .expect("capability");
+        registry
+            .register_component(
+                ComponentDescriptor::new(
+                    ComponentSchemaId::new("yuyib.empty-fields").expect("id"),
+                    CapabilityId::new("yuyib.empty-fields").expect("id"),
+                    SchemaVersion::new(1).expect("version"),
+                )
+                .with_runtime_source(SourceNavigation::file("crates/yuyib-game-3d/src/lib.rs")),
+            )
+            .expect("component");
+        assert!(matches!(
+            registry.validate_coverage_gate(),
+            Err(CoverageGateError::VisualComponentWithoutFields { schema, .. })
+                if schema == "yuyib.empty-fields"
+        ));
+    }
+
+    #[test]
+    fn visual_component_without_runtime_source_fails_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_capability(capability("yuyib.no-runtime-source"))
+            .expect("capability");
+        registry
+            .register_component(
+                ComponentDescriptor::new(
+                    ComponentSchemaId::new("yuyib.no-runtime-source").expect("id"),
+                    CapabilityId::new("yuyib.no-runtime-source").expect("id"),
+                    SchemaVersion::new(1).expect("version"),
+                )
+                .with_field(FieldDescriptor::new("value", "Value", FieldKind::F32)),
+            )
+            .expect("component");
+        assert!(matches!(
+            registry.validate_coverage_gate(),
+            Err(CoverageGateError::VisualComponentMissingRuntimeSource { schema, .. })
+                if schema == "yuyib.no-runtime-source"
+        ));
+    }
+
+    #[test]
+    fn import_settings_without_asset_surface_fails_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_capability(capability("yuyib.settings-owner"))
+            .expect("visual capability");
+        registry
+            .register_component(visual_component("yuyib.settings-owner"))
+            .expect("component");
+        registry
+            .register_import_settings(ImportSettingsDescriptor::new(
+                ImportSettingsSchemaId::new("yuyib.settings-owner-settings").expect("id"),
+                CapabilityId::new("yuyib.settings-owner").expect("id"),
+                SchemaVersion::new(1).expect("version"),
+            ))
+            .expect("settings");
+        assert!(matches!(
+            registry.validate_coverage_gate(),
+            Err(CoverageGateError::ImportSettingsNotAsset { schema, .. })
+                if schema == "yuyib.settings-owner-settings"
+        ));
+    }
+
+    #[test]
+    fn migration_gap_fails_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_capability(capability("yuyib.migrated"))
+            .expect("capability");
+        registry
+            .register_component(
+                ComponentDescriptor::new(
+                    ComponentSchemaId::new("yuyib.migrated").expect("id"),
+                    CapabilityId::new("yuyib.migrated").expect("id"),
+                    SchemaVersion::new(2).expect("version"),
+                )
+                .with_runtime_source(SourceNavigation::file("crates/yuyib-game-3d/src/lib.rs"))
+                .with_field(FieldDescriptor::new("value", "Value", FieldKind::F32)),
+            )
+            .expect("component");
+        assert!(matches!(
+            registry.validate_coverage_gate(),
+            Err(CoverageGateError::MigrationGap {
+                kind: "component",
+                schema,
+                from: 1,
+                current: 2,
+            }) if schema == "yuyib.migrated"
+        ));
+    }
+
+    #[test]
+    fn apply_play_on_non_visual_fails_coverage_gate() {
+        let mut registry = AuthoringRegistry::new();
+        registry
+            .register_capability(
+                CapabilityDescriptor::new(
+                    CapabilityId::new("yuyib.future-2d").expect("id"),
+                    "Future 2D",
+                    CoverageStatus::Unavailable,
+                    PluginId::new("yuyib.game-2d").expect("plugin"),
+                )
+                .unavailable("not wired", "2d-visual")
+                .with_documentation("crates/yuyib-game-2d/src/lib.rs")
+                .with_source(SourceNavigation::file("crates/yuyib-game-2d/src/lib.rs")),
+            )
+            .expect("capability");
+        registry
+            .register_component(
+                ComponentDescriptor::new(
+                    ComponentSchemaId::new("yuyib.future-2d").expect("id"),
+                    CapabilityId::new("yuyib.future-2d").expect("id"),
+                    SchemaVersion::new(1).expect("version"),
+                )
+                .with_runtime_source(SourceNavigation::file("crates/yuyib-game-2d/src/lib.rs"))
+                .with_field(
+                    FieldDescriptor::new("position", "Position", FieldKind::Vec2)
+                        .allow_apply_play_changes(true),
+                ),
+            )
+            .expect("component");
+        assert!(matches!(
+            registry.validate_coverage_gate(),
+            Err(CoverageGateError::ApplyPlayRequiresVisual {
+                schema,
+                field,
+                ..
+            }) if schema == "yuyib.future-2d" && field == "position"
         ));
     }
 }

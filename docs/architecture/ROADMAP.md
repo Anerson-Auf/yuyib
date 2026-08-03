@@ -24,20 +24,20 @@
 | Windows application | partial | multi-window, device-loss recovery, production diagnostics |
 | Game/ECS lifecycle | foundation + M5.1 profiles | Deep 2D HL started (`PlayableLoop2d`); save/load |
 | Tasks/assets/importers | strong foundation | hot reload UI, eviction, shipping without importers |
-| 2D | partial + Deep 2D A–E + M7 objects/locations/composer | Loop/platformer/HUD/animator + Tiled objects + `LocationStack2d` + `TileMapComposer2d`; TMX/LDtk later |
+| 2D | partial + Deep 2D A–G + M7 Tiled/LDtk | Loop/platformer/HUD/animator + Tiled JSON/TMX + bounded LDtk + `LocationStack2d` + `TileMapComposer2d` |
 | 3D/glTF/animation | strong partial | compatibility tail, material overrides, animation authoring |
 | 3D rendering | usable MVP | validated CSM, TAA/GTAO, GPU instancing, timestamps |
 | Shader API | not as planned | high-level effects/material templates |
 | Physics | usable MVP (Rapier 3D/2D + platformer controller) | editor physics UI, tile broadphase cache |
 | Navigation | early partial | agent navmesh, smoothing, dynamic obstacles |
 | Gameplay | partial | persistence, UI composition, authority/replication |
-| Native UI | early partial | ScrollView+thumb + pause overlay active-flag; drag/IME/a11y/images open |
+| Native UI | early partial | ScrollView thumb drag + image extract; IME/a11y/inertia open |
 | WebView | partial | facade decision, focus/accessibility/composition |
 | Audio | partial | spatial audio, buses, streaming and device policy |
 | Networking | early partial | TLS/auth, replication, prediction and observability |
 | Source 1 | early partial | BSP/VPK/lightmaps/displacements/props/material integration |
 | Source 2 | missing/research | format/version/legal matrix and importer plugin |
-| Editor/authoring | E1 in progress | Project wizard / cook export; LSP completion deferred to end-game |
+| Editor/authoring | E1 in progress | cook + ypack export/hydrate + LSP closed; cooked-only strip / shadow intents open |
 | Documentation/release | partial | book freshness, golden tests, stable policy; Actions foundation CI landed |
 
 ## Критический путь
@@ -73,12 +73,12 @@ Editor — отдельный strategic development-tool track и consumer runti
    light, dark PBR fallback; `host.process` возвращает pin + exit code.
    Apply-Play reverse-sync отключён;
 7. source/system navigation — **partial closed** (file tree + coverage systems /
-   runtime/authoring jump); mature LSP completion/hover/rename —
-   **deferred to end-game** (diagnostics-only already shipped).
+   runtime/authoring jump); LSP diagnostics + completion + hover + rename +
+   code actions + allowlisted `workspace/executeCommand` (`rust-analyzer.*`) shipped.
 
 Evidence (closed items): Transform gizmo; Player motor; mesh physics;
 DirectionalLight transform/cone; dark Play fallback. Full E1 DoD ниже не
-закрыт: Asset import/preview evidence, coverage CI, LSP.
+закрыт: Asset import/preview evidence, coverage CI, cooked-only Play.
 
 Definition of Done: реальный 3D asset проходит bounded/cancellable import,
 material/mesh/animation selection и geometry/material diagnostics; preview имеет
@@ -273,8 +273,9 @@ Audio/interaction remain opt-in adapters.
 
 ## Ближайший порядок работ
 
-1. **Current (узкий M6)** — ScrollView glyph clip + vertical thumb (**done**).
-   Drag/inertia, IME, a11y, images — позже.
+1. **Current (узкий M6)** — ScrollView glyph clip + vertical thumb (**done**);
+   images/icons extract (**done**); scrollbar thumb drag + track jump
+   (**done**, no inertia). Open: GPU textured UI pass, IME, a11y.
 2. **High-Level composition (M5.2)** — engine-owned playable loop, не helpers в
    `examples/support`:
    - `AnimatedCharacter3d` / `AnimatedCharacterLoad3d` (**done**, smoke
@@ -299,16 +300,23 @@ Audio/interaction remain opt-in adapters.
      (**done**: `yuyib-animation`, `SpriteAnimator2d`; smoke
      `sprite_animator_2d_smoke`; windowed `two_d_animator_playable` — playground
      not rewritten);
-   - E. Tiled JSON → `TileMap2d` (**done first slice + objects + external `.tsj`**:
-     `yuyib-tiled` orthogonal embedded/external JSON tileset + `objectgroup`;
-     smoke `tiled_map_2d_smoke`; windowed `two_d_tiled_playable`; fixtures
-     `tiled_unit_room.json` / `tiled_external_tileset_room.json`). Still open:
-     TMX/TSX XML, flips, multi-tileset, LDtk.
-   - F. Location stack + map composer (**done slice**: `LocationStack2d`
-     push/pop; `TileMapComposer2d` fill/stamp/border; smoke
-     `location_stack_2d_smoke`; farm demo door → composer interior via `E`).
-   - дальше: richer Tiled/LDtk (M7) / content formats.
+   - E. Tiled JSON/TMX + LDtk → `TileMap2d` (**done**: objects point/rect/
+     ellipse/polygon, `.tsj`/`.tsx`, flips, multi visual layers, multi-tileset,
+     TMX/TSX, bounded LDtk, parallax, world layout).
+   - F. Location stack + map composer (**done slice**).
+   - G. Camera world bounds + zoom/pan/shake + cinematic + cuts (**done**:
+     `CameraFollowRuntime2d`, `CameraDirector2d` / `CameraCut2d`).
+   - H. InteractionPrompt2d (**done**: cursor/label/highlight from
+     `WorldInteractionState`).
+   - I. Tile region animation + TileNavGrid2d + gilrs adapter (**done**:
+     Tiled `animation` → `TileRegionAnimation2d`; A* nav; feature `gamepad`).
+   - дальше: M6 IME → a11y; audio buses; dialogue JSON asset (1B) later.
   Rapier2D facade / `PlatformerController2d` / `Game2dProfile` smokes уже есть.
+
+**Deep 2D queue closed;** M6 UI LL: visuals + image extract + scroll drag.
+**Dialogue HL (1A/2A):** `DialogueGraph` / `DialogueSession` / `StoryFlags` +
+effects (`SetFlag`, `EmitQuestSignal`); UI `dialogue_overlay_tree` /
+`ApplicationUi::replace_tree`. JSON dialogue asset — later.
 
 End-game / later (не в текущем HL-базисе): particles/FX, weapon attach sockets,
 dash/attack timelines beyond simple once→idle, blend trees / crossfades.
@@ -316,25 +324,31 @@ dash/attack timelines beyond simple once→idle, blend trees / crossfades.
 ### M6 — Application capability completion
 
 Native UI: scroll, nested clipping, images/icons, common widgets, text input,
-Windows IME, DPI и accessibility. Input: keyboard/mouse/gamepad profiles и
+Windows IME, DPI и accessibility. **Done bites:**
+`ApplicationUi::with_visual_style` + `extract_draw_list`;
+`Widget::image` / `UiImageId` + `extract_image_draw_list` /
+`ApplicationUi::extract_image_draw_list`; ScrollView thumb drag + track jump
+via `handle_input` (wheel still `handle_scroll_input`). Open: GPU textured UI
+pass, IME, a11y, scroll inertia. Input: keyboard/mouse/gamepad profiles и
 persistent rebinding. Audio: listener/source, buses и master mixer. WebView:
 focus/input/accessibility lifecycle и окончательное facade decision.
 
 **Started:** bounded vertical `ScrollView` — retained wheel offset, viewport
 pointer clipping, WGPU scissor для rectangles **и** `ApplicationUi::with_text`
 glyph path (`UiLayout::clip` → `TextClipRect`), plus vertical thumb indicator
-на input-aware extract (`UiVisualStyle::scroll_thumb`, no drag/inertia). Nested
-scroll clips intersect на layout path. Открыто: scrollbar drag/inertia,
-virtualization, IME, accessibility, images/icons.
+на input-aware extract (`UiVisualStyle::scroll_thumb`) **и** pointer drag /
+track jump. Nested scroll clips intersect на layout path. Открыто: inertia,
+virtualization, IME, accessibility; GPU image sampling for UI.
 
 ### M7 — Content formats
 
 Только после M3:
 
-1. Tiled JSON/TMX или LDtk — **JSON + objects + locations/composer + external
-   `.tsj`** (`yuyib-tiled` orthogonal → `TileMap2d` + objectgroup;
-   `import_map_with_external_tilesets`; `LocationStack2d`; `TileMapComposer2d`;
-   TMX/TSX XML / multi-tileset / LDtk open);
+1. Tiled JSON/TMX или LDtk — **JSON/TMX + base64/zlib/gzip/zstd + LDtk**
+   (`.ldtkl`, multi-tileset, layer offsets, world layout, **parallax**,
+   **ellipse/polygon**, **tile animation**, **TileNavGrid2d**, virtual sticks,
+   `InteractionPrompt2d`, **gilrs** via feature `gamepad`); open: polyline/
+   tile-gid objects; LDtk non-square N/A;
 2. Source 1 VMF material/UV/entity completion;
 3. BSP/VPK/lightmaps/displacements/props;
 4. TrenchBroom MAP;

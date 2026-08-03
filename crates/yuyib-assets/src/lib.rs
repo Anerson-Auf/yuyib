@@ -12,12 +12,18 @@ mod cook;
 mod cook_cache;
 mod importer;
 mod upload;
+mod ypack;
 
 pub use cook::{
     AssetCooker, CookContext, CookError, CookKey, CookManifest, CookedArtifact, CookerIdentity,
     content_hash_blake3, options_hash_blake3,
 };
 pub use cook_cache::{CookCache, CookCacheError};
+pub use ypack::{
+    YPACK_FORMAT_ID, YPACK_FORMAT_VERSION, YPACK_MAGIC, YPackEntry, YPackError, YPackHydrateReport,
+    collect_ypack_entries_from_cook_root, decode_ypack, encode_ypack,
+    hydrate_cook_cache_from_ypack, read_ypack, write_ypack,
+};
 
 pub use importer::{
     AssetImporter, ImportCancellation, ImportContext, ImportDependency, ImportDependencyKind,

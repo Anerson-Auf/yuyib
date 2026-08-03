@@ -7,6 +7,11 @@ authors.workspace = true
 repository.workspace = true
 description = "Semantic keyboard action maps and Winit input adapter for Yuyib."
 
+[features]
+default = []
+## Optional gilrs HID adapter for 2D sticks (`GilrsGamepadAdapter2d`).
+gamepad = ["dep:gilrs"]
+
 [dependencies]
 winit.workspace = true
 yuyib-gameplay = { path = "../yuyib-gameplay", version = "0.1.0" }
@@ -14,6 +19,7 @@ yuyib-platform = { path = "../yuyib-platform", version = "0.1.0" }
 yuyib-physics = { path = "../yuyib-physics", version = "0.1.0" }
 yuyib-render-3d = { path = "../yuyib-render-3d", version = "0.1.0" }
 yuyib-ui = { path = "../yuyib-ui", version = "0.1.0" }
+gilrs = { version = "0.11.0", optional = true }
 
 [lints]
 workspace = true

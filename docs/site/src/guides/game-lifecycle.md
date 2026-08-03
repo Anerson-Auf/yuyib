@@ -1,12 +1,23 @@
 # Игра: окно, ECS и кадр
 
-> **Статус:** экспериментальный  
-> **Модуль:** `yuyib::game`
+> **Статус:** Experimental  
+> **Модуль:** `yuyib::game`  
+> **Tutorial:** [Первая игра](../tutorials/first-game.md)
 
-`Game` — высокоуровневая точка входа для игры. Она создаёт `Application`,
-владеет одним ECS-миром, plugin registry и тремя schedules: `Startup`,
-`FixedUpdate`, `Update`. Поэтому простая игра не должна сама связывать окно,
-event loop и `World` через глобальные переменные или потоки.
+`Game` — высокоуровневая точка входа для игры. Она создаёт тот же native
+window/GPU path, что [`Application`](application.md), и добавляет **один**
+ECS `World`, plugin registry и три schedules: `Startup`, `FixedUpdate`,
+`Update`.
+
+## Когда брать `Game`, а не `Application`
+
+| Нужно | Выбор |
+|---|---|
+| Tool, shell, WebView host без simulation | `Application` |
+| Entities, systems, fixed physics step | `Game` |
+| Полный custom multi-world / multi-window | Low-level `platform` + `ecs` + `render` |
+
+## Быстрый пример
 
 ```rust,no_run
 use yuyib::{
@@ -37,46 +48,83 @@ fn observe_player(time: Res<GameTime>, player: Res<Player>) {
     let _ = (time.frame, player.position);
 }
 
-Game::new()
-    .window(WindowConfig {
-        title: "Моя игра".to_owned(),
-        ..Default::default()
-    })
-    .clear_color(ClearColor::linear(0.03, 0.05, 0.1, 1.0))
-    .add_plugin(MovementPlugin)
-    .run()?;
-# Ok::<(), yuyib::app::ApplicationError>(())
+fn main() -> Result<(), yuyib::app::ApplicationError> {
+    Game::new()
+        .window(WindowConfig {
+            title: "Моя игра".to_owned(),
+            ..Default::default()
+        })
+        .clear_color(ClearColor::linear(0.03, 0.05, 0.1, 1.0))
+        .add_plugin(MovementPlugin)
+        .run()
+}
 ```
 
-## Что делает готовый путь
+Runnable: [`game_plugin_schedule.rs`](../../../../crates/yuyib/examples/game_plugin_schedule.rs).
 
-- `Game` использует continuous render loop по умолчанию; menu/turn-based game
-  может явно выбрать `RenderLoop::OnDemand`;
-- `Startup` выполняется один раз до открытия event loop;
-- `FixedUpdate` выполняется с постоянным timestep и bounded catch-up;
-- `Update` выполняется один раз на presentation frame;
-- `GameTime`, `FixedTime` и `FixedUpdateStats` доступны как ECS resources;
-- `GamePlugin` объединяет resources, systems и integration callbacks одной
-  capability без global registry;
-- `on_start` и `on_frame` сохранены для небольших callbacks и миграции старого
-  кода;
-- `request_exit` и `set_cursor_control` доступны из `GameFrame`;
-- `on_window_event` и `on_device_event` оставляют явный путь для клавиатуры,
-  UI и свободной камеры;
-- при feature `ui` метод `ui` помещает `ApplicationUi` поверх игровой сцены;
-- `on_render` оставляет доступ к низкоуровневому `RenderFrame` для 2D/3D
-  renderer-а и собственных GPU-проходов.
+## Почему эти API
+
+### `Game::new()`
+
+Создаёт host с continuous render loop по умолчанию (игра почти всегда хочет
+кадры). Menu/turn-based может явно поставить `RenderLoop::OnDemand`.
+
+### `GamePlugin::build`
+
+Регистрация resources/systems **до** event loop. Plugin — обычное Rust-value,
+не dynamic ABI и не скрытый global registry.
+
+### Schedules
+
+```text
+on_start / Startup (once)
+    ↓
+native event loop
+    ↓
+presentation frame:
+    FixedUpdate 0..N  (constant dt, bounded catch-up)
+    Update exactly once
+    compatibility on_frame
+    render snapshot / on_render
+```
+
+| Resource | Где брать dt | Зачем |
+|---|---|---|
+| `FixedTime` | `FixedUpdate` | Deterministic physics/motion |
+| `GameTime` | `Update` | Frame index, presentation delta |
+| `FixedUpdateStats` | После fixed steps | Сколько steps, сколько dropped time |
+
+**Почему нельзя подставлять presentation delta в physics:** разные FPS →
+разная симуляция; spiral of death маскируется. Лишний accumulated time
+**сбрасывается наблюдаемо**, а не «догоняется вечно».
+
+### `on_start` / `on_frame` / `on_render`
+
+Оставлены для малого glue и миграции. Production capability лучше класть в
+plugin systems. `on_render` даёт `RenderFrame` для 2D/3D renderer; `World` в
+GPU callback не передаётся — сначала extraction.
+
+### `ui(...)` (feature `ui`)
+
+`ApplicationUi` поверх сцены в том же frame (alpha blend), не второй window
+loop.
+
+## Fixed update config
+
+`FixedUpdateConfig` задаёт timestep, max steps per frame и max accepted frame
+delta. Неверный config → typed error при построении, не silent clamp без
+диагностики.
 
 ## Limits & Caveats
 
-`Game` не выбирает физический или сетевой backend вместо проекта. Эти
-capabilities подключаются plugins. Он не передаёт `World` в GPU callback и не
-разрешает фоновым задачам менять мир. Результат загрузки публикуется на main
-thread boundary, затем extraction создаёт renderer-owned snapshot.
+- Один `World` на `Game`.
+- Workers не мутируют world; publish на main thread.
+- Physics/network backends подключаются features/plugins, не «выбраны Game’ом».
+- Escape hatch: `Application` + raw ECS schedules + `Renderer`.
 
-Полный runnable пример находится в
-[`game_plugin_schedule.rs`](../../../../crates/yuyib/examples/game_plugin_schedule.rs).
+## См. также
 
-Если нужен особый порядок событий, несколько окон либо свой task executor,
-используйте `yuyib::app::Application`, `yuyib::ecs` и `yuyib::render`
-напрямую. Это не другой движок, а нижний уровень того же runtime.
+- [Tutorial: первая игра](../tutorials/first-game.md)
+- [Runtime / ECS concepts](../concepts/runtime-ecs-events.md)
+- [Tasks](tasks.md)
+- [Input & character](input-character-quests.md)

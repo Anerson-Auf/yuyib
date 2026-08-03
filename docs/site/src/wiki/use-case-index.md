@@ -5,15 +5,19 @@
 
 Начинайте отсюда, если знаете желаемый результат, но не название type или
 module. Ссылки ведут на guide с lifecycle, полным примером и ограничениями.
-Точные signatures каждого public item находятся в [API Reference](../reference/api-reference.md).
+Точные signatures — в [API Reference](../reference/api-reference.md).
+
+Если вы **новичок** и хотите идти по шагам с объяснением «почему эта
+функция» — сначала [учебный путь](../tutorials/learning-path.md).
 
 ## Проект и цикл приложения
 
 | Я хочу… | Открыть | Основной API |
 |---|---|---|
-| Создать native window и очистить frame | [Native Application](../guides/application.md) | `Application`, `WindowConfig`, `ClearColor` |
-| Создать игру с ECS world | [Game lifecycle](../guides/game-lifecycle.md) | `Game`, `GamePlugin`, `GameSchedule` |
-| Выполнять fixed-step simulation | [Game lifecycle](../guides/game-lifecycle.md#fixed-update) | `FixedUpdateConfig`, `FixedTime` |
+| Пройти обучение с нуля | [Учебный путь](../tutorials/learning-path.md) | tutorials 1–4 |
+| Создать native window и очистить frame | [Tutorial окно](../tutorials/first-window.md), [Application](../guides/application.md) | `Application`, `WindowConfig`, `ClearColor` |
+| Создать игру с ECS world | [Tutorial Game](../tutorials/first-game.md), [Game lifecycle](../guides/game-lifecycle.md) | `Game`, `GamePlugin`, `GameSchedule` |
+| Выполнять fixed-step simulation | [Game lifecycle](../guides/game-lifecycle.md) | `FixedUpdateConfig`, `FixedTime` |
 | Выполнить CPU-задачу в фоне | [Tasks](../guides/tasks.md) | `TaskPool`, `Task<T>` |
 | Показать native UI | [Native UI](../guides/native-ui.md) | `ApplicationUi`, `UiBuilder`, `UiTokens` |
 | Встроить локальную HTML-страницу | [WebView](../guides/webview-windows.md) | `ApplicationWebView` |
@@ -23,7 +27,7 @@ module. Ссылки ведут на guide с lifecycle, полным приме
 | Я хочу… | Открыть | Основной API |
 |---|---|---|
 | **Изменить размер, позицию или поворот модели** | **[3D object cookbook](../guides/3d-objects-transforms.md)**, [hierarchy и collision](../guides/3d-transforms.md) | `Transform3d`, `LocalTransform3d` |
-| Загрузить glTF/GLB без остановки окна | [Streamed glTF scene](../guides/streamed-gltf-scene.md) | `GltfSceneLoad`, `LoadedGltfScene` |
+| Загрузить glTF/GLB без остановки окна | [Tutorial glTF](../tutorials/load-gltf-scene.md), [Streamed glTF](../guides/streamed-gltf-scene.md) | `GltfSceneLoad`, `LoadedGltfScene` |
 | Импортировать glTF вручную | [glTF import](../guides/gltf-import.md) | `ImportOptions`, `import_scene_path` |
 | Создать procedural mesh/model | [Model assets](../guides/model-assets.md) | `Model`, `Mesh`, `MeshPrimitive` |
 | Показать сцену стандартным renderer | [Game3dScene](../guides/game-3d-scene.md) | `Game3dScene`, `Game3dSceneConfig` |
@@ -39,11 +43,12 @@ module. Ссылки ведут на guide с lifecycle, полным приме
 
 | Я хочу… | Открыть | Основной API |
 |---|---|---|
+| Собрать первый 2D playable | [Tutorial 2D](../tutorials/first-2d-playable.md) | `Game2dScene`, `Sprite2d`, `PlayableLoop2d` |
 | Нарисовать sprite | [Sprites and animation](../guides/sprites-and-animation.md) | `Sprite2d`, `TextureRegion` |
 | Создать sprite sheet/atlas | [ECS sprite atlas](../guides/ecs-sprite-atlas.md) | `SpriteSheet`, `AnimatedSprite2d` |
-| Проиграть animation | [ECS animation](../guides/ecs-sprite-animation.md) | `SpriteAnimationState` |
+| Проиграть animation | [ECS animation](../guides/ecs-sprite-animation.md) | `AnimatedSprite2d`, `step_sprite_animations_2d` |
 | Отсечь sprites вне камеры | [Sprite viewport culling](../guides/sprite-viewport-culling.md) | `SpriteViewport2d` |
-| Построить tilemap | [Tilemaps](../guides/tilemaps.md) | `TileMap2d`, `TileViewport2d` |
+| Построить tilemap / Tiled | [Tilemaps](../guides/tilemaps.md) | `TileMap2d`, `yuyib::tiled` |
 | Добавить collision/controller к tilemap | [Tilemap kinematic physics](../guides/tilemap-kinematic-physics.md) | `KinematicSpriteController2d` |
 | Обработать click/touch по entity | [2D interaction](../guides/interaction-2d.md) | `request_pointer_interaction_2d` |
 

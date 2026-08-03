@@ -91,9 +91,17 @@ moving-platform carry policy; dynamic prop interactions beyond kinematic query.
 
 `Camera2d` существует; high-level `CameraFollow2d` /
 `PlayableLoop2d` (Deep 2D A) закрывают follow + WASD kinematic loop.
-Bounds, zoom/pan/shake и screen↔world conversion ещё не объединены в одну
-расширенную policy API. Keyboard adapter также общий; gamepad/touch virtual
-controls отсутствуют.
+**`WorldBounds2d` + `CameraFollow2d::with_bounds` / `apply_with_surface`**
+клампят viewport внутри map AABB. **Zoom / pan / shake** — `with_zoom` +
+`with_base_pixels_per_unit`, `with_pan` / `set_pan`, trauma
+[`CameraShake2d`]. **Cinematic** — `with_smoothing` + `with_look_ahead_scale`
++ [`CameraFollowRuntime2d`] / `apply_cinematic` (loops тикают каждый step).
+Multi-camera / scripted cuts: [`CameraDirector2d`] + [`CameraCut2d`]
+(timed smoothstep blend). Keyboard adapter также общий; analog sticks —
+`VirtualStick2d` + `set_external_move_axis`; **`InteractionPrompt2d`**
+(cursor/label/highlight из `WorldInteractionState`). Analog sticks —
+`VirtualStick2d` + optional **`GilrsGamepadAdapter2d`** (feature `gamepad`).
+`TileNavGrid2d` — 4-connected A* over `!solid`.
 
 2D pointer interaction уже есть, но не связан с render picking, layers и
 camera transform. Явный `screen_to_world` низкого API нужен до автоматических
@@ -101,18 +109,25 @@ click-to-move систем.
 
 ### Приоритет 6 — карты редакторов
 
-**Started (M7 objects / locations / composer / external `.tsj`):** `yuyib-tiled`
-импортирует orthogonal Tiled JSON (embedded **или** external JSON tileset via
-host-resolved `ExternalTilesetBytes` / `import_map_with_external_tilesets`), one
-visual tile layer, `solid` tile property and/or `collision` layer, `objectgroup`
-point/rect + bounded properties → `ImportedTiledMap` → `bind_texture` →
-`TileMap2d` + `TileCollision2d` + object layers. `LocationStack2d` push/pop;
-`TileMapComposer2d` fill/stamp/border. Smoke: `tiled_map_2d_smoke` (embedded +
-external), `location_stack_2d_smoke`; windowed `two_d_tiled_playable`.
+**Started (M7: Tiled JSON/TMX + LDtk):** `yuyib-tiled` — orthogonal JSON or
+TMX (embedded or external `.tsj`/`.tsx`; CSV / XML `<tile gid>` / **base64 +
+zlib/gzip/zstd**), **N tilesets**, **N visual layers**, `collision`/`solid`,
+`objectgroup` (**point/rect/ellipse/polygon**), GID flips → `TileFlip2d`,
+**layer parallax**, **tile `animation` → `TileRegionAnimation2d`**.
+`LdtkProjectImporter` — square `tileGridSize` (format), `Tiles`/`AutoLayer` +
+`IntGrid` + `Entities`, **embedded or host-resolved `.ldtkl`**, **multi-tileset**,
+**layer pixel offsets** + **`LdtkWorld2d`**. `LocationStack2d`;
+`TileMapComposer2d`; **`TileNavGrid2d`**. Smokes + `two_d_tiled_playable`.
 
-Ещё нет: TMX/TSX XML, multi-tileset/multi-texture, flip flags,
-ellipse/polygon/tile-gid objects, parallax, tile animation из Tiled,
-navigation, LDtk. Interpretation object classes остаётся game plugin (RFC 0002).
+Ещё нет: polyline/tile-gid objects. LDtk tiles are square by format
+(non-square → use Tiled). Layer offsets, parallax, world layout, tile anim,
+nav, gilrs (`gamepad` feature) supported. Interaction prompt:
+`InteractionPrompt2d`. Interpretation object/entity classes остаётся game
+plugin (RFC 0002).
+
+**UI LL (M6):** visuals / image extract / scroll drag. **Dialogue HL:**
+`DialogueSession` + `StoryFlags` + `dialogue_overlay_tree` (JSON asset later).
+Open: GPU textured UI, inertia, IME, a11y.
 
 ## Правило дальнейшего развития
 

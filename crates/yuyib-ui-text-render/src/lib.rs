@@ -26,6 +26,7 @@ use cosmic_text::{
     CacheKey, CacheKeyFlags, FontSystem, SwashCache, SwashContent,
     fontdb::{Database, ID, Weight},
 };
+use wgpu::util::DeviceExt;
 use yuyib_render::{RenderFrame, Renderer, wgpu};
 use yuyib_ui_text::{FontSource, PositionedGlyph, ShapedText};
 
@@ -611,13 +612,12 @@ pub struct TextGlyphDrawStats {
 ///
 /// The renderer is deliberately independent from retained UI: callers upload
 /// a [`GlyphAtlas`] and submit the matching [`TextDrawList`] with an explicit
-/// viewport. It owns reusable pipeline and vertex-buffer state, while
-/// [`GpuGlyphAtlas`] owns the GPU texture/bind group.
+/// viewport. It owns reusable pipeline state, while [`GpuGlyphAtlas`] owns the
+/// GPU texture/bind group. Vertex uploads use per-draw buffers so multiple
+/// clipped batches in one frame cannot overwrite each other before submit.
 pub struct TextGlyphRenderer {
     pipeline: wgpu::RenderPipeline,
     atlas_bind_group_layout: wgpu::BindGroupLayout,
-    vertex_buffer: Option<wgpu::Buffer>,
-    vertex_capacity: u32,
 }
 
 impl TextGlyphRenderer {
@@ -730,6 +730,11 @@ impl TextGlyphRenderer {
     /// converted to a bounded WGPU scissor; a zero-sized/outside clip emits no
     /// pass. This method does not update atlas pixels.
     ///
+    /// Vertex data is uploaded into a **fresh** buffer for this call. Callers
+    /// may issue several [`Self::draw`] calls in one frame (for example one
+    /// batch per scroll clip) without the later upload stomping geometry that
+    /// an earlier unsubmitted pass still references.
+    ///
     /// # Errors
     ///
     /// Returns validation errors before GPU recording for mismatched atlas
@@ -748,16 +753,21 @@ impl TextGlyphRenderer {
         }
         let vertices = u32::try_from(prepared.vertices.len())
             .map_err(|_| TextGpuRenderError::TooManyVertices)?;
-        self.ensure_vertex_capacity(frame.device(), vertices);
-        let Some(vertex_buffer) = self.vertex_buffer.as_ref() else {
-            return Err(TextGpuRenderError::RendererStateUnavailable);
-        };
-        frame
-            .queue()
-            .write_buffer(vertex_buffer, 0, bytemuck::cast_slice(&prepared.vertices));
         let Some(scissor) = prepared.scissor else {
             return Ok(TextGlyphDrawStats::default());
         };
+        // Per-draw buffer: a reused mapped buffer rewritten between
+        // `with_surface_pass` calls is unsafe — later `queue.write_buffer`
+        // overwrites vertices still referenced by earlier unsubmitted passes
+        // (titles/scroll vanished; only the last clip batch stayed visible).
+        let vertex_buffer =
+            frame
+                .device()
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("yuyib UI glyph vertices"),
+                    contents: bytemuck::cast_slice(&prepared.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
         frame.with_surface_pass(wgpu::LoadOp::Load, |pass| {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &gpu_atlas.bind_group, &[]);
@@ -860,23 +870,7 @@ impl TextGlyphRenderer {
         Self {
             pipeline,
             atlas_bind_group_layout,
-            vertex_buffer: None,
-            vertex_capacity: 0,
         }
-    }
-
-    fn ensure_vertex_capacity(&mut self, device: &wgpu::Device, required: u32) {
-        if required <= self.vertex_capacity {
-            return;
-        }
-        let capacity = required.checked_next_power_of_two().unwrap_or(required);
-        self.vertex_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("yuyib UI glyph vertices"),
-            size: u64::from(capacity) * size_of::<GlyphVertex>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        self.vertex_capacity = capacity;
     }
 }
 
@@ -921,7 +915,7 @@ impl TextRasterizer {
         if faces.is_empty() {
             return Err(TextRenderError::InvalidFontData);
         }
-        let font_system = FontSystem::new_with_locale_and_db(String::from("en-US"), database);
+        let font_system = FontSystem::new_with_locale_and_db(String::from("ru-RU"), database);
         Ok(Self {
             font_system,
             faces,
@@ -1919,5 +1913,179 @@ mod tests {
                 limit: 1
             })
         ));
+    }
+
+    #[test]
+    fn offscreen_glyph_pass_writes_visible_pixels() {
+        const FONT: &str = r"C:\Windows\Fonts\segoeui.ttf";
+        if !std::path::Path::new(FONT).is_file() {
+            return;
+        }
+
+        let mut engine = yuyib_ui_text::TextEngine::from_source(
+            FontSource::file(FONT),
+            yuyib_ui_text::TextLimits::default(),
+        )
+        .expect("engine");
+        let mut rasterizer =
+            TextRasterizer::from_source(FontSource::file(FONT), GlyphAtlasConfig::default())
+                .expect("rasterizer");
+        let shaped = engine
+            .shape(
+                "HiЖ",
+                yuyib_ui_text::TextLayoutOptions {
+                    font_size: 32.0,
+                    line_height: 40.0,
+                    max_width: Some(200.0),
+                    ..Default::default()
+                },
+            )
+            .expect("shape");
+        let text_frame = rasterizer
+            .rasterize(
+                &shaped,
+                TextColor {
+                    red: 1.0,
+                    green: 1.0,
+                    blue: 1.0,
+                    alpha: 1.0,
+                },
+            )
+            .expect("rasterize");
+        assert!(
+            !text_frame.draw_list().quads().is_empty(),
+            "expected CPU glyph quads"
+        );
+
+        let mut gpu = yuyib_render::OffscreenRenderer::new(128, 64).expect("offscreen gpu");
+        let clear = yuyib_render::ClearColor::linear(0.0, 0.0, 0.0, 1.0);
+        let capture = gpu
+            .render_and_capture_rgba8(clear, |frame| {
+                let mut renderer = TextGlyphRenderer::new_for_frame(frame);
+                let mut atlas = renderer
+                    .upload_atlas(frame, rasterizer.atlas(), TextGlyphRenderLimits::default())
+                    .expect("upload atlas");
+                let translated = text_frame.draw_list().translated(8.0, 8.0);
+                let stats = renderer
+                    .draw(
+                        frame,
+                        &atlas,
+                        &translated,
+                        TextGlyphDrawOptions::new(TextViewport::new(0, 0, 128, 64)),
+                    )
+                    .expect("draw glyphs");
+                assert!(stats.quads > 0, "GPU draw recorded no quads");
+                let _ = &mut atlas;
+            })
+            .expect("capture");
+
+        let mut bright = 0_u32;
+        for pixel in capture.pixels().chunks_exact(4) {
+            if pixel[0] > 32 || pixel[1] > 32 || pixel[2] > 32 {
+                bright += 1;
+            }
+        }
+        assert!(
+            bright > 20,
+            "glyph pass left the target black (bright_pixels={bright})"
+        );
+    }
+
+    #[test]
+    fn multiple_clipped_draws_in_one_frame_keep_earlier_batch_pixels() {
+        const FONT: &str = r"C:\Windows\Fonts\segoeui.ttf";
+        if !std::path::Path::new(FONT).is_file() {
+            return;
+        }
+
+        let mut engine = yuyib_ui_text::TextEngine::from_source(
+            FontSource::file(FONT),
+            yuyib_ui_text::TextLimits::default(),
+        )
+        .expect("engine");
+        let mut rasterizer =
+            TextRasterizer::from_source(FontSource::file(FONT), GlyphAtlasConfig::default())
+                .expect("rasterizer");
+        let top = engine
+            .shape(
+                "TOP",
+                yuyib_ui_text::TextLayoutOptions {
+                    font_size: 28.0,
+                    line_height: 32.0,
+                    ..Default::default()
+                },
+            )
+            .expect("shape top");
+        let bottom = engine
+            .shape(
+                "BOT",
+                yuyib_ui_text::TextLayoutOptions {
+                    font_size: 28.0,
+                    line_height: 32.0,
+                    ..Default::default()
+                },
+            )
+            .expect("shape bottom");
+        let top_frame = rasterizer
+            .rasterize(&top, TextColor::white())
+            .expect("raster top");
+        let bottom_frame = rasterizer
+            .rasterize(&bottom, TextColor::white())
+            .expect("raster bottom");
+
+        let mut gpu = yuyib_render::OffscreenRenderer::new(160, 96).expect("offscreen gpu");
+        let clear = yuyib_render::ClearColor::linear(0.0, 0.0, 0.0, 1.0);
+        let capture = gpu
+            .render_and_capture_rgba8(clear, |frame| {
+                let mut renderer = TextGlyphRenderer::new_for_frame(frame);
+                let atlas = renderer
+                    .upload_atlas(frame, rasterizer.atlas(), TextGlyphRenderLimits::default())
+                    .expect("upload atlas");
+                let viewport = TextViewport::new(0, 0, 160, 96);
+                // Two uploads + two passes in one frame — the old reused vertex
+                // buffer lost the first batch before submit.
+                renderer
+                    .draw(
+                        frame,
+                        &atlas,
+                        &top_frame.draw_list().translated(8.0, 8.0),
+                        TextGlyphDrawOptions::new(viewport)
+                            .with_clip(Some(TextClipRect::new(0, 0, 160, 48))),
+                    )
+                    .expect("draw top");
+                renderer
+                    .draw(
+                        frame,
+                        &atlas,
+                        &bottom_frame.draw_list().translated(8.0, 56.0),
+                        TextGlyphDrawOptions::new(viewport)
+                            .with_clip(Some(TextClipRect::new(0, 48, 160, 48))),
+                    )
+                    .expect("draw bottom");
+            })
+            .expect("capture");
+
+        let mut top_bright = 0_u32;
+        let mut bottom_bright = 0_u32;
+        let width = capture.width() as usize;
+        for (index, pixel) in capture.pixels().chunks_exact(4).enumerate() {
+            if pixel[0] <= 32 && pixel[1] <= 32 && pixel[2] <= 32 {
+                continue;
+            }
+            let y = index / width;
+            if y < 48 {
+                top_bright += 1;
+            } else {
+                bottom_bright += 1;
+            }
+        }
+        assert!(
+            top_bright > 10,
+            "first clipped batch vanished (top_bright={top_bright}, bottom_bright={bottom_bright})"
+        );
+        assert!(
+            bottom_bright > 10,
+            "second clipped batch missing (top_bright={top_bright}, bottom_bright={bottom_bright})"
+        );
     }
 }

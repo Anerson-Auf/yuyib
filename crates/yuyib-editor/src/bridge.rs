@@ -55,6 +55,14 @@ pub enum EditorCommand {
     CargoCheck(CargoCheckRequest),
     ReadSource(SourceRequest),
     ChangeSource(SourceChangeRequest),
+    LspCompletion(LspPositionRequest),
+    LspHover(LspPositionRequest),
+    LspSignatureHelp(LspSignatureHelpRequest),
+    LspDefinition(LspPositionRequest),
+    LspReferences(LspReferencesRequest),
+    LspRename(LspRenameRequest),
+    LspCodeAction(LspCodeActionRequest),
+    LspExecuteCommand(LspExecuteCommandRequest),
     ListSources,
     SaveSource(SourceSaveRequest),
     SetSelection(SelectionRequest),
@@ -69,6 +77,9 @@ pub enum EditorCommand {
     CreateProjectInteractive(ProjectCreateRequest),
     OpenProjectPath(ProjectOpenRequest),
     RefreshAssetIndex,
+    CookProject,
+    ExportYpack(YpackExportRequest),
+    ImportYpack(YpackImportRequest),
     OpenAsset(AssetOpenRequest),
     ReimportAsset(AssetReimportRequest),
     TrackAsset(AssetTrackRequest),
@@ -115,6 +126,20 @@ pub struct ProjectCreateRequest {
 #[derive(Debug, Deserialize)]
 pub struct ProjectOpenRequest {
     pub path: String,
+}
+
+/// Optional output path for `project.export_ypack` (project-relative or absolute).
+#[derive(Debug, Default, Deserialize)]
+pub struct YpackExportRequest {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// Optional input path for `project.import_ypack` (project-relative or absolute).
+#[derive(Debug, Default, Deserialize)]
+pub struct YpackImportRequest {
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,12 +266,95 @@ pub struct SourceRequest {
     pub path: String,
 }
 
-/// Unsaved buffer sync for diagnostics-only rust-analyzer (`textDocument/didChange`).
+/// Unsaved buffer sync for rust-analyzer (`textDocument/didChange`).
 #[derive(Debug, Deserialize)]
 pub struct SourceChangeRequest {
     #[serde(alias = "relativePath")]
     pub path: String,
     pub content: String,
+}
+
+/// Monaco → LSP position request (`line`/`column` are 1-based like Monaco).
+#[derive(Debug, Deserialize)]
+pub struct LspPositionRequest {
+    pub request_id: String,
+    #[serde(alias = "relativePath")]
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// Monaco → LSP find-references (`line`/`column` 1-based).
+#[derive(Debug, Deserialize)]
+pub struct LspReferencesRequest {
+    pub request_id: String,
+    #[serde(alias = "relativePath")]
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    /// When omitted, defaults to including the declaration (LSP default for peek).
+    #[serde(default = "default_include_declaration")]
+    pub include_declaration: bool,
+}
+
+fn default_include_declaration() -> bool {
+    true
+}
+
+/// Monaco → LSP signature help (`line`/`column` 1-based).
+#[derive(Debug, Deserialize)]
+pub struct LspSignatureHelpRequest {
+    pub request_id: String,
+    #[serde(alias = "relativePath")]
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    /// LSP/Monaco trigger kind (1 Invoked, 2 TriggerCharacter, 3 ContentChange).
+    #[serde(default = "default_signature_trigger_kind")]
+    pub trigger_kind: u32,
+    #[serde(default)]
+    pub trigger_character: Option<String>,
+    #[serde(default)]
+    pub is_retrigger: bool,
+}
+
+fn default_signature_trigger_kind() -> u32 {
+    1
+}
+
+/// Monaco → LSP rename (`line`/`column` 1-based).
+#[derive(Debug, Deserialize)]
+pub struct LspRenameRequest {
+    pub request_id: String,
+    #[serde(alias = "relativePath")]
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub new_name: String,
+}
+
+/// Monaco → LSP codeAction (`*_line`/`*_column` 1-based like Monaco ranges).
+#[derive(Debug, Deserialize)]
+pub struct LspCodeActionRequest {
+    pub request_id: String,
+    #[serde(alias = "relativePath")]
+    pub path: String,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    /// Optional Monaco markers converted by the host into LSP diagnostics.
+    #[serde(default)]
+    pub diagnostics: Vec<serde_json::Value>,
+}
+
+/// Monaco → LSP `workspace/executeCommand` (allowlisted `rust-analyzer.*`).
+#[derive(Debug, Deserialize)]
+pub struct LspExecuteCommandRequest {
+    pub request_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub arguments: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,6 +619,30 @@ pub fn create_bridge(window: &Window) -> Result<BridgeBinding, Box<dyn Error>> {
         window,
         |_| EditorCommand::RefreshAssetIndex,
     )?;
+    register::<serde_json::Value, _>(
+        &mut router,
+        "project.cook",
+        &queue,
+        &dropped_commands,
+        window,
+        |_| EditorCommand::CookProject,
+    )?;
+    register::<YpackExportRequest, _>(
+        &mut router,
+        "project.export_ypack",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::ExportYpack,
+    )?;
+    register::<YpackImportRequest, _>(
+        &mut router,
+        "project.import_ypack",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::ImportYpack,
+    )?;
     register::<PreviewSelectionRequest, _>(
         &mut router,
         "preview.selection.set",
@@ -614,6 +746,70 @@ pub fn create_bridge(window: &Window) -> Result<BridgeBinding, Box<dyn Error>> {
         &dropped_commands,
         window,
         EditorCommand::ChangeSource,
+    )?;
+    register::<LspPositionRequest, _>(
+        &mut router,
+        "lsp.completion",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::LspCompletion,
+    )?;
+    register::<LspPositionRequest, _>(
+        &mut router,
+        "lsp.hover",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::LspHover,
+    )?;
+    register::<LspSignatureHelpRequest, _>(
+        &mut router,
+        "lsp.signatureHelp",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::LspSignatureHelp,
+    )?;
+    register::<LspPositionRequest, _>(
+        &mut router,
+        "lsp.definition",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::LspDefinition,
+    )?;
+    register::<LspReferencesRequest, _>(
+        &mut router,
+        "lsp.references",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::LspReferences,
+    )?;
+    register::<LspRenameRequest, _>(
+        &mut router,
+        "lsp.rename",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::LspRename,
+    )?;
+    register::<LspCodeActionRequest, _>(
+        &mut router,
+        "lsp.codeAction",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::LspCodeAction,
+    )?;
+    register::<LspExecuteCommandRequest, _>(
+        &mut router,
+        "lsp.executeCommand",
+        &queue,
+        &dropped_commands,
+        window,
+        EditorCommand::LspExecuteCommand,
     )?;
     register::<serde_json::Value, _>(
         &mut router,

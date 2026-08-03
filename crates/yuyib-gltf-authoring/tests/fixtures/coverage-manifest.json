@@ -926,7 +926,7 @@
           },
           "unit": "units",
           "read_only": false,
-          "apply_play_changes": true,
+          "apply_play_changes": false,
           "documentation": null,
           "source": null
         },
@@ -938,7 +938,7 @@
           },
           "unit": "units",
           "read_only": false,
-          "apply_play_changes": true,
+          "apply_play_changes": false,
           "documentation": null,
           "source": null
         },
@@ -950,7 +950,7 @@
           },
           "unit": "radians",
           "read_only": false,
-          "apply_play_changes": true,
+          "apply_play_changes": false,
           "documentation": null,
           "source": null
         },
@@ -1014,7 +1014,7 @@
           },
           "unit": "units",
           "read_only": false,
-          "apply_play_changes": true,
+          "apply_play_changes": false,
           "documentation": null,
           "source": null
         },

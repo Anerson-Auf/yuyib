@@ -2,6 +2,8 @@
 target/
 **/*.rs.bk
 *.pdb
+editor_tests/
+for_tests/
 
 # Editor UI (Node)
 editor-ui/node_modules/

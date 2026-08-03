@@ -46,5 +46,5 @@ API: [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).
 
 ## Deferred (do not block 2D)
 
-Live Rapier in default Play, shadow intents, LSP completion, project wizard,
-Play `AddComponent` for `model3d`/`parent3d`, prop↔prop selective collision.
+Shadow intents, cooked-only Play (no source importers),
+prop↔prop authored selective layers.

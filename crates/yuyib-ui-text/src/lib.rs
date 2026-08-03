@@ -321,7 +321,7 @@ impl TextEngine {
             .first()
             .cloned()
             .ok_or(TextError::InvalidFontData)?;
-        let font_system = FontSystem::new_with_locale_and_db(String::from("en-US"), database);
+        let font_system = FontSystem::new_with_locale_and_db(String::from("ru-RU"), database);
         Ok(Self {
             font_system,
             primary_family,

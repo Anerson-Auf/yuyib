@@ -336,14 +336,14 @@ fn register_component_schemas(registry: &mut AuthoringRegistry) -> Result<(), Re
                     widget: "yuyib.widget.texture-region".to_owned(),
                 },
             ))
-            .with_field(play_field("position", "Position", FieldKind::Vec2, "units"))
-            .with_field(play_field("size", "Size", FieldKind::Vec2, "units"))
-            .with_field(play_field(
-                "rotation_radians",
-                "Rotation",
-                FieldKind::F32,
-                "radians",
-            ))
+            .with_field(
+                FieldDescriptor::new("position", "Position", FieldKind::Vec2).with_unit("units"),
+            )
+            .with_field(FieldDescriptor::new("size", "Size", FieldKind::Vec2).with_unit("units"))
+            .with_field(
+                FieldDescriptor::new("rotation_radians", "Rotation", FieldKind::F32)
+                    .with_unit("radians"),
+            )
             .with_field(FieldDescriptor::new("tint", "Tint", FieldKind::Color))
             .with_field(FieldDescriptor::new("layer", "Layer", FieldKind::I32)),
         component(ids::ANIMATED_SPRITE_2D, ids::ANIMATED_SPRITE_2D).with_field(
@@ -363,7 +363,9 @@ fn register_component_schemas(registry: &mut AuthoringRegistry) -> Result<(), Re
                     widget: "yuyib.widget.tile-map".to_owned(),
                 },
             ))
-            .with_field(play_field("position", "Position", FieldKind::Vec2, "units"))
+            .with_field(
+                FieldDescriptor::new("position", "Position", FieldKind::Vec2).with_unit("units"),
+            )
             .with_field(FieldDescriptor::new("layer", "Layer", FieldKind::I32))
             .with_field(FieldDescriptor::new("visible", "Visible", FieldKind::Bool)),
         component(
@@ -770,6 +772,25 @@ mod tests {
                 .expect("parent coverage")
                 .surfaces()
                 .contains(&CoverageStatus::Visual)
+        );
+        let sprite = registry
+            .component(&component_id(ids::SPRITE_2D))
+            .expect("sprite schema");
+        assert!(
+            sprite
+                .fields()
+                .iter()
+                .all(|field| !field.applies_play_changes()),
+            "Unavailable 2D schemas must not advertise Apply Play until Visual"
+        );
+        let tile_map = registry
+            .component(&component_id(ids::TILE_MAP_2D))
+            .expect("tile map schema");
+        assert!(
+            tile_map
+                .fields()
+                .iter()
+                .all(|field| !field.applies_play_changes())
         );
     }
 }

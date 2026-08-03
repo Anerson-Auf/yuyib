@@ -9,10 +9,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use yuyib_assets::ImporterRegistryLimits;
+use yuyib_assets::{CookCache, ImporterRegistryLimits};
+use uuid::Uuid;
 use yuyib_authoring::{
-    AssetGuid, ContentHash, ImportSettingsSchemaId, PreviewCacheKey, PreviewCancellation,
-    PreviewMaterialOverride, PreviewRequest, SchemaVersion,
+    AssetGuid, CapabilityId, ContentHash, ImportSettingsSchemaId, PreviewAdapter, PreviewArtifact,
+    PreviewCache, PreviewCacheError, PreviewCacheKey, PreviewCancellation, PreviewMaterialOverride,
+    PreviewRequest, SchemaVersion,
 };
 use yuyib_editor_core::hash_asset_file;
 use yuyib_game_3d::{
@@ -45,6 +47,112 @@ const EDITOR_UPLOAD_BUDGET: ModelUploadBudget3d = ModelUploadBudget3d {
     target_geometry_bytes: 64 * 1024 * 1024,
 };
 
+/// DNS namespace UUID for stable synthetic preview AssetGuids (untracked sources).
+const PREVIEW_ASSET_NAMESPACE: Uuid = Uuid::from_bytes([
+    0x79, 0x75, 0x79, 0x69, 0x62, 0x2e, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x61, 0x73,
+]);
+
+/// Multi-entry host parking for CPU-ready glTF preview scenes.
+///
+/// Keeps decoded [`LoadedGltfScene`] values under the adapter [`PreviewCachePolicy`]
+/// so switching A→B→A can restore without re-running the importer. Only one
+/// [`GltfPreviewSession`] is GPU-resident at a time.
+pub struct HostGltfPreviewStore {
+    cache: PreviewCache,
+}
+
+/// CPU-ready preview payload removed from an active session for host parking.
+pub struct ParkedGltfPreview {
+    key: PreviewCacheKey,
+    asset: AssetGuid,
+    /// Project-relative path that was parked (logging / diagnostics).
+    pub relative_path: String,
+    loaded: LoadedGltfScene,
+    cpu_bytes: u64,
+}
+
+impl HostGltfPreviewStore {
+    /// Empty store with the same policy as [`GltfPreviewAdapter`] (max 8 entries).
+    #[must_use]
+    pub fn new() -> Self {
+        let policy = GltfPreviewAdapter::new().descriptor().cache();
+        Self {
+            cache: PreviewCache::new(policy),
+        }
+    }
+
+    /// Drops every parked entry (project close / root change).
+    pub fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Number of parked CPU scenes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Whether the store has no parked scenes.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
+    /// Whether `key` is currently parked.
+    #[must_use]
+    pub fn contains(&self, key: &PreviewCacheKey) -> bool {
+        self.cache.contains(key)
+    }
+
+    /// Inserts a parked CPU scene, evicting LRU entries per policy.
+    ///
+    /// # Errors
+    ///
+    /// Forwards [`PreviewCacheError`] when the artifact cannot fit the budget.
+    pub fn park(&mut self, parked: ParkedGltfPreview) -> Result<(), PreviewCacheError> {
+        let capability = CapabilityId::new("yuyib.gltf-preview").expect("stable capability id");
+        let artifact = PreviewArtifact::new(
+            parked.asset,
+            capability,
+            parked.cpu_bytes,
+            0,
+            parked.loaded,
+        );
+        self.cache.insert(parked.key, artifact)
+    }
+
+    /// Removes and returns a parked CPU scene (cache hit + consume).
+    pub fn take(&mut self, key: &PreviewCacheKey) -> Option<LoadedGltfScene> {
+        let artifact = self.cache.take(key)?;
+        match artifact.downcast::<LoadedGltfScene>() {
+            Ok(loaded) => Some(loaded),
+            Err(_wrong_type) => None,
+        }
+    }
+}
+
+impl Default for HostGltfPreviewStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Stable [`AssetGuid`] for preview cache keys: tracked guid when known, else UUID v5 of path.
+#[must_use]
+pub fn preview_asset_guid(tracked: Option<&str>, relative_path: &str) -> AssetGuid {
+    if let Some(raw) = tracked {
+        if let Ok(guid) = raw.parse::<AssetGuid>() {
+            return guid;
+        }
+    }
+    let normalized = relative_path.replace('\\', "/");
+    AssetGuid::from_uuid(Uuid::new_v5(
+        &PREVIEW_ASSET_NAMESPACE,
+        normalized.as_bytes(),
+    ))
+}
+
 /// One in-flight or resident glTF preview.
 pub struct GltfPreviewSession {
     relative_path: String,
@@ -64,6 +172,10 @@ pub struct GltfPreviewSession {
     skeletal_gpu: Option<GltfAnimationPreviewGpu>,
     loading: Option<GltfSceneLoad>,
     ready: Option<LoadedGltfScene>,
+    /// Disk cook root (`.yuyib_cook`); `None` disables cook lookup for this session.
+    cook_root: Option<PathBuf>,
+    /// Set when a production load finishes; `None` for parked restore / not yet loaded.
+    last_cook_hit: Option<bool>,
     gpu_ready: bool,
     gpu_event_sent: bool,
     last_gpu: Option<GltfSceneGpuProgress>,
@@ -125,6 +237,8 @@ pub struct GltfPreviewPoll {
     pub total: u64,
     /// CPU import finished and scene is in memory (may still be uploading to GPU).
     pub cpu_ready: bool,
+    /// Disk cook hit for the load that just became CPU-ready (`None` if unknown).
+    pub cook_hit: Option<bool>,
     pub failed: Option<String>,
 }
 
@@ -171,13 +285,38 @@ impl GltfPreviewSession {
         relative_path: impl Into<String>,
         import_settings: &Value,
     ) -> Result<Self, GltfPreviewError> {
+        Self::start_with_settings_and_asset(
+            project_root,
+            asset_root,
+            relative_path,
+            import_settings,
+            AssetGuid::new(),
+            None,
+        )
+    }
+
+    /// Starts import with a stable [`AssetGuid`] (tracked or synthetic) for cache keys.
+    ///
+    /// When `cook_root` is set, the load uses the production disk cook cache
+    /// (same `.yuyib_cook` as `project.cook` / ypack hydrate).
+    ///
+    /// # Errors
+    ///
+    /// Returns path, settings, or load-start failures.
+    pub fn start_with_settings_and_asset(
+        project_root: &Path,
+        asset_root: &str,
+        relative_path: impl Into<String>,
+        import_settings: &Value,
+        asset: AssetGuid,
+        cook_root: Option<&Path>,
+    ) -> Result<Self, GltfPreviewError> {
         let relative_path = relative_path.into();
         let absolute_path = resolve_asset_path(project_root, asset_root, &relative_path)?;
         if !absolute_path.is_file() {
             return Err(GltfPreviewError::MissingFile(absolute_path));
         }
         let adapter = GltfPreviewAdapter::new();
-        let asset = AssetGuid::new();
         let content_hash = hash_asset_file(&absolute_path).ok();
         let cache_key = session_cache_key(
             &adapter,
@@ -186,7 +325,8 @@ impl GltfPreviewSession {
             content_hash,
             import_settings,
         );
-        let loading = start_load(&absolute_path, import_settings)?;
+        let cook_root = cook_root.map(Path::to_path_buf);
+        let loading = start_load(&absolute_path, import_settings, cook_root.as_deref())?;
         Ok(Self {
             relative_path,
             absolute_path,
@@ -201,10 +341,121 @@ impl GltfPreviewSession {
             skeletal_gpu: None,
             loading: Some(loading),
             ready: None,
+            cook_root,
+            last_cook_hit: None,
             gpu_ready: false,
             gpu_event_sent: false,
             last_gpu: None,
         })
+    }
+
+    /// Restores a session from a parked CPU scene (skip importer). GPU upload runs on draw.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the path escapes the project root or the file is missing.
+    pub fn from_cpu_ready(
+        project_root: &Path,
+        asset_root: &str,
+        relative_path: impl Into<String>,
+        import_settings: &Value,
+        asset: AssetGuid,
+        loaded: LoadedGltfScene,
+        cook_root: Option<&Path>,
+    ) -> Result<Self, GltfPreviewError> {
+        let relative_path = relative_path.into();
+        let absolute_path = resolve_asset_path(project_root, asset_root, &relative_path)?;
+        if !absolute_path.is_file() {
+            return Err(GltfPreviewError::MissingFile(absolute_path));
+        }
+        let adapter = GltfPreviewAdapter::new();
+        let content_hash = hash_asset_file(&absolute_path).ok();
+        let cache_key = session_cache_key(
+            &adapter,
+            asset,
+            &relative_path,
+            content_hash,
+            import_settings,
+        );
+        Ok(Self {
+            relative_path,
+            absolute_path,
+            asset,
+            import_settings: import_settings.clone(),
+            last_cache_key: Some(cache_key),
+            selected_mesh: None,
+            selected_material: None,
+            selected_animation: None,
+            material_override: None,
+            animation_player: None,
+            skeletal_gpu: None,
+            loading: None,
+            ready: Some(loaded),
+            cook_root: cook_root.map(Path::to_path_buf),
+            last_cook_hit: None,
+            gpu_ready: false,
+            gpu_event_sent: false,
+            last_gpu: None,
+        })
+    }
+
+    /// Policy cache key for the current path / settings / content hash (for store lookup).
+    #[must_use]
+    pub fn cache_key_for(
+        relative_path: &str,
+        absolute_path: &Path,
+        import_settings: &Value,
+        asset: AssetGuid,
+    ) -> PreviewCacheKey {
+        let adapter = GltfPreviewAdapter::new();
+        let content_hash = hash_asset_file(absolute_path).ok();
+        session_cache_key(
+            &adapter,
+            asset,
+            relative_path,
+            content_hash,
+            import_settings,
+        )
+    }
+
+    /// Removes the CPU-ready scene for host parking. Clears GPU residency flags.
+    #[must_use]
+    pub fn park_cpu_ready(&mut self) -> Option<ParkedGltfPreview> {
+        let key = self.last_cache_key.clone()?;
+        let loaded = self.ready.take()?;
+        self.gpu_ready = false;
+        self.gpu_event_sent = false;
+        self.last_gpu = None;
+        self.skeletal_gpu = None;
+        self.animation_player = None;
+        let cpu_bytes = std::fs::metadata(&self.absolute_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        Some(ParkedGltfPreview {
+            key,
+            asset: self.asset,
+            relative_path: self.relative_path.clone(),
+            loaded,
+            cpu_bytes,
+        })
+    }
+
+    /// Persistent asset identity used for preview cache keys.
+    #[must_use]
+    pub const fn asset_guid(&self) -> AssetGuid {
+        self.asset
+    }
+
+    /// Whether the last production load hit the disk cook cache.
+    #[must_use]
+    pub const fn last_cook_hit(&self) -> Option<bool> {
+        self.last_cook_hit
+    }
+
+    /// Last policy cache key (present after start / restore).
+    #[must_use]
+    pub fn last_cache_key(&self) -> Option<&PreviewCacheKey> {
+        self.last_cache_key.as_ref()
     }
 
     /// Non-destructive reimport: keeps the last-good CPU scene until the new
@@ -233,10 +484,15 @@ impl GltfPreviewSession {
         if self.ready.is_some() && self.last_cache_key.as_ref() == Some(&cache_key) {
             return Ok(GltfPreviewReimport::CacheHit);
         }
-        let loading = start_load(&self.absolute_path, import_settings)?;
+        let loading = start_load(
+            &self.absolute_path,
+            import_settings,
+            self.cook_root.as_deref(),
+        )?;
         self.loading = Some(loading);
         self.import_settings = import_settings.clone();
         self.last_cache_key = Some(cache_key);
+        self.last_cook_hit = None;
         // Keep ready / gpu_ready until the new load publishes successfully.
         Ok(GltfPreviewReimport::Started)
     }
@@ -537,6 +793,7 @@ impl GltfPreviewSession {
                 completed: 1,
                 total: 1,
                 cpu_ready: true,
+                cook_hit: self.last_cook_hit,
                 failed: None,
             };
         }
@@ -546,6 +803,7 @@ impl GltfPreviewSession {
             completed: 0,
             total: 0,
             cpu_ready: false,
+            cook_hit: self.last_cook_hit,
             failed: Some("preview session has no active load".to_owned()),
         }
     }
@@ -559,6 +817,7 @@ impl GltfPreviewSession {
                 completed: 0,
                 total: 0,
                 cpu_ready: had_ready,
+                cook_hit: self.last_cook_hit,
                 failed: Some("preview session has no active load".to_owned()),
             };
         };
@@ -584,6 +843,7 @@ impl GltfPreviewSession {
                 completed: progress.completed_work,
                 total: progress.total_work.max(1),
                 cpu_ready: self.ready.is_some(),
+                cook_hit: self.last_cook_hit,
                 failed: Some(failed),
             };
         }
@@ -592,6 +852,7 @@ impl GltfPreviewSession {
                 Ok(loaded) => {
                     self.loading = None;
                     let mut loaded = loaded;
+                    let cook_hit = loaded_had_cook_hit(&loaded);
                     if let Err(error) = self.apply_material_override(&mut loaded) {
                         return GltfPreviewPoll {
                             relative_path: self.relative_path.clone(),
@@ -599,9 +860,11 @@ impl GltfPreviewSession {
                             completed: progress.completed_work,
                             total: progress.total_work.max(1),
                             cpu_ready: self.ready.is_some(),
+                            cook_hit: self.last_cook_hit,
                             failed: Some(error.to_string()),
                         };
                     }
+                    self.last_cook_hit = Some(cook_hit);
                     self.skeletal_gpu = loaded
                         .take_skeletal_prepared()
                         .map(GltfAnimationPreviewGpu::new);
@@ -652,6 +915,7 @@ impl GltfPreviewSession {
                         completed: progress.completed_work.max(1),
                         total: progress.total_work.max(1),
                         cpu_ready: true,
+                        cook_hit: Some(cook_hit),
                         failed: None,
                     };
                 }
@@ -663,6 +927,7 @@ impl GltfPreviewSession {
                         completed: progress.completed_work,
                         total: progress.total_work.max(1),
                         cpu_ready: self.ready.is_some(),
+                        cook_hit: self.last_cook_hit,
                         failed: Some(error.to_string()),
                     };
                 }
@@ -674,6 +939,7 @@ impl GltfPreviewSession {
             completed: progress.completed_work,
             total: progress.total_work.max(1),
             cpu_ready: self.ready.is_some(),
+            cook_hit: self.last_cook_hit,
             failed: None,
         }
     }
@@ -906,7 +1172,12 @@ impl GltfPreviewSession {
     }
 
     fn force_reimport(&mut self) -> Result<(), GltfPreviewError> {
-        self.loading = Some(start_load(&self.absolute_path, &self.import_settings)?);
+        self.loading = Some(start_load(
+            &self.absolute_path,
+            &self.import_settings,
+            self.cook_root.as_deref(),
+        )?);
+        self.last_cook_hit = None;
         self.gpu_ready = false;
         self.gpu_event_sent = false;
         self.last_gpu = None;
@@ -1157,19 +1428,30 @@ impl Error for GltfPreviewError {}
 fn start_load(
     absolute_path: &Path,
     import_settings: &Value,
+    cook_root: Option<&Path>,
 ) -> Result<GltfSceneLoad, GltfPreviewError> {
     let settings = parse_import_settings(import_settings)
         .map_err(|error| GltfPreviewError::Settings(error.to_string()))?;
     let options = settings.to_import_options();
-    let config = GltfSceneLoadConfig::default()
+    let mut config = GltfSceneLoadConfig::default()
         .with_import_options(options)
         .with_importer_registry_limits(ImporterRegistryLimits {
             max_source_bytes: EDITOR_PREVIEW_MAX_SOURCE_BYTES,
             ..ImporterRegistryLimits::default()
         })
         .with_static_collider(false);
+    if let Some(root) = cook_root {
+        config = config.with_cook_cache(CookCache::new(root));
+    }
     GltfSceneLoad::start(absolute_path, config)
         .map_err(|error| GltfPreviewError::Start(error.to_string()))
+}
+
+fn loaded_had_cook_hit(loaded: &LoadedGltfScene) -> bool {
+    loaded
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.code == "gltf-cook-cache-hit")
 }
 
 fn session_cache_key(
@@ -1350,5 +1632,321 @@ fn resolve_asset_path(
             detail: "resolved path left the project root".to_owned(),
         }),
         Err(_) => Ok(joined),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use yuyib_gltf_authoring::default_settings_json;
+
+    fn temporary_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "yuyib_preview_store_{label}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("assets/models")).expect("dirs");
+        root
+    }
+
+    fn valid_triangle_glb() -> Vec<u8> {
+        let mut binary = Vec::new();
+        binary.extend([0_u16, 1, 2].into_iter().flat_map(u16::to_le_bytes));
+        binary.extend([0_u8; 2]);
+        for position in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            binary.extend(position.into_iter().flat_map(f32::to_le_bytes));
+        }
+        let json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"root","mesh":0}],"buffers":[{"byteLength":44}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":6},{"buffer":0,"byteOffset":8,"byteLength":36}],"accessors":[{"bufferView":0,"componentType":5123,"count":3,"type":"SCALAR"},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],"meshes":[{"primitives":[{"attributes":{"POSITION":1},"indices":0}]}]}"#;
+        let mut padded_json = json.to_vec();
+        while !padded_json.len().is_multiple_of(4) {
+            padded_json.push(b' ');
+        }
+        while !binary.len().is_multiple_of(4) {
+            binary.push(0);
+        }
+        let total = 12 + 8 + padded_json.len() + 8 + binary.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend(b"glTF");
+        glb.extend(2_u32.to_le_bytes());
+        glb.extend(u32::try_from(total).expect("glb size").to_le_bytes());
+        glb.extend(u32::try_from(padded_json.len()).expect("json size").to_le_bytes());
+        glb.extend(0x4E4F_534A_u32.to_le_bytes());
+        glb.extend(padded_json);
+        glb.extend(u32::try_from(binary.len()).expect("bin size").to_le_bytes());
+        glb.extend(0x004E_4942_u32.to_le_bytes());
+        glb.extend(binary);
+        glb
+    }
+
+    /// Triangle + two TRS translation clips (`bob`, `shift`) for selection tests.
+    /// Requires skeletal / skeletal_preview import policy (Strict rejects animations).
+    fn animated_triangle_glb() -> Vec<u8> {
+        let mut binary = Vec::new();
+        binary.extend([0_u16, 1, 2].into_iter().flat_map(u16::to_le_bytes));
+        binary.extend([0_u8; 2]);
+        for position in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            binary.extend(position.into_iter().flat_map(f32::to_le_bytes));
+        }
+        binary.extend([0.0_f32, 1.0].into_iter().flat_map(f32::to_le_bytes));
+        for translation in [[0.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            binary.extend(translation.into_iter().flat_map(f32::to_le_bytes));
+        }
+        assert_eq!(binary.len(), 76);
+        let json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"root","mesh":0}],"buffers":[{"byteLength":76}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":6},{"buffer":0,"byteOffset":8,"byteLength":36},{"buffer":0,"byteOffset":44,"byteLength":8},{"buffer":0,"byteOffset":52,"byteLength":24}],"accessors":[{"bufferView":0,"componentType":5123,"count":3,"type":"SCALAR"},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},{"bufferView":2,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},{"bufferView":3,"componentType":5126,"count":2,"type":"VEC3"}],"meshes":[{"primitives":[{"attributes":{"POSITION":1},"indices":0}]}],"animations":[{"name":"bob","samplers":[{"input":2,"output":3,"interpolation":"LINEAR"}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]},{"name":"shift","samplers":[{"input":2,"output":3,"interpolation":"LINEAR"}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]}"#;
+        let mut padded_json = json.to_vec();
+        while !padded_json.len().is_multiple_of(4) {
+            padded_json.push(b' ');
+        }
+        while !binary.len().is_multiple_of(4) {
+            binary.push(0);
+        }
+        let total = 12 + 8 + padded_json.len() + 8 + binary.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend(b"glTF");
+        glb.extend(2_u32.to_le_bytes());
+        glb.extend(u32::try_from(total).expect("glb size").to_le_bytes());
+        glb.extend(u32::try_from(padded_json.len()).expect("json size").to_le_bytes());
+        glb.extend(0x4E4F_534A_u32.to_le_bytes());
+        glb.extend(padded_json);
+        glb.extend(u32::try_from(binary.len()).expect("bin size").to_le_bytes());
+        glb.extend(0x004E_4942_u32.to_le_bytes());
+        glb.extend(binary);
+        glb
+    }
+
+    fn poll_until_cpu_ready(session: &mut GltfPreviewSession, label: &str) {
+        let mut last_stage = String::new();
+        for _ in 0..50_000 {
+            let poll = session.poll();
+            last_stage = poll.stage.to_owned();
+            if poll.cpu_ready {
+                return;
+            }
+            if let Some(failed) = poll.failed {
+                panic!("{label} failed at {last_stage}: {failed}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("{label} did not become cpu_ready (last stage={last_stage})");
+    }
+
+    #[test]
+    fn preview_asset_guid_is_stable_for_path() {
+        let a = preview_asset_guid(None, "models/hero.glb");
+        let b = preview_asset_guid(None, "models/hero.glb");
+        let c = preview_asset_guid(None, "models/other.glb");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn preview_asset_guid_prefers_tracked() {
+        let tracked = AssetGuid::new();
+        let from_tracked = preview_asset_guid(Some(&tracked.to_string()), "models/hero.glb");
+        assert_eq!(from_tracked, tracked);
+        assert_ne!(from_tracked, preview_asset_guid(None, "models/hero.glb"));
+    }
+
+    #[test]
+    fn host_store_park_take_roundtrip_skips_reimport() {
+        let root = temporary_root("roundtrip");
+        let glb = valid_triangle_glb();
+        let rel_a = "models/a.glb";
+        let rel_b = "models/b.glb";
+        fs::write(root.join("assets").join(rel_a), &glb).expect("a");
+        fs::write(root.join("assets").join(rel_b), &glb).expect("b");
+
+        let settings = default_settings_json();
+        let asset_a = preview_asset_guid(None, rel_a);
+        let asset_b = preview_asset_guid(None, rel_b);
+
+        let mut session_a = GltfPreviewSession::start_with_settings_and_asset(
+            &root,
+            "assets",
+            rel_a,
+            &settings,
+            asset_a,
+            None,
+        )
+        .expect("start a");
+        poll_until_cpu_ready(&mut session_a, "A");
+        assert!(session_a.is_cpu_ready());
+
+        let mut store = HostGltfPreviewStore::new();
+        let parked = session_a.park_cpu_ready().expect("park a");
+        assert_eq!(parked.relative_path, rel_a);
+        store.park(parked).expect("insert a");
+        assert_eq!(store.len(), 1);
+
+        let mut session_b = GltfPreviewSession::start_with_settings_and_asset(
+            &root,
+            "assets",
+            rel_b,
+            &settings,
+            asset_b,
+            None,
+        )
+        .expect("start b");
+        poll_until_cpu_ready(&mut session_b, "B");
+        let parked_b = session_b.park_cpu_ready().expect("park b");
+        store.park(parked_b).expect("insert b");
+        assert_eq!(store.len(), 2);
+
+        let abs_a = root.join("assets").join(rel_a);
+        let key_a = GltfPreviewSession::cache_key_for(rel_a, &abs_a, &settings, asset_a);
+        let loaded = store.take(&key_a).expect("A→B→A hit");
+        let restored = GltfPreviewSession::from_cpu_ready(
+            &root,
+            "assets",
+            rel_a,
+            &settings,
+            asset_a,
+            loaded,
+            None,
+        )
+        .expect("restore");
+        assert!(restored.is_cpu_ready());
+        assert!(!restored.is_loading());
+        assert_eq!(store.len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preview_load_reports_cook_hit_after_disk_seed() {
+        let root = temporary_root("cook_hit");
+        let rel = "models/hero.glb";
+        let abs = root.join("assets").join(rel);
+        fs::write(&abs, valid_triangle_glb()).expect("write");
+        let cook_root = root.join(".yuyib_cook");
+        let settings = default_settings_json();
+        let asset = preview_asset_guid(None, rel);
+
+        // First load seeds the cook cache (miss).
+        let mut miss = GltfPreviewSession::start_with_settings_and_asset(
+            &root,
+            "assets",
+            rel,
+            &settings,
+            asset,
+            Some(&cook_root),
+        )
+        .expect("start miss");
+        poll_until_cpu_ready(&mut miss, "cook miss");
+        assert_eq!(miss.last_cook_hit(), Some(false));
+        drop(miss);
+
+        // Second load must hit disk cook without re-parse.
+        let mut hit = GltfPreviewSession::start_with_settings_and_asset(
+            &root,
+            "assets",
+            rel,
+            &settings,
+            asset,
+            Some(&cook_root),
+        )
+        .expect("start hit");
+        poll_until_cpu_ready(&mut hit, "cook hit");
+        assert_eq!(hit.last_cook_hit(), Some(true));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn host_store_take_misses_when_content_hash_changes() {
+        let root = temporary_root("hash");
+        let rel = "models/hero.glb";
+        fs::write(root.join("assets").join(rel), valid_triangle_glb()).expect("write");
+        let settings = default_settings_json();
+        let asset = preview_asset_guid(None, rel);
+
+        let mut session = GltfPreviewSession::start_with_settings_and_asset(
+            &root,
+            "assets",
+            rel,
+            &settings,
+            asset,
+            None,
+        )
+        .expect("start");
+        poll_until_cpu_ready(&mut session, "hash fixture");
+        assert!(session.is_cpu_ready());
+        let key_before = session.last_cache_key().expect("key").clone();
+        let mut store = HostGltfPreviewStore::new();
+        store
+            .park(session.park_cpu_ready().expect("park"))
+            .expect("insert");
+        assert!(store.contains(&key_before));
+
+        // Mutate bytes → content hash changes → lookup key misses.
+        let mut mutated = valid_triangle_glb();
+        mutated.push(0);
+        fs::write(root.join("assets").join(rel), mutated).expect("mutate");
+        let key_after = GltfPreviewSession::cache_key_for(
+            rel,
+            &root.join("assets").join(rel),
+            &settings,
+            asset,
+        );
+        assert_ne!(key_before, key_after);
+        assert!(store.take(&key_after).is_none());
+        assert!(store.contains(&key_before));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn animation_inventory_and_selection_roundtrip() {
+        let root = temporary_root("anim_sel");
+        let rel = "models/animated.glb";
+        fs::write(root.join("assets").join(rel), animated_triangle_glb()).expect("write");
+        let settings = serde_json::json!({ "policy": "skeletal_preview" });
+        let asset = preview_asset_guid(None, rel);
+
+        let mut session = GltfPreviewSession::start_with_settings_and_asset(
+            &root,
+            "assets",
+            rel,
+            &settings,
+            asset,
+            None,
+        )
+        .expect("start");
+        poll_until_cpu_ready(&mut session, "animated");
+
+        let inventory = session.animation_inventory();
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(inventory[0].index, 0);
+        assert_eq!(inventory[0].name.as_deref(), Some("bob"));
+        assert!((inventory[0].duration_seconds - 1.0).abs() < 1.0e-5);
+        assert_eq!(inventory[1].index, 1);
+        assert_eq!(inventory[1].name.as_deref(), Some("shift"));
+
+        // CPU-ready auto-selects the first clip when inventory is non-empty.
+        assert_eq!(session.selected_animation(), Some(0));
+
+        session
+            .set_animation_selection(None)
+            .expect("clear clip");
+        assert_eq!(session.selected_animation(), None);
+
+        session
+            .set_animation_selection(Some(1))
+            .expect("select shift");
+        assert_eq!(session.selected_animation(), Some(1));
+
+        assert!(matches!(
+            session.set_animation_selection(Some(99)),
+            Err(GltfPreviewError::Selection(message))
+                if message.contains("out of range")
+        ));
+        assert_eq!(session.selected_animation(), Some(1));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

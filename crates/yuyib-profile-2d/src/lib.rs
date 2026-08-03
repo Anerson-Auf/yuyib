@@ -9,13 +9,17 @@
 
 #![forbid(unsafe_code)]
 
+mod camera_director;
 mod camera_follow;
 mod location_stack;
 mod playable_loop;
 #[cfg(feature = "character-2d")]
 mod platformer_playable;
 
-pub use camera_follow::CameraFollow2d;
+pub use camera_director::{CameraCut2d, CameraDirector2d};
+pub use camera_follow::{
+    CameraFollow2d, CameraFollowRuntime2d, CameraShake2d, WorldBounds2d, WorldBoundsError2d,
+};
 pub use location_stack::{
     LocationFrame2d, LocationPortal2d, LocationPortalAction2d, LocationStack2d,
     LocationStackError2d,

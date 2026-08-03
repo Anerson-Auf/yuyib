@@ -1,7 +1,8 @@
 # High-level загрузка glTF-сцены
 
 > **Статус:** Experimental  
-> **Requires:** `yuyib::three-d`, `yuyib::app`
+> **Requires:** `yuyib::three-d`, `yuyib::app`  
+> **Tutorial для чайников:** [Загрузка glTF по шагам](../tutorials/load-gltf-scene.md)
 
 `GltfSceneLoad` убирает orchestration импорта из приложения, не скрывая важную
 границу CPU/GPU:

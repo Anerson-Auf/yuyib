@@ -26,6 +26,8 @@ physics-rapier = ["physics", "yuyib-physics/rapier", "yuyib-profile-3d?/rapier"]
 physics-rapier2d = ["physics", "yuyib-physics/rapier2d"]
 ## Rapier-backed 2D platformer controller (separate from top-down sprite kinematic).
 character-2d = ["physics-rapier2d", "dep:yuyib-character-2d", "yuyib-profile-2d?/character-2d"]
+## Optional gilrs HID stick adapter (`yuyib::input::GilrsGamepadAdapter2d`).
+gamepad = ["three-d", "yuyib-input/gamepad"]
 ## M5 3D composition profile (`Game3dProfile` / `CharacterGame3d`).
 ## Enabled with `three-d`; this alias keeps smoke examples explicit.
 profile-3d = ["three-d"]
@@ -193,6 +195,11 @@ path = "examples/world_interaction_flow.rs"
 required-features = ["gameplay"]
 
 [[example]]
+name = "dialogue_choice_flow"
+path = "examples/dialogue_choice_flow.rs"
+required-features = ["gameplay"]
+
+[[example]]
 name = "gltf_material_policy"
 path = "examples/gltf_material_policy.rs"
 required-features = ["app", "three-d"]
@@ -346,6 +353,11 @@ required-features = ["app", "two-d", "ui"]
 name = "playable_hud_2d_smoke"
 path = "examples/playable_hud_2d_smoke.rs"
 required-features = ["app", "ui"]
+
+[[example]]
+name = "native_ui_gallery"
+path = "examples/native_ui_gallery.rs"
+required-features = ["ui"]
 
 [[example]]
 name = "sprite_animator_2d_smoke"

@@ -106,10 +106,12 @@ Signal wire shape:
 
 Phases: `entered` | `stayed` | `exited`.
 
-**Не путать** с Rapier sensor world: default Play **не** поднимает
-`RapierDynamicsWorld3d`. Sphere-query path — основной для Editor Play.
-Игры, которые сами держат Rapier рядом с CharacterController, могут кормить
-`TriggerOverlapTracker` теми же `trigger.*` intents (без physics-mode switch).
+**Не путать** с CharacterController↔Rapier mode switch (non-goal). Default Play
+**может** поднять side-by-side [`DynamicsOverlay3d`] через
+`cargo build -p yuyib-play --features physics-rapier`: props + soft reaction,
+mesh motor неизменен. Без feature — stub. Authored triggers при active overlay
+идут через Rapier sensors → `TriggerOverlapTracker`; без feature — sphere-query
+path (`overlap_spheres_3d`).
 
 ---
 
@@ -142,7 +144,7 @@ Scripts / tooling **не** пишут `.yscene` и ECS напрямую. Они 
 |---|---|---|
 | `set_translation` | yes | yes |
 | `set_component_field` | known 3D schemas | transform / model / light |
-| `add_component` | known 3D schemas | transform / local-transform / directional-light |
+| `add_component` | known 3D schemas | transform / local-transform / directional-light / model3d (proxy) / parent3d |
 | `emit_signal` | yes (host event) | yes (queue → QuestBook if set) |
 
 Known 3D schemas:
@@ -225,8 +227,9 @@ Play typed field writes (SetComponentField):
 | transforms | via `set_translation` / field paths on transform schemas |
 
 `AddComponent` в Play: `yuyib.transform3d` / `yuyib.local-transform3d` /
-`yuyib.directional-light3d` (entity уже в GUID map). `model3d` / `parent3d` —
-пока только Editor.
+`yuyib.directional-light3d` / `yuyib.model3d` (proxy cube when `model` is null) /
+`yuyib.parent3d` (GUID map resolve; `parent: null` = authored root, no ECS edge).
+Entity must already be in the GUID map.
 
 Constants: `SCHEMA_*`, `SIGNAL_QUEST_PREFIX` (`quest.`),
 `SIGNAL_TRIGGER_PREFIX` (`trigger.`).
@@ -289,8 +292,9 @@ Inspector: **Open entity projection** открывает соответству�
 
 | Topic | Status |
 |---|---|
-| Play `AddComponent` for `model3d` / `parent3d` | open (needs proxy / parent resolve) |
+| Play `AddComponent` for `model3d` / `parent3d` | closed (proxy + GUID parent resolve) |
 | CharacterController ↔ Rapier mode switch | non-goal |
+| Play Rapier overlay (`physics-rapier`) | closed (props + soft reaction; sensors when active) |
 | Shadow cascades / render via intents | non-goal |
 | QuestBook authoring UI | not shipped |
 | Freeform behavior modules as SoT | open |
@@ -304,6 +308,6 @@ Inspector: **Open entity projection** открывает соответству�
 | Intents / capabilities / signals | `crates/yuyib-scene-interaction/` |
 | Editor apply | `scene.interaction.apply` in `yuyib-editor` |
 | Play host | `crates/yuyib-play` (`interaction_bridge`, `use_interaction`, `trigger_volumes`) |
-| Rapier pair → intents | `trigger_signals::TriggerOverlapTracker` |
+| Rapier overlay / sensors | `DynamicsOverlay3d` + `trigger_signals::TriggerOverlapTracker` (`--features physics-rapier`) |
 | Schemas | `yuyib-authoring-yuyib` (`yuyib.interactable`, `yuyib.trigger`) |
 | Projection | `yuyib-scene-projection` |

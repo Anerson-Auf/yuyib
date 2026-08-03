@@ -16,6 +16,16 @@ Authoring и shipping data имеют разные задачи:
 | `*.yasset` или sidecar metadata | Asset GUID, source URI, importer и versioned settings |
 | `*.ypack`/cooked manifest | Runtime-optimized immutable artifacts и dependency hashes |
 
+`*.ypack` v1 (`yuyib.ypack` / format_version 1) — immutable snapshot of
+`.yuyib_cook` entries (`CookedArtifact` + relative cook path). Editor exports via
+`project.export_ypack` (default `build/<project>.ypack`) and hydrates via
+`project.import_ypack` → `CookCache::put` (cook-hit without source re-import).
+Asset Preview and Play (`attach_gltf_hierarchy`) use the same `.yuyib_cook` via
+`import_scene_bytes_cached_at` / `GltfSceneLoadConfig::with_cook_cache` and surface
+cook hits (`host.process` preview `cook_hit`, Play stderr `cook hit`/`miss`).
+Pack is **not** authoring SoT; importers may still be present in the binary
+(full cooked-only strip is a later milestone).
+
 Scene не является сериализованным `bevy_ecs::World`. Cooked package не является
 source of truth для authoring. Runtime materialization создаёт World и typed
 handles из versioned documents.

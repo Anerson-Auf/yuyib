@@ -37,6 +37,9 @@ const state = {
   sourceRevision: hosted ? null : 12,
   sourceTree: [],
   lspStatus: "idle",
+  lspPending: new Map(),
+  lspProvidersRegistered: false,
+  pendingDefinitionReveal: null,
   sourceChangeTimer: null,
   overlays: { bounds: true, collision: false, normals: true, tangents: false, uv: false },
   previewMeshes: [],
@@ -383,7 +386,129 @@ function mockHost(message) {
       respond("host.source", { path: message.payload.path, content: message.payload.content, revision: (message.payload.revision || 0) + 1, saved: true }, 75);
       break;
     case "source.change":
-      // Diagnostics-only sync; browser mock has no rust-analyzer sidecar.
+      // Buffer sync; browser mock has no rust-analyzer sidecar.
+      break;
+    case "lsp.completion":
+      respond("host.lsp.completion", {
+        request_id: message.payload.request_id,
+        items: [
+          { label: "mock_complete", kind: 6, insert_text: "mock_complete", detail: "mock" },
+        ],
+      }, 40);
+      break;
+    case "lsp.hover":
+      respond("host.lsp.hover", {
+        request_id: message.payload.request_id,
+        markdown: "**mock hover**\n\nBrowser mock has no rust-analyzer.",
+      }, 40);
+      break;
+    case "lsp.signatureHelp":
+      respond("host.lsp.signatureHelp", {
+        request_id: message.payload.request_id,
+        help: {
+          signatures: [{
+            label: "fn smoke_note(project: &str) -> String",
+            documentation: "Mock signature help",
+            parameters: [{
+              label: "project: &str",
+              documentation: "project name",
+            }],
+            active_parameter: 0,
+          }],
+          active_signature: 0,
+          active_parameter: 0,
+        },
+      }, 40);
+      break;
+    case "lsp.definition":
+      respond("host.lsp.definition", {
+        request_id: message.payload.request_id,
+        locations: [{
+          path: message.payload.path || state.sourcePath || "src/demo_lsp.rs",
+          start_line: 1,
+          start_column: 1,
+          end_line: 1,
+          end_column: 12,
+        }],
+      }, 40);
+      break;
+    case "lsp.references":
+      respond("host.lsp.references", {
+        request_id: message.payload.request_id,
+        locations: [
+          {
+            path: message.payload.path || state.sourcePath || "src/demo_lsp.rs",
+            start_line: 11,
+            start_column: 12,
+            end_line: 11,
+            end_column: 23,
+          },
+          {
+            path: message.payload.path || state.sourcePath || "src/demo_lsp.rs",
+            start_line: 22,
+            start_column: 18,
+            end_line: 22,
+            end_column: 29,
+          },
+        ],
+      }, 40);
+      break;
+    case "lsp.rename":
+      respond("host.lsp.rename", {
+        request_id: message.payload.request_id,
+        files: [{
+          path: message.payload.path || state.sourcePath,
+          edits: [{
+            start_line: message.payload.line || 1,
+            start_column: Math.max(1, (message.payload.column || 1) - 3),
+            end_line: message.payload.line || 1,
+            end_column: message.payload.column || 4,
+            new_text: message.payload.new_name || "renamed",
+          }],
+        }],
+        error: null,
+      }, 50);
+      break;
+    case "lsp.codeAction":
+      respond("host.lsp.codeAction", {
+        request_id: message.payload.request_id,
+        actions: [{
+          title: "Mock: insert TODO",
+          kind: "quickfix",
+          is_preferred: true,
+          disabled: null,
+          files: [{
+            path: message.payload.path || state.sourcePath,
+            edits: [{
+              start_line: message.payload.start_line || 1,
+              start_column: message.payload.start_column || 1,
+              end_line: message.payload.start_line || 1,
+              end_column: message.payload.start_column || 1,
+              new_text: "// TODO\n",
+            }],
+          }],
+        }, {
+          title: "Mock: rust-analyzer command",
+          kind: "source",
+          is_preferred: false,
+          disabled: null,
+          files: [],
+          command: {
+            command: "rust-analyzer.mockCommand",
+            title: "mock",
+            arguments: [],
+          },
+        }],
+      }, 50);
+      break;
+    case "lsp.executeCommand":
+      respond("host.lsp.executeCommand", {
+        request_id: message.payload.request_id,
+        files: [],
+        error: message.payload.command && String(message.payload.command).startsWith("rust-analyzer.")
+          ? null
+          : `command \`${message.payload.command || ""}\` is not allowlisted (only rust-analyzer.*)`,
+      }, 40);
       break;
     case "source.list":
       respond("host.source.tree", {
@@ -397,6 +522,56 @@ function mockHost(message) {
       respond("host.process", { kind: "cargo", status: "queued", package: message.payload.package, completed: 0.05 }, 50);
       respond("host.process", { kind: "cargo", status: "checking", package: message.payload.package, completed: 0.64 }, 420);
       respond("host.process", { kind: "cargo", status: "success", package: message.payload.package, completed: 1, elapsed_ms: 842, errors: 0, warnings: 2 }, 900);
+      break;
+    }
+    case "project.cook": {
+      respond("host.process", { kind: "cook", status: "started", total: 1, completed: 0 }, 30);
+      respond("host.process", {
+        kind: "cook",
+        status: "progress",
+        path: "assets/models/hero.glb",
+        index: 1,
+        total: 1,
+        completed: 1,
+        cook_hit: false,
+        error: null,
+      }, 120);
+      respond("host.process", {
+        kind: "cook",
+        status: "finished",
+        total: 1,
+        hits: 0,
+        misses: 1,
+        errors: 0,
+        completed: 1,
+      }, 200);
+      break;
+    }
+    case "project.export_ypack": {
+      const path = message.payload.path || "build/project.ypack";
+      respond("host.process", { kind: "ypack", op: "export", status: "started", path, completed: 0.05 }, 30);
+      respond("host.process", {
+        kind: "ypack",
+        op: "export",
+        status: "finished",
+        path,
+        entries: 1,
+        completed: 1,
+      }, 140);
+      break;
+    }
+    case "project.import_ypack": {
+      const path = message.payload.path || "build/project.ypack";
+      respond("host.process", { kind: "ypack", op: "import", status: "started", path, completed: 0.05 }, 30);
+      respond("host.process", {
+        kind: "ypack",
+        op: "import",
+        status: "finished",
+        path,
+        entries: 1,
+        written: 1,
+        completed: 1,
+      }, 140);
       break;
     }
     case "scene.open":
@@ -1196,7 +1371,21 @@ function createFieldControl(component, field, value) {
   if (!control.dataset.fieldKind) {
     control.dataset.fieldKind = field.kind === "boolean" ? "boolean" : field.kind || "string";
   }
-  control.disabled = Boolean(field.read_only || state.scene.readOnly || field.kind === "specialized" || (field.kind === "color" && control.type !== "color"));
+  const locked = Boolean(
+    field.read_only
+    || state.scene.readOnly
+    || field.kind === "specialized"
+    || (field.kind === "color" && control.type !== "color"),
+  );
+  control.disabled = locked;
+  if (locked) {
+    const reason = state.scene.readOnly
+      ? "Scene document is read-only (newer format_version)"
+      : (field.read_only_reason || (field.kind === "specialized"
+        ? "Specialized field — no Inspector control yet"
+        : "Field is read-only"));
+    control.title = reason;
+  }
   return control;
 }
 
@@ -1238,11 +1427,27 @@ function renderComponentCard(component) {
   body.className = "component-body property-list";
   const fields = descriptor?.fields || [];
   if (fields.length) {
+    const lockedReasons = [...new Set(
+      fields
+        .map((field) => field.read_only_reason)
+        .filter(Boolean),
+    )];
+    if (lockedReasons.length || state.scene.readOnly) {
+      const notice = document.createElement("div");
+      notice.className = "opaque-component-notice";
+      const help = document.createElement("small");
+      help.textContent = state.scene.readOnly
+        ? "Scene is read-only — Inspector edits are blocked."
+        : lockedReasons[0];
+      notice.append(help);
+      body.append(notice);
+    }
     fields.forEach((field) => {
       const label = document.createElement("label");
       const caption = document.createElement("span");
       caption.textContent = field.label || field.path;
-      caption.title = field.group ? `${field.group} · ${field.path}` : field.path;
+      caption.title = field.read_only_reason
+        || (field.group ? `${field.group} · ${field.path}` : field.path);
       label.append(caption, createFieldControl(component, field, getJsonPath(component.data, field.path)));
       body.append(label);
     });
@@ -1923,6 +2128,12 @@ function configureProject(project, hasProject = Boolean(project?.ready)) {
   };
   document.querySelector("#playButton").disabled = !ready;
   document.querySelector("#buildButton").disabled = !state.projectConfig.package;
+  const cookButton = document.querySelector("#cookButton");
+  if (cookButton) cookButton.disabled = !ready;
+  const exportYpackButton = document.querySelector("#exportYpackButton");
+  if (exportYpackButton) exportYpackButton.disabled = !ready;
+  const importYpackButton = document.querySelector("#importYpackButton");
+  if (importYpackButton) importYpackButton.disabled = !ready;
   document.querySelector("#runCheckButton").disabled = !state.projectConfig.package;
   document.querySelector("#runCheckButton small").textContent = state.projectConfig.package ? `package: ${state.projectConfig.package}` : "Cargo package not configured";
   document.querySelector("#projectNameLabel").textContent = state.projectConfig.name || "No project";
@@ -2181,6 +2392,30 @@ window.addEventListener("yuyib:event", ({ detail }) => {
     case "host.lsp.diagnostics":
       applyLspDiagnostics(payload);
       break;
+    case "host.lsp.completion":
+      resolveLspPending(payload?.request_id, payload);
+      break;
+    case "host.lsp.hover":
+      resolveLspPending(payload?.request_id, payload);
+      break;
+    case "host.lsp.signatureHelp":
+      resolveLspPending(payload?.request_id, payload);
+      break;
+    case "host.lsp.definition":
+      resolveLspPending(payload?.request_id, payload);
+      break;
+    case "host.lsp.references":
+      resolveLspPending(payload?.request_id, payload);
+      break;
+    case "host.lsp.rename":
+      resolveLspPending(payload?.request_id, payload);
+      break;
+    case "host.lsp.codeAction":
+      resolveLspPending(payload?.request_id, payload);
+      break;
+    case "host.lsp.executeCommand":
+      resolveLspPending(payload?.request_id, payload);
+      break;
     case "host.source":
       if (payload.saved) {
         state.sourceRevision = payload.revision ?? state.sourceRevision;
@@ -2382,7 +2617,7 @@ function handleHostProcess(payload) {
       if (payload.stage === "import") {
         showToast("Loading model", payload.path || "glTF import…", "info");
       }
-      appendOutput("preview", `${payload.stage} ${Math.round((payload.completed || 0) * 100)}%`);
+      appendOutput("preview", `${payload.stage} ${Math.round((payload.completed || 0) * 100)}%${payload.cook_hit ? " · cook hit" : ""}`);
     } else if (payload.status === "scene_model_ready") {
       document.querySelector("#assetPreviewLoading")?.classList.add("is-hidden");
       state.previewLoadingPath = null;
@@ -2400,8 +2635,8 @@ function handleHostProcess(payload) {
         primitives,
         gpuMb,
       });
-      showToast("Asset Preview ready", `${primitives} primitives · ${gpuMb} MB GPU`, "success");
-      appendOutput("preview", `Asset ready in Asset Preview (${payload.cache || "production"})`);
+      showToast("Asset Preview ready", `${primitives} primitives · ${gpuMb} MB GPU${payload.cook_hit ? " · cook hit" : ""}`, "success");
+      appendOutput("preview", `Asset ready in Asset Preview (${payload.cache || "production"}${payload.cook_hit ? " · cook hit" : ""})`);
       if (state.view !== "preview") setMainView("preview");
       window.requestAnimationFrame(sendViewportBounds);
     } else if (payload.status === "failed") {
@@ -2421,6 +2656,61 @@ function handleHostProcess(payload) {
     if (payload.status === "success") {
       const summary = [payload.package, payload.elapsed_ms !== undefined ? `${payload.elapsed_ms} ms` : null, payload.warnings !== undefined ? `${payload.warnings} warnings` : null].filter(Boolean).join(" · ");
       showToast("Scoped Cargo check passed", summary || "Host reported success", "success");
+    }
+    return;
+  }
+  if (payload.kind === "cook") {
+    const total = Number(payload.total || 0);
+    const index = Number(payload.index || 0);
+    if (payload.status === "started") {
+      setCargoStatus(`cook · started (${total})`, 0.02);
+      appendOutput("cook", `started · ${total} glTF source(s)`);
+      showToast("Cook assets", total ? `Cooking ${total} glTF source(s)…` : "Starting…", "info");
+      return;
+    }
+    if (payload.status === "progress") {
+      const label = payload.cook_hit ? "hit" : (payload.error ? "error" : "miss");
+      setCargoStatus(`cook · ${index}/${total} ${label}`, payload.completed);
+      appendOutput("cook", `${payload.path || "?"} · ${label}${payload.error ? `: ${payload.error}` : ""}`);
+      return;
+    }
+    if (payload.status === "finished") {
+      const hits = Number(payload.hits || 0);
+      const misses = Number(payload.misses || 0);
+      const errors = Number(payload.errors || 0);
+      setCargoStatus(`cook · finished`, 1);
+      const summary = payload.message
+        || `${total} asset(s) · ${hits} hit · ${misses} miss · ${errors} error`;
+      appendOutput("cook", `finished · ${summary}`);
+      showToast(
+        errors ? "Cook finished with errors" : "Cook finished",
+        summary,
+        errors ? "warning" : "success",
+      );
+    }
+    return;
+  }
+  if (payload.kind === "ypack") {
+    const op = payload.op || "export";
+    if (payload.status === "started") {
+      setCargoStatus(`ypack ${op} · started`, 0.05);
+      appendOutput("ypack", `${op} started · ${payload.path || "?"}`);
+      showToast(op === "import" ? "Import ypack" : "Export ypack", payload.path || "Working…", "info");
+      return;
+    }
+    if (payload.status === "finished") {
+      setCargoStatus(`ypack ${op} · finished`, 1);
+      const summary = op === "import"
+        ? `${payload.path || "pack"} · ${payload.written || 0}/${payload.entries || 0} written`
+        : `${payload.path || "pack"} · ${payload.entries || 0} entr(y/ies)`;
+      appendOutput("ypack", `${op} finished · ${summary}`);
+      showToast(op === "import" ? "Ypack imported" : "Ypack exported", summary, "success");
+      return;
+    }
+    if (payload.status === "error") {
+      setCargoStatus(`ypack ${op} · error`, 1);
+      appendOutput("ypack", `${op} error · ${payload.error || payload.path || "?"}`);
+      showToast(op === "import" ? "Ypack import failed" : "Ypack export failed", payload.error || "error", "warning");
     }
     return;
   }
@@ -2799,6 +3089,7 @@ function ensureMonaco() {
     renderWhitespace: "selection",
     renderLineHighlight: "all",
     overviewRulerLanes: 2,
+    lightbulb: { enabled: "on" },
     readOnly: hosted,
   });
   if (!hosted) {
@@ -2817,8 +3108,420 @@ function ensureMonaco() {
       post("source.change", { path: state.sourcePath, content: state.monacoEditor.getValue() });
     }, 400);
   });
+  registerLspProviders();
   state.monacoEditor.focus();
   return state.monacoEditor;
+}
+
+function flushSourceChange() {
+  if (!hosted || !state.sourcePath || !state.monacoEditor) return;
+  if (state.sourceChangeTimer) {
+    window.clearTimeout(state.sourceChangeTimer);
+    state.sourceChangeTimer = null;
+  }
+  post("source.change", { path: state.sourcePath, content: state.monacoEditor.getValue() });
+}
+
+function resolveLspPending(requestId, payload) {
+  if (!requestId || !state.lspPending.has(requestId)) return;
+  const pending = state.lspPending.get(requestId);
+  state.lspPending.delete(requestId);
+  if (pending.timer) window.clearTimeout(pending.timer);
+  pending.resolve(payload);
+}
+
+function requestLsp(endpoint, line, column, extra = {}, timeoutMs = 2500) {
+  return requestLspPayload(endpoint, { line, column, ...extra }, timeoutMs);
+}
+
+function requestLspPayload(endpoint, payload, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    if (!state.sourcePath) {
+      resolve(null);
+      return;
+    }
+    const requestId = `lsp-${state.requestId}-${Date.now()}`;
+    const timer = window.setTimeout(() => {
+      if (!state.lspPending.has(requestId)) return;
+      state.lspPending.delete(requestId);
+      resolve(null);
+    }, timeoutMs);
+    state.lspPending.set(requestId, { resolve, timer });
+    post(endpoint, {
+      request_id: requestId,
+      path: state.sourcePath,
+      ...payload,
+    });
+  });
+}
+
+function normalizeSourcePath(path) {
+  return String(path || "").replace(/\\/g, "/");
+}
+
+function resolveRenameResource(path) {
+  const normalized = normalizeSourcePath(path);
+  const current = normalizeSourcePath(state.sourcePath);
+  if (state.monacoModel && (normalized === current || normalized.endsWith(current) || current.endsWith(normalized))) {
+    return state.monacoModel.uri;
+  }
+  const models = monaco.editor.getModels();
+  for (const model of models) {
+    const uriPath = normalizeSourcePath(model.uri.path || model.uri.toString());
+    if (uriPath.endsWith(normalized) || uriPath.includes(`/${normalized}`)) return model.uri;
+  }
+  return monaco.Uri.parse(`yuyib://project/${normalized}`);
+}
+
+function workspaceEditsFromFiles(files) {
+  const edits = [];
+  let otherFiles = 0;
+  const current = normalizeSourcePath(state.sourcePath);
+  for (const file of files || []) {
+    const filePath = normalizeSourcePath(file.path);
+    const isCurrent = filePath === current
+      || filePath.endsWith(current)
+      || current.endsWith(filePath);
+    if (!isCurrent) otherFiles += 1;
+    const resource = resolveRenameResource(file.path);
+    for (const edit of (file.edits || [])) {
+      edits.push({
+        resource,
+        textEdit: {
+          range: {
+            startLineNumber: edit.start_line || 1,
+            startColumn: edit.start_column || 1,
+            endLineNumber: edit.end_line || edit.start_line || 1,
+            endColumn: edit.end_column || (edit.start_column || 1) + 1,
+          },
+          text: edit.new_text ?? "",
+        },
+      });
+    }
+  }
+  return { edits, otherFiles };
+}
+
+function applyWorkspaceTextEdits(edits) {
+  if (!Array.isArray(edits) || !edits.length) return;
+  const byModel = new Map();
+  for (const item of edits) {
+    const model = monaco.editor.getModel(item.resource) || (
+      state.monacoModel
+      && item.resource
+      && state.monacoModel.uri.toString() === item.resource.toString()
+        ? state.monacoModel
+        : null
+    );
+    if (!model) continue;
+    if (!byModel.has(model)) byModel.set(model, []);
+    byModel.get(model).push({
+      range: item.textEdit.range,
+      text: item.textEdit.text,
+      forceMoveMarkers: true,
+    });
+  }
+  for (const [model, modelEdits] of byModel) {
+    if (state.monacoEditor && state.monacoEditor.getModel() === model) {
+      state.monacoEditor.executeEdits("yuyib-lsp", modelEdits);
+    } else {
+      model.pushEditOperations([], modelEdits, () => null);
+    }
+  }
+}
+
+function lspCodeActionKindToMonaco(kind) {
+  const value = String(kind || "");
+  if (value.startsWith("quickfix")) return monaco.languages.CodeActionKind.QuickFix;
+  if (value.startsWith("refactor.extract")) return monaco.languages.CodeActionKind.RefactorExtract;
+  if (value.startsWith("refactor.inline")) return monaco.languages.CodeActionKind.RefactorInline;
+  if (value.startsWith("refactor.rewrite")) return monaco.languages.CodeActionKind.RefactorRewrite;
+  if (value.startsWith("refactor")) return monaco.languages.CodeActionKind.Refactor;
+  if (value.startsWith("source.organizeImports")) return monaco.languages.CodeActionKind.SourceOrganizeImports;
+  if (value.startsWith("source")) return monaco.languages.CodeActionKind.Source;
+  return monaco.languages.CodeActionKind.Empty;
+}
+
+function lspCompletionKindToMonaco(kind) {
+  const map = {
+    1: monaco.languages.CompletionItemKind.Text,
+    2: monaco.languages.CompletionItemKind.Method,
+    3: monaco.languages.CompletionItemKind.Function,
+    4: monaco.languages.CompletionItemKind.Constructor,
+    5: monaco.languages.CompletionItemKind.Field,
+    6: monaco.languages.CompletionItemKind.Variable,
+    7: monaco.languages.CompletionItemKind.Class,
+    8: monaco.languages.CompletionItemKind.Interface,
+    9: monaco.languages.CompletionItemKind.Module,
+    10: monaco.languages.CompletionItemKind.Property,
+    11: monaco.languages.CompletionItemKind.Unit,
+    12: monaco.languages.CompletionItemKind.Value,
+    13: monaco.languages.CompletionItemKind.Enum,
+    14: monaco.languages.CompletionItemKind.Keyword,
+    15: monaco.languages.CompletionItemKind.Snippet,
+    16: monaco.languages.CompletionItemKind.Color,
+    17: monaco.languages.CompletionItemKind.File,
+    18: monaco.languages.CompletionItemKind.Reference,
+    19: monaco.languages.CompletionItemKind.Folder,
+    20: monaco.languages.CompletionItemKind.EnumMember,
+    21: monaco.languages.CompletionItemKind.Constant,
+    22: monaco.languages.CompletionItemKind.Struct,
+    23: monaco.languages.CompletionItemKind.Event,
+    24: monaco.languages.CompletionItemKind.Operator,
+    25: monaco.languages.CompletionItemKind.TypeParameter,
+  };
+  return map[Number(kind)] || monaco.languages.CompletionItemKind.Text;
+}
+
+function registerLspProviders() {
+  if (state.lspProvidersRegistered) return;
+  state.lspProvidersRegistered = true;
+  monaco.editor.registerCommand("yuyib.lsp.executeCommand", async (_accessor, payload) => {
+    const command = payload?.command;
+    if (!command) return;
+    flushSourceChange();
+    const result = await requestLspPayload("lsp.executeCommand", {
+      command,
+      arguments: Array.isArray(payload?.arguments) ? payload.arguments : [],
+    }, 8000);
+    if (!result) {
+      showToast("Code action", "executeCommand timed out", "warning");
+      return;
+    }
+    if (result.error) {
+      showToast("Code action failed", result.error, "warning");
+      appendOutput("lsp", `executeCommand ${command} error: ${result.error}`);
+      return;
+    }
+    const files = Array.isArray(result.files) ? result.files : [];
+    if (files.length) {
+      const { edits, otherFiles } = workspaceEditsFromFiles(files);
+      applyWorkspaceTextEdits(edits);
+      if (otherFiles > 0) {
+        showToast(
+          "Command applied",
+          `Also touches ${otherFiles} other file(s). Open them to see RA-synced buffers.`,
+          "info",
+        );
+      }
+    }
+    appendOutput("lsp", `executeCommand ${command}`);
+  });
+  monaco.languages.registerCompletionItemProvider("rust", {
+    triggerCharacters: [".", ":", "<", "'"],
+    provideCompletionItems: async (model, position) => {
+      flushSourceChange();
+      const word = model.getWordUntilPosition(position);
+      const range = {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: word.startColumn,
+        endColumn: word.endColumn,
+      };
+      const payload = await requestLsp("lsp.completion", position.lineNumber, position.column);
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      return {
+        suggestions: items.map((item) => ({
+          label: item.label,
+          kind: lspCompletionKindToMonaco(item.kind),
+          detail: item.detail || undefined,
+          documentation: item.documentation || undefined,
+          insertText: item.insert_text || item.label,
+          filterText: item.filter_text || undefined,
+          sortText: item.sort_text || undefined,
+          range,
+        })),
+      };
+    },
+  });
+  monaco.languages.registerHoverProvider("rust", {
+    provideHover: async (model, position) => {
+      flushSourceChange();
+      const payload = await requestLsp("lsp.hover", position.lineNumber, position.column);
+      const markdown = payload?.markdown;
+      if (!markdown) return null;
+      return {
+        contents: [{ value: String(markdown) }],
+      };
+    },
+  });
+  monaco.languages.registerSignatureHelpProvider("rust", {
+    signatureHelpTriggerCharacters: ["(", ","],
+    signatureHelpRetriggerCharacters: [","],
+    provideSignatureHelp: async (model, position, _token, context) => {
+      flushSourceChange();
+      const payload = await requestLsp(
+        "lsp.signatureHelp",
+        position.lineNumber,
+        position.column,
+        {
+          trigger_kind: Number(context?.triggerKind) || 1,
+          trigger_character: context?.triggerCharacter || null,
+          is_retrigger: Boolean(context?.isRetrigger),
+        },
+        3000,
+      );
+      const help = payload?.help;
+      if (!help || !Array.isArray(help.signatures) || !help.signatures.length) return null;
+      return {
+        value: {
+          signatures: help.signatures.map((signature) => ({
+            label: signature.label || "",
+            documentation: signature.documentation || undefined,
+            parameters: (signature.parameters || []).map((parameter) => ({
+              label: parameter.label || "",
+              documentation: parameter.documentation || undefined,
+            })),
+            activeParameter: signature.active_parameter,
+          })),
+          activeSignature: Number(help.active_signature) || 0,
+          activeParameter: Number(help.active_parameter) || 0,
+        },
+        dispose() {},
+      };
+    },
+  });
+  monaco.languages.registerDefinitionProvider("rust", {
+    provideDefinition: async (model, position) => {
+      flushSourceChange();
+      const payload = await requestLsp("lsp.definition", position.lineNumber, position.column, {}, 4000);
+      const locations = Array.isArray(payload?.locations) ? payload.locations : [];
+      if (!locations.length) return null;
+      const current = normalizeSourcePath(state.sourcePath);
+      const monacoLocations = [];
+      for (const loc of locations) {
+        const path = normalizeSourcePath(loc.path);
+        const isCurrent = path === current
+          || path.endsWith(current)
+          || current.endsWith(path);
+        const range = {
+          startLineNumber: loc.start_line || 1,
+          startColumn: loc.start_column || 1,
+          endLineNumber: loc.end_line || loc.start_line || 1,
+          endColumn: loc.end_column || (loc.start_column || 1) + 1,
+        };
+        if (isCurrent) {
+          monacoLocations.push({ uri: model.uri, range });
+        } else if (!state.pendingDefinitionReveal) {
+          state.pendingDefinitionReveal = {
+            path: loc.path,
+            line: range.startLineNumber,
+            column: range.startColumn,
+          };
+          post("source.read", { path: loc.path });
+          appendOutput("lsp", `definition → open ${loc.path}:${range.startLineNumber}`);
+        }
+      }
+      return monacoLocations.length ? monacoLocations : null;
+    },
+  });
+  monaco.languages.registerReferenceProvider("rust", {
+    provideReferences: async (model, position, context) => {
+      flushSourceChange();
+      const includeDeclaration = context?.includeDeclaration !== false;
+      const payload = await requestLsp(
+        "lsp.references",
+        position.lineNumber,
+        position.column,
+        { include_declaration: includeDeclaration },
+        5000,
+      );
+      const locations = Array.isArray(payload?.locations) ? payload.locations : [];
+      if (!locations.length) return null;
+      const monacoLocations = locations.map((loc) => ({
+        uri: resolveRenameResource(loc.path),
+        range: {
+          startLineNumber: loc.start_line || 1,
+          startColumn: loc.start_column || 1,
+          endLineNumber: loc.end_line || loc.start_line || 1,
+          endColumn: loc.end_column || (loc.start_column || 1) + 1,
+        },
+      }));
+      appendOutput("lsp", `references → ${monacoLocations.length} location(s)`);
+      return monacoLocations;
+    },
+  });
+  monaco.languages.registerRenameProvider("rust", {
+    provideRenameEdits: async (model, position, newName) => {
+      flushSourceChange();
+      const payload = await requestLsp(
+        "lsp.rename",
+        position.lineNumber,
+        position.column,
+        { new_name: newName },
+        5000,
+      );
+      if (!payload) {
+        return { edits: [], rejectReason: "Rename timed out" };
+      }
+      if (payload.error) {
+        return { edits: [], rejectReason: String(payload.error) };
+      }
+      const files = Array.isArray(payload.files) ? payload.files : [];
+      const { edits, otherFiles } = workspaceEditsFromFiles(files);
+      if (otherFiles > 0) {
+        showToast(
+          "Rename",
+          `Also touches ${otherFiles} other file(s). Open them to see RA-synced buffers, or save/reload after disk apply.`,
+          "info",
+        );
+      }
+      appendOutput("lsp", `rename → ${edits.length} edit(s) across ${files.length} file(s)`);
+      return { edits };
+    },
+  });
+  monaco.languages.registerCodeActionProvider("rust", {
+    provideCodeActions: async (model, range, context) => {
+      flushSourceChange();
+      const markers = Array.isArray(context?.markers) ? context.markers : [];
+      const payload = await requestLspPayload("lsp.codeAction", {
+        start_line: range.startLineNumber,
+        start_column: range.startColumn,
+        end_line: range.endLineNumber,
+        end_column: range.endColumn,
+        diagnostics: markers.map((marker) => ({
+          startLineNumber: marker.startLineNumber,
+          startColumn: marker.startColumn,
+          endLineNumber: marker.endLineNumber,
+          endColumn: marker.endColumn,
+          severity: marker.severity,
+          message: marker.message,
+          source: marker.source,
+        })),
+      }, 4000);
+      const actions = Array.isArray(payload?.actions) ? payload.actions : [];
+      return {
+        actions: actions.map((action) => {
+          const { edits, otherFiles } = workspaceEditsFromFiles(action.files || []);
+          if (otherFiles > 0) {
+            appendOutput("lsp", `codeAction "${action.title}" touches ${otherFiles} other file(s)`);
+          }
+          const mapped = {
+            title: action.title || "Code action",
+            kind: lspCodeActionKindToMonaco(action.kind),
+            isPreferred: Boolean(action.is_preferred),
+            disabled: action.disabled || undefined,
+            diagnostics: markers,
+          };
+          if (edits.length) {
+            mapped.edit = { edits };
+          }
+          if (action.command?.command) {
+            mapped.command = {
+              id: "yuyib.lsp.executeCommand",
+              title: action.command.title || action.title || action.command.command,
+              arguments: [{
+                command: action.command.command,
+                arguments: Array.isArray(action.command.arguments) ? action.command.arguments : [],
+              }],
+            };
+          }
+          return mapped;
+        }),
+        dispose() {},
+      };
+    },
+  });
 }
 
 function lspSeverityToMonaco(severity) {
@@ -2991,11 +3694,29 @@ function openDocument(sourceDoc) {
     crumbs[1].textContent = parts.length > 1 ? parts.slice(0, -1).join("/") : "src";
   }
   if (crumbs[2]) crumbs[2].textContent = displayName;
+  applyPendingDefinitionReveal(editor);
   showToast(
     sourceDoc.external ? "Engine source opened" : "Source opened",
     `${displayName} · ${state.sourcePath}${sourceDoc.read_only ? " · read-only" : ""}`,
     "success",
   );
+}
+
+function applyPendingDefinitionReveal(editor) {
+  const pending = state.pendingDefinitionReveal;
+  if (!pending || !editor) return;
+  const current = normalizeSourcePath(state.sourcePath);
+  const want = normalizeSourcePath(pending.path);
+  if (!(current === want || current.endsWith(want) || want.endsWith(current))) return;
+  state.pendingDefinitionReveal = null;
+  const position = {
+    lineNumber: pending.line || 1,
+    column: pending.column || 1,
+  };
+  editor.setPosition(position);
+  editor.revealPositionInCenter(position);
+  editor.focus();
+  appendOutput("lsp", `definition reveal ${state.sourcePath}:${position.lineNumber}`);
 }
 
 function runScopedCargoCheck() {
@@ -3005,6 +3726,33 @@ function runScopedCargoCheck() {
   }
   setCargoStatus("cargo check · queued", 0.02);
   post("cargo.check", { package: state.projectConfig.package });
+}
+
+function runProjectCook() {
+  if (!state.projectConfig.ready) {
+    showToast("Cook assets", "Open a project first", "warning");
+    return;
+  }
+  setCargoStatus("cook · queued", 0.02);
+  post("project.cook", {});
+}
+
+function runYpackExport() {
+  if (!state.projectConfig.ready) {
+    showToast("Export ypack", "Open a project first", "warning");
+    return;
+  }
+  setCargoStatus("ypack export · queued", 0.02);
+  post("project.export_ypack", {});
+}
+
+function runYpackImport() {
+  if (!state.projectConfig.ready) {
+    showToast("Import ypack", "Open a project first", "warning");
+    return;
+  }
+  setCargoStatus("ypack import · queued", 0.02);
+  post("project.import_ypack", {});
 }
 
 function drawScene() {
@@ -3312,6 +4060,15 @@ document.querySelectorAll("[data-menu]").forEach((button) => button.addEventList
     case "build-check":
       runScopedCargoCheck();
       break;
+    case "build-cook":
+      runProjectCook();
+      break;
+    case "build-ypack":
+      runYpackExport();
+      break;
+    case "build-ypack-import":
+      runYpackImport();
+      break;
     case "help-about":
       showToast("Yuyib Editor", "Foundation authoring shell · create a project to begin", "info");
       break;
@@ -3383,6 +4140,43 @@ document.querySelector("#launcherProjectName")?.addEventListener("keydown", (eve
   if (event.key === "Enter") document.querySelector("#launcherCreateButton")?.click();
 });
 
+function setLauncherWizardStep(step) {
+  document.querySelector("#launcherPaneChoose")?.classList.toggle("is-hidden", step !== "choose");
+  document.querySelector("#launcherPaneCreate")?.classList.toggle("is-hidden", step !== "create");
+  document.querySelector("#launcherPaneOpen")?.classList.toggle("is-hidden", step !== "open");
+  document.querySelectorAll("[data-launcher-step]").forEach((button) => {
+    const key = button.dataset.launcherStep;
+    button.classList.toggle("is-active", key === step);
+    button.disabled = key !== "choose" && key !== step;
+  });
+  const subtitle = document.querySelector("#launcherSubtitle");
+  if (subtitle) {
+    subtitle.textContent = step === "create"
+      ? "Name the project, pick a profile, then choose a parent folder"
+      : step === "open"
+        ? "Open a folder that already contains project.yuyib"
+        : "Open an existing project or create a new one";
+  }
+}
+
+document.querySelector("#launcherChooseCreate")?.addEventListener("click", () => {
+  setLauncherWizardStep("create");
+  document.querySelector("#launcherProjectName")?.focus();
+});
+document.querySelector("#launcherChooseOpen")?.addEventListener("click", () => {
+  setLauncherWizardStep("open");
+});
+document.querySelector("#launcherBackFromCreate")?.addEventListener("click", () => {
+  setLauncherWizardStep("choose");
+});
+document.querySelector("#launcherBackFromOpen")?.addEventListener("click", () => {
+  setLauncherWizardStep("choose");
+});
+document.querySelectorAll("[data-launcher-step='choose']").forEach((button) => {
+  button.addEventListener("click", () => setLauncherWizardStep("choose"));
+});
+setLauncherWizardStep("choose");
+
 document.querySelectorAll("[data-open-source]").forEach((button) => button.addEventListener("click", () => {
   let systemsPayload = null;
   try {
@@ -3426,6 +4220,9 @@ document.querySelector("#saveButton").addEventListener("click", () => {
   else showToast("No scene open", "Open or create a .yscene document first", "warning");
 });
 document.querySelector("#buildButton").addEventListener("click", runScopedCargoCheck);
+document.querySelector("#cookButton")?.addEventListener("click", runProjectCook);
+document.querySelector("#exportYpackButton")?.addEventListener("click", runYpackExport);
+document.querySelector("#importYpackButton")?.addEventListener("click", runYpackImport);
 document.querySelector("#runCheckButton").addEventListener("click", runScopedCargoCheck);
 function resolveSelectedGltfAssetId() {
   const previewPath = state.assetPreview?.path;
@@ -3689,6 +4486,12 @@ window.addEventListener("resize", () => window.requestAnimationFrame(sendViewpor
 function initializeUiMode() {
   document.querySelector("#playButton").disabled = true;
   document.querySelector("#buildButton").disabled = true;
+  const cookButton = document.querySelector("#cookButton");
+  if (cookButton) cookButton.disabled = true;
+  const exportYpackButton = document.querySelector("#exportYpackButton");
+  if (exportYpackButton) exportYpackButton.disabled = true;
+  const importYpackButton = document.querySelector("#importYpackButton");
+  if (importYpackButton) importYpackButton.disabled = true;
   document.querySelector("#runCheckButton").disabled = true;
   document.querySelector('[data-command="history.undo"]').disabled = true;
   document.querySelector('[data-command="history.redo"]').disabled = true;

@@ -1,0 +1,6 @@
+# Keep build artifacts on the project drive (D:), not under
+# %TEMP%/cursor-sandbox-cache on C:. Cursor may still inject
+# CARGO_TARGET_DIR; shells in this workspace should override it to
+# D:\rust_projects\yuyib\target when that happens.
+[build]
+target-dir = "target"

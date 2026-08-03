@@ -2,7 +2,7 @@
 
 use crate::intent::{
     KNOWN_3D_SCHEMAS, SCHEMA_DIRECTIONAL_LIGHT_3D, SCHEMA_LOCAL_TRANSFORM_3D, SCHEMA_MODEL_3D,
-    SCHEMA_TRANSFORM_3D, SceneInteractionIntent,
+    SCHEMA_PARENT_3D, SCHEMA_TRANSFORM_3D, SceneInteractionIntent,
 };
 
 /// Where the bridge is running.
@@ -99,10 +99,9 @@ pub fn editor_capabilities() -> BridgeCapabilities {
 
 /// Play adapter capabilities (TRS + model/light fields + signals).
 ///
-/// `AddComponent` covers transform / local-transform / directional-light ECS
-/// inserts (entity must already be in the GUID map). `model3d` / `parent3d`
-/// stay Editor-only until Play has a proxy handle / parent resolve path.
-/// Rapier trigger volumes and shadow cascades are not Intent ops.
+/// `AddComponent` covers transform / local-transform / directional-light /
+/// model3d (proxy handle) / parent3d (GUID → Entity resolve). Rapier trigger
+/// volumes and shadow cascades are not Intent ops.
 #[must_use]
 pub fn play_capabilities() -> BridgeCapabilities {
     BridgeCapabilities {
@@ -118,6 +117,8 @@ pub fn play_capabilities() -> BridgeCapabilities {
             SCHEMA_TRANSFORM_3D,
             SCHEMA_LOCAL_TRANSFORM_3D,
             SCHEMA_DIRECTIONAL_LIGHT_3D,
+            SCHEMA_MODEL_3D,
+            SCHEMA_PARENT_3D,
         ],
         emit_signal: true,
     }

@@ -84,14 +84,27 @@ owning capability или в companion crate.
   `EmitSignal` → QuestBook). Authoring `yuyib.trigger` → sphere volumes via
   `overlap_spheres_3d` → `trigger.*` intents. `TriggerOverlapTracker` maps Rapier
   sensor pairs for hosts that compose Rapier beside CharacterController — no
-  physics-mode switch. Persist Play→`.yscene` remains Apply whitelist. Next:
-  Play AddComponent; optional live Rapier world in default Play.
+  physics-mode switch. Persist Play→`.yscene` remains Apply whitelist. Play
+  `AddComponent` covers transform / local-transform / light / **model3d (proxy)** /
+  **parent3d (GUID resolve)**. Live Rapier overlay: opt-in
+  `yuyib-play --features physics-rapier` (`DynamicsOverlay3d` side-by-side;
+  mesh motor unchanged; authored triggers → sensors when active). Next: shadow
+  intents (non-goal for Intent Bridge) / cooked-only binary strip.
 - Asset (incremental): `yuyib.gltf-import` / `yuyib.gltf-preview` через
   production `GltfSceneLoad`; Bounds/Collision/Normals/Tangents/UV overlays; mesh + material
-  + animation clip selection; preview cache invalidation; non-destructive reimport.
+  + animation clip selection; preview cache invalidation; non-destructive reimport;
+  **host multi-entry** `HostGltfPreviewStore` (park CPU-ready on A→B, restore A→B→A as
+  `host.process` stage `cache_hit`; one GPU-resident session).
 - Session/disk cook: same-root reopen keeps import/GPU residency; editor glTF import uses
-  `.yuyib_cook`.
-- Play slice: Player motor, mesh collider, authored light, dark PBR fallback.
+  `.yuyib_cook`; **`project.cook`** batch-cooks indexed glTF/GLB into the same cache
+  (toolbar Cook assets / menu Cook; progress via `host.process` kind `cook`);
+  **`project.export_ypack`** packs `.yuyib_cook` → `build/<project>.ypack`;
+  **`project.import_ypack`** hydrates pack → `.yuyib_cook` (cook-hit path;
+  `host.process` kind `ypack`, `op` export|import);
+  **Asset Preview** loads via `GltfSceneLoadConfig::with_cook_cache` and reports
+  `cook_hit` / `cache: cook_hit` on `host.process` kind `preview`.
+- Play slice: Player motor, mesh collider, authored light, dark PBR fallback;
+  glTF hierarchy attach uses the same `.yuyib_cook` as Editor (`cook hit`/`miss` log).
 - Scene и Asset Preview на отдельных `Game3dScene` (изоляция GPU residency).
 
 ## Открыто
@@ -101,13 +114,13 @@ owning capability или в companion crate.
 | glTF preview remainder | material factor + texture remap closed (base/MR/emissive/normal slots from model inventory) |
 | Apply Play Mode Changes | closed for Transform3d + LocalTransform3d whitelist (`play.apply_changes` + undoable transaction) |
 | Scene ↔ `.rs` projection | vertical #1 closed (known 3D schemas + watch); freeform Rust / entity create-delete from files / behavior scripts — open |
-| Script ↔ object Intent Bridge | playable MVP: interact/trigger/signals/QuestBook smoke + render3d/collision3d (nodraw/nocollide) closed; SoT + GAME_LOOP_3D docs closed; deferred before 2D: live Rapier default Play, shadow intents, LSP completion, wizard, Play AddComponent model/parent |
-| rust-analyzer / LSP | diagnostics-only closed (`host.lsp.status` / `host.lsp.diagnostics` → Monaco markers); completion/hover/rename open |
-| Coverage CI (GitHub Actions) | foundation gate + `editor-coverage-manifest` artifact upload closed (incremental) |
-| Field mutation без typed adapter | host блокирует edit |
+| Script ↔ object Intent Bridge | playable MVP closed incl. Play AddComponent model/parent + Rapier overlay opt-in; deferred: shadow intents |
+| rust-analyzer / LSP | diagnostics + completion + hover + **signatureHelp** + definition + references + rename + code actions + allowlisted `executeCommand` closed (`host.lsp.*` → Monaco; `rust-analyzer.*` only) |
+| Coverage CI (GitHub Actions) | foundation gate + `editor-coverage-manifest` artifact; registry gate covers Asset/Visual/docs/source/migration/import-settings/system (**incremental** vs full wishlist) |
+| Field mutation без typed adapter | closed thin (host `read_only` + `read_only_reason`; Inspector tip/notice) |
 | System/source navigation | closed incremental: coverage systems list + open runtime/authoring/`source.file` (workspace-ancestor resolve, read-only external) |
-| Project creation wizard / cook export | нет |
-| Full multi-entry host preview artifact store | thin |
+| Project creation wizard / cook export | wizard UX + cook + export/import ypack (hydrate) + Preview/Play cook-hit evidence closed; cooked-only binary without importers open |
+| Full multi-entry host preview artifact store | closed thin (`HostGltfPreviewStore` + A→B→A CPU restore / `cache_hit`; one GPU session) |
 
 Metadata и UI control сами по себе не дают статус `Visual` / `Asset` /
 `Runtime`. Центральный rotating cube в viewport — layout smoke, не asset preview.
@@ -150,9 +163,9 @@ passes используют `Load`.
 | M2 rendering baseline (IBL, shadows, bloom, FXAA, SSAO, grade, diagnostics) | Usable MVP |
 | M3.1 / M3.2 cook cache (glTF + external dep fingerprints) | Usable MVP |
 | M4 physics facade (mature backend) | M4.1–M4.13 usable MVP + `PlatformerController2d` (Rapier KCC); open: editor physics polish |
-| M5 high-level profiles | 3D M5.2 closed; Deep 2D A–E + M7: loop/platformer/HUD/animator + Tiled objects/locations/composer + external `.tsj` |
-| M6 native UI completion | Early partial (`ScrollView` + glyph clip + thumb) |
-| Editor E1 remainder | Asset overlays / LSP / Actions CI |
+| M5 high-level profiles | 3D M5.2 closed; Deep 2D A–I + M7; M6 UI + Dialogue HL (Rust graph) |
+| M6 native UI completion | Early partial (ScrollView drag + image extract); IME/a11y open |
+| Editor E1 remainder | Thin deferred: broader `executeCommand` beyond `rust-analyzer.*`; materializer/command registry gates; FS dangling docs |
 
 Порядок и Definition of Done — [`ROADMAP.md`](../architecture/ROADMAP.md).
 Открытые публичные дефекты — [`KNOWN_ISSUES.md`](../../KNOWN_ISSUES.md).
@@ -173,6 +186,13 @@ passes используют `Load`.
 
 Package — restricted identifier grammar; executable confined project root;
 arguments передаются буквально (не shell).
+
+Editor Play runner from the engine repo:
+
+```text
+cargo build -p yuyib-play
+cargo build -p yuyib-play --features physics-rapier   # props overlay + trigger sensors
+```
 
 ## Verification
 

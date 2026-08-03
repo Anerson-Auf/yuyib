@@ -30,9 +30,7 @@ yuyib-scene = { path = "../yuyib-scene", version = "0.1.0" }
 yuyib-scene-projection = { path = "../yuyib-scene-projection", version = "0.1.0" }
 yuyib-scene-interaction = { path = "../yuyib-scene-interaction", version = "0.1.0" }
 yuyib-webview = { path = "../yuyib-webview", version = "0.1.0" }
+uuid = { version = "1.20.0", features = ["v4", "v5"] }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-uuid = { version = "1.20.0", features = ["v4"] }

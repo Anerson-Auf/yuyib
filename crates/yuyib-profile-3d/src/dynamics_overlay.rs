@@ -10,9 +10,9 @@
 //! Enable with crate feature `rapier` (wired from `yuyib` via `physics-rapier`).
 //! Without the feature this type is a no-op stub.
 
-use std::{error::Error, fmt};
+use std::{collections::HashMap, error::Error, fmt};
 
-use yuyib_physics::TriangleMesh3d;
+use yuyib_physics::{BodyId3d, TriangleMesh3d};
 use yuyib_render::RenderFrame;
 use yuyib_render_3d::Camera3d;
 
@@ -20,8 +20,8 @@ use yuyib_render_3d::Camera3d;
 use yuyib_model::{MeshPrimitive, PrimitiveError};
 #[cfg(feature = "rapier")]
 use yuyib_physics::{
-    BodyId3d, CollisionGroups3d, DynamicsBackend3d, DynamicsBackendError3d,
-    DynamicsWorldConfig3d, RapierDynamicsWorld3d,
+    CollisionGroups3d, DynamicsBackend3d, DynamicsBackendError3d, DynamicsWorldConfig3d,
+    RapierDynamicsWorld3d,
 };
 #[cfg(feature = "rapier")]
 use yuyib_render_3d::{DepthLoad, MeshRenderError, MeshRenderer3d, MeshUploadError};
@@ -65,6 +65,8 @@ struct OverlayInner {
     dynamic_props: Vec<BodyId3d>,
     character_proxy: BodyId3d,
     cube: MeshPrimitive,
+    /// Fixed sensor body → semantic trigger id (`level.exit`).
+    trigger_ids: HashMap<BodyId3d, String>,
 }
 
 #[cfg(feature = "rapier")]
@@ -256,6 +258,7 @@ impl DynamicsOverlay3d {
                 dynamic_props,
                 character_proxy,
                 cube: MeshPrimitive::cube(MESH_HALF)?,
+                trigger_ids: HashMap::new(),
             }),
         })
     }
@@ -396,6 +399,77 @@ impl DynamicsOverlay3d {
             false
         }
     }
+
+    /// Registers an authored trigger as a fixed Rapier sensor sphere.
+    ///
+    /// Sensors overlap the kinematic character proxy (and props). Call hosts
+    /// feed [`Self::trigger_overlap_pairs`] into Play's `TriggerOverlapTracker`.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the overlay is inactive or the sensor insert fails.
+    pub fn register_trigger_sphere(
+        &mut self,
+        center: [f32; 3],
+        radius: f32,
+        trigger_id: impl Into<String>,
+    ) -> Result<(), DynamicsOverlayError3d> {
+        #[cfg(feature = "rapier")]
+        {
+            let Some(inner) = self.inner.as_mut() else {
+                return Err(DynamicsOverlayError3d::InactiveOverlay);
+            };
+            let body = inner.world.insert_trigger_sphere(center, radius)?;
+            // Sensors see character + props; map is non-sensor so ignored by
+            // collect_trigger_overlaps pairing rules.
+            inner.world.set_collision_groups(
+                body,
+                CollisionGroups3d::new(GROUP_MAP, GROUP_CHAR | GROUP_PROP),
+            )?;
+            inner.trigger_ids.insert(body, trigger_id.into());
+            Ok(())
+        }
+        #[cfg(not(feature = "rapier"))]
+        {
+            let _ = (center, radius, trigger_id);
+            Err(DynamicsOverlayError3d::Inactive)
+        }
+    }
+
+    /// Current sensor intersection pairs `(trigger_body, other_body)`.
+    #[must_use]
+    pub fn trigger_overlap_pairs(&self) -> Vec<(BodyId3d, BodyId3d)> {
+        #[cfg(feature = "rapier")]
+        {
+            self.inner
+                .as_ref()
+                .map(|inner| inner.world.collect_trigger_overlaps())
+                .unwrap_or_default()
+        }
+        #[cfg(not(feature = "rapier"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Semantic trigger id map for sensor bodies registered via
+    /// [`Self::register_trigger_sphere`].
+    #[must_use]
+    pub fn trigger_ids(&self) -> &HashMap<BodyId3d, String> {
+        #[cfg(feature = "rapier")]
+        {
+            static EMPTY: std::sync::OnceLock<HashMap<BodyId3d, String>> = std::sync::OnceLock::new();
+            self.inner.as_ref().map_or_else(
+                || EMPTY.get_or_init(HashMap::new),
+                |inner| &inner.trigger_ids,
+            )
+        }
+        #[cfg(not(feature = "rapier"))]
+        {
+            static EMPTY: std::sync::OnceLock<HashMap<BodyId3d, String>> = std::sync::OnceLock::new();
+            EMPTY.get_or_init(HashMap::new)
+        }
+    }
 }
 
 /// Failure while constructing or drawing [`DynamicsOverlay3d`].
@@ -413,6 +487,9 @@ pub enum DynamicsOverlayError3d {
     /// Prop batch draw failed.
     #[cfg(feature = "rapier")]
     Render(MeshRenderError),
+    /// Overlay was not constructed (no active Rapier world).
+    #[cfg(feature = "rapier")]
+    InactiveOverlay,
     /// Stub variant so the enum is non-empty without Rapier.
     #[cfg(not(feature = "rapier"))]
     Inactive,
@@ -429,6 +506,8 @@ impl fmt::Display for DynamicsOverlayError3d {
             Self::Upload(ref error) => write!(formatter, "dynamics overlay upload: {error}"),
             #[cfg(feature = "rapier")]
             Self::Render(ref error) => write!(formatter, "dynamics overlay render: {error}"),
+            #[cfg(feature = "rapier")]
+            Self::InactiveOverlay => formatter.write_str("dynamics overlay is not active"),
             #[cfg(not(feature = "rapier"))]
             Self::Inactive => formatter.write_str("dynamics overlay inactive"),
         }
@@ -446,6 +525,8 @@ impl Error for DynamicsOverlayError3d {
             Self::Upload(ref error) => Some(error),
             #[cfg(feature = "rapier")]
             Self::Render(ref error) => Some(error),
+            #[cfg(feature = "rapier")]
+            Self::InactiveOverlay => None,
             #[cfg(not(feature = "rapier"))]
             Self::Inactive => None,
         }
@@ -613,4 +694,51 @@ fn trs_matrix_xyzw(
         c0[0], c0[1], c0[2], c0[3], c1[0], c1[1], c1[2], c1[3], c2[0], c2[1], c2[2], c2[3],
         translation[0], translation[1], translation[2], 1.0,
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stub_or_active_step_returns_finite_reaction() {
+        let mut overlay =
+            DynamicsOverlay3d::around_spawn([0.0, 1.0, 0.0], 0.4).expect("construct");
+        let reaction = overlay.step(1.0 / 60.0, [0.0, 1.0, 0.0]);
+        assert!(reaction.iter().all(|v| v.is_finite()));
+        #[cfg(not(feature = "rapier"))]
+        {
+            assert!(!overlay.is_active());
+            assert_eq!(reaction, [0.0, 0.0, 0.0]);
+        }
+        #[cfg(feature = "rapier")]
+        {
+            assert!(overlay.is_active());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "rapier")]
+    fn around_spawn_with_no_solid_stays_active() {
+        // No solid mesh → proxy floor path inside build().
+        let overlay =
+            DynamicsOverlay3d::around_spawn([1.0, 2.0, 3.0], 0.35).expect("proxy floor");
+        assert!(overlay.is_active());
+        let reaction = {
+            let mut overlay = overlay;
+            overlay.step(1.0 / 60.0, [1.0, 2.0, 3.0])
+        };
+        assert!(reaction.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    #[cfg(feature = "rapier")]
+    fn register_trigger_sphere_on_active_overlay() {
+        let mut overlay =
+            DynamicsOverlay3d::around_spawn([0.0, 1.0, 0.0], 0.4).expect("construct");
+        overlay
+            .register_trigger_sphere([0.0, 1.0, 2.0], 1.0, "level.exit")
+            .expect("sensor");
+        assert!(overlay.trigger_ids().values().any(|id| id == "level.exit"));
+    }
 }

@@ -15,7 +15,10 @@
 
 ## Быстрый пример
 
-Короткий компилируемый пример или ссылка на canonical example в workspace.
+Короткий компилируемый пример **с пояснением, зачем каждая функция**, или
+ссылка на canonical example + tutorial.
+
+Для beginner path см. также раздел **Учебные tutorials** в SUMMARY.
 
 ## Модель / lifecycle
 

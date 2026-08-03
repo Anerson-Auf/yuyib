@@ -22,7 +22,7 @@ use yuyib::{
     platform::WindowConfig,
     profile_2d::{
         CameraFollow2d, Game2dProfile, LocationFrame2d, LocationPortal2d, LocationPortalAction2d,
-        LocationStack2d, PlayableLoop2d, PlayableLoopDesc2d,
+        LocationStack2d, PlayableLoop2d, PlayableLoopDesc2d, WorldBounds2d,
     },
     render::ClearColor,
     render_2d::Camera2d,
@@ -57,7 +57,7 @@ const LOCAL_WALL_SOLID: u32 = 177; // GID 178 — flat opaque dirt border
 const INTERIOR_GRID: [u32; 2] = [12, 10];
 
 struct OutdoorCache {
-    tile_map: TileMap2d,
+    tile_maps: Vec<TileMap2d>,
     collision: TileCollision2d,
     object_layers: Vec<ImportedTiledObjectLayer2d>,
     tile_pixel_size: [u32; 2],
@@ -286,7 +286,7 @@ fn spawn_outdoor_location(
     profile: &mut Game2dProfile,
     outdoor: &OutdoorCache,
 ) -> Result<LocationFrame2d, Box<dyn Error>> {
-    let grid = outdoor.tile_map.grid();
+    let grid = outdoor.tile_maps[0].grid();
     let mut solid = outdoor.collision.solid().to_vec();
     let mut entities = Vec::new();
 
@@ -331,11 +331,17 @@ fn spawn_outdoor_location(
     }
 
     let collision = TileCollision2d::new(grid, solid)?;
-    let map_entity = profile
-        .world_mut()
-        .spawn((outdoor.tile_map.clone().with_layer(0), collision))
-        .id();
-    entities.insert(0, map_entity);
+    for (index, map) in outdoor.tile_maps.iter().enumerate() {
+        let entity = if index == 0 {
+            profile
+                .world_mut()
+                .spawn((map.clone(), collision.clone()))
+                .id()
+        } else {
+            profile.world_mut().spawn(map.clone()).id()
+        };
+        entities.push(entity);
+    }
 
     let spawn = find_spawn(
         &outdoor.object_layers,
@@ -423,9 +429,16 @@ fn try_interact(demo: &mut Demo) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn camera_bounds_for_grid(grid: [u32; 2]) -> Result<WorldBounds2d, Box<dyn Error>> {
+    Ok(WorldBounds2d::from_origin_size(
+        [0.0, 0.0],
+        [grid[0] as f32 * WORLD_TILE, grid[1] as f32 * WORLD_TILE],
+    )?)
+}
+
 fn enter_house(demo: &mut Demo, from: [f32; 2]) -> Result<(), Box<dyn Error>> {
     demo.outdoor_return = from;
-    let regions = demo.outdoor.tile_map.regions().to_vec();
+    let regions = demo.outdoor.tile_maps[0].regions().to_vec();
     let (map, collision, spawn, exit) = build_interior_room(regions)?;
     let map_entity = demo
         .profile
@@ -441,6 +454,9 @@ fn enter_house(demo: &mut Demo, from: [f32; 2]) -> Result<(), Box<dyn Error>> {
             spawn,
         },
     );
+    demo.playable.set_camera_follow(
+        CameraFollow2d::new().with_bounds(camera_bounds_for_grid(INTERIOR_GRID)?),
+    );
     set_actor_position(&mut demo.profile, demo.playable.actor(), spawn)?;
     eprintln!("entered {LOCATION_HOUSE}");
     Ok(())
@@ -452,6 +468,10 @@ fn exit_house(demo: &mut Demo) -> Result<(), Box<dyn Error>> {
         return Err(format!("expected outdoor restore, got {restored}").into());
     }
     let frame = spawn_outdoor_location(&mut demo.profile, &demo.outdoor)?;
+    let outdoor_grid = demo.outdoor.tile_maps[0].grid();
+    demo.playable.set_camera_follow(
+        CameraFollow2d::new().with_bounds(camera_bounds_for_grid(outdoor_grid)?),
+    );
     demo.locations.replace_current(frame);
     set_actor_position(
         &mut demo.profile,
@@ -501,8 +521,8 @@ fn create_demo() -> Result<Demo, Box<dyn Error>> {
     let visual_layer = bound.visual_layer().to_owned();
     let tile_pixel_size = bound.tile_pixel_size();
     let world_tile_size = bound.world_tile_size();
-    let (tile_map, collision, object_layers) = bound.into_parts();
-    let grid = tile_map.grid();
+    let (tile_maps, collision, object_layers) = bound.into_parts();
+    let grid = tile_maps[0].grid();
 
     let idle_cell = TextureSize::new(32, 32)?;
     let walk_cell = TextureSize::new(32, 32)?;
@@ -553,7 +573,7 @@ fn create_demo() -> Result<Demo, Box<dyn Error>> {
     )?;
 
     let outdoor = OutdoorCache {
-        tile_map,
+        tile_maps,
         collision,
         object_layers,
         tile_pixel_size,
@@ -589,7 +609,9 @@ fn create_demo() -> Result<Demo, Box<dyn Error>> {
     );
 
     let playable = PlayableLoop2d::new(
-        PlayableLoopDesc2d::new(player, 1_024)?.with_camera(CameraFollow2d::new()),
+        PlayableLoopDesc2d::new(player, 1_024)?.with_camera(
+            CameraFollow2d::new().with_bounds(camera_bounds_for_grid(grid)?),
+        ),
     );
 
     Ok(Demo {

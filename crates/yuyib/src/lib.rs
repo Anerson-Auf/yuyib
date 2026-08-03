@@ -100,8 +100,8 @@ pub mod prelude {
     pub use crate::app::{Application, FrameContext, RenderLoop, WindowEventContext};
     #[cfg(feature = "ui")]
     pub use crate::app::{
-        ApplicationUi, NativeUiTextConfig, NativeUiTextError, NativeUiTextInitError,
-        pause_overlay_tree,
+        ApplicationUi, NativeUiTextConfig, NativeUiTextError, NativeUiTextInitError, UiDrawList,
+        UiVisualStyle, pause_overlay_tree,
     };
     #[cfg(feature = "webview")]
     pub use crate::app::{ApplicationWebView, ApplicationWebViewHandle};
@@ -146,9 +146,10 @@ pub mod prelude {
     };
     #[cfg(feature = "two-d")]
     pub use crate::profile_2d::{
-        CameraFollow2d, Game2dProfile, Game2dProfileError, LocationFrame2d, LocationPortal2d,
+        CameraCut2d, CameraDirector2d, CameraFollow2d, CameraFollowRuntime2d, CameraShake2d,
+        Game2dProfile, Game2dProfileError, LocationFrame2d, LocationPortal2d,
         LocationPortalAction2d, LocationStack2d, LocationStackError2d, PlayableLoop2d,
-        PlayableLoopDesc2d, PlayableLoopError2d,
+        PlayableLoopDesc2d, PlayableLoopError2d, WorldBounds2d, WorldBoundsError2d,
     };
     #[cfg(all(feature = "two-d", feature = "character-2d"))]
     pub use crate::profile_2d::{
@@ -176,7 +177,7 @@ pub mod prelude {
         SpriteAnimatorError2d, SpriteExtractionLimits2d, SpriteFacing2d, SpriteMoveInput2d,
         SpriteViewport2d, TextureCacheConfig2d, TextureQueueError2d, TileCollision2d,
         TileKinematicAabbContact2d, TileKinematicAabbLimits2d, TileKinematicAabbMove2d, TileMap2d,
-        TileMapComposer2d, TileMapComposerError2d, TileStamp2d, TileViewport2d,
+        TileMapComposer2d, TileMapComposerError2d, TileStamp2d, TileViewport2d, TileFlip2d,
         VelocityFacingPolicy2d, VelocityFacingPose2d, apply_cardinal_clips_2d,
         apply_velocity_facing_2d, build_tile_static_colliders_2d, extract_tile_collisions_2d,
         extract_tiles_2d, extract_tiles_chunked_2d, extract_visible_sprites_2d,
@@ -203,10 +204,13 @@ pub mod prelude {
     pub use crate::gameplay::interaction_3d::{UseRaycast3dConfig, request_use_raycast_3d};
     #[cfg(feature = "gameplay")]
     pub use crate::gameplay::{
-        ActionId, ActionStates, ActionValue, Interactable, InteractionRequested, ObjectiveId,
-        QuestBook, QuestDefinition, QuestEventId, QuestId, QuestObjective, QuestSignal,
-        QuestStatus, Trigger, WorldInteractionActivation, WorldInteractionEvent,
-        WorldInteractionEvents, WorldInteractionState, WorldInteractionTarget,
+        ActionId, ActionStates, ActionValue, DialogueChoice, DialogueChoiceId, DialogueCondition,
+        DialogueEffect, DialogueEvent, DialogueGraph, DialogueId, DialogueNode, DialogueNodeId,
+        DialoguePresentation, DialogueSession, Interactable, InteractionCursorHint,
+        InteractionPrompt2d, InteractionRequested, ObjectiveId, QuestBook, QuestDefinition,
+        QuestEventId, QuestId, QuestObjective, QuestSignal, QuestStatus, StoryFlagId, StoryFlags,
+        Trigger, WorldInteractionActivation, WorldInteractionEvent, WorldInteractionEvents,
+        WorldInteractionState, WorldInteractionTarget,
     };
     #[cfg(feature = "three-d")]
     pub use crate::gltf::{
@@ -322,10 +326,12 @@ pub mod prelude {
     };
     #[cfg(feature = "two-d")]
     pub use crate::tiled::{
-        BoundTiledMap2d, ImportedTiledMap, ImportedTiledObject2d, ImportedTiledObjectLayer2d,
-        TiledBindError, TiledImportError, TiledImportLimits, TiledImportLimitsError,
-        TiledMapImporter, TiledPropertyValue, register_tiled_map_importer, world_from_tiled_px,
-        ExternalTilesetBytes,
+        BoundTiledMap2d, ExternalTilesetBytes, ImportedTiledMap, ImportedTiledObject2d,
+        ImportedTiledObjectLayer2d, ImportedTiledTileset2d, ImportedTiledVisualLayer2d,
+        LDTK_PROJECT_MEDIA_TYPE, LdtkProjectImporter, ExternalLdtkLevelBytes, TILED_MAP_MEDIA_TYPE,
+        TILED_MAP_XML_MEDIA_TYPE, TiledAssembleError, TiledBindError, TiledImportError,
+        TiledImportLimits, TiledImportLimitsError, TiledMapImporter, TiledPropertyValue,
+        register_ldtk_project_importer, register_tiled_map_importer, world_from_tiled_px,
     };
     #[cfg(feature = "ui")]
     pub use crate::ui::{

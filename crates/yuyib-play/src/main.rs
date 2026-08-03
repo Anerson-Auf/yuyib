@@ -6,6 +6,12 @@
 //! [`PlayerCharacterControls3d`] (remappable WASD / jump / sprint, code
 //! defaults) drives a [`CharacterController3d`] with mouse-look follow camera
 //! (plane motor fallback when the scene has no triangles).
+//!
+//! Optional side-by-side Rapier props overlay (mesh motor unchanged):
+//!
+//! ```text
+//! cargo build -p yuyib-play --features physics-rapier
+//! ```
 
 #![forbid(unsafe_code)]
 
@@ -44,12 +50,14 @@ use yuyib::{
     model::{Model, ModelHandle},
     physics::{Ray3d, TriangleMesh3d, Vec2, Vec3},
     platform::{CursorControl, WindowConfig},
+    profile_3d::DynamicsOverlay3d,
     render::{BloomConfig, ClearColor, ColorGradeConfig, ColorPostProcess, FxaaConfig},
     render_3d::{
         Game3dLighting, Game3dScene, Game3dSceneConfig, Game3dShading, LambertLighting3d,
         UnboundMaterialPolicy3d,
     },
 };
+use yuyib_assets::CookCache;
 use yuyib_authoring::SceneDocument;
 use yuyib_ecs::bevy_ecs::entity::Entity;
 use yuyib_game_3d::{
@@ -60,6 +68,7 @@ use yuyib_game_3d_authoring::materialize_transform_scene;
 use yuyib_gameplay::{
     ActionStates, ObjectiveId, QuestBook, QuestDefinition, QuestId, QuestObjective,
 };
+use yuyib_gltf::{ImportOptions, import_scene_bytes_cached_at};
 use yuyib_platform::winit::{
     event::{ElementState, WindowEvent},
     keyboard::{KeyCode, PhysicalKey},
@@ -67,6 +76,7 @@ use yuyib_platform::winit::{
 use yuyib_scene::{SceneSelection, spawn_scene};
 
 use interaction_bridge::PlayInteractionHost;
+use trigger_signals::TriggerOverlapTracker;
 use use_interaction::{
     materialize_interactables, sync_interactable_positions, try_use_interaction,
 };
@@ -331,6 +341,7 @@ fn run() -> Result<(), String> {
     );
 
     let title = format!("Yuyib Play — {scene_rel}");
+    let dynamics = build_dynamics_overlay(player_body.as_ref(), player_config.radius);
     let play = Rc::new(RefCell::new(PlayRuntime {
         player_entity,
         body: player_body,
@@ -346,10 +357,19 @@ fn run() -> Result<(), String> {
         actions: ActionStates::default(),
         pending_use: false,
         trigger_tracker: EntityTriggerTracker::default(),
+        dynamics,
+        rapier_trigger_tracker: TriggerOverlapTracker::default(),
     }));
     {
         let mut runtime = play.borrow_mut();
+        runtime.interaction.set_proxy_model(proxy);
         install_quest_smoke(&mut runtime.interaction);
+        register_rapier_trigger_sensors(&mut runtime.dynamics, &mut world.borrow_mut());
+        if runtime.dynamics.is_active() {
+            play_log(
+                "yuyib-play: Rapier dynamics overlay active (props + soft reaction; mesh motor unchanged)",
+            );
+        }
     }
 
     let event_play = Rc::clone(&play);
@@ -432,6 +452,10 @@ fn run() -> Result<(), String> {
                 render_models.as_ref(),
             ) {
                 eprintln!("yuyib-play: render failed: {error}");
+            }
+            let camera = *render_scene.borrow_mut().camera_mut();
+            if let Err(error) = render_play.borrow_mut().dynamics.draw(frame, camera) {
+                eprintln!("yuyib-play: dynamics overlay draw failed: {error}");
             }
         })
         .run()
@@ -553,8 +577,12 @@ struct PlayRuntime {
     actions: ActionStates,
     /// Edge-triggered `KeyE` → attempt use this frame.
     pending_use: bool,
-    /// Authoring sphere triggers → `trigger.*` bridge signals.
+    /// Authoring sphere triggers → `trigger.*` bridge signals (no Rapier).
     trigger_tracker: EntityTriggerTracker,
+    /// Side-by-side Rapier props (+ optional sensors when feature-enabled).
+    dynamics: DynamicsOverlay3d,
+    /// Rapier sensor pair → `trigger.*` intents (used when overlay is active).
+    rapier_trigger_tracker: TriggerOverlapTracker,
 }
 
 enum PlayerBody {
@@ -608,6 +636,18 @@ impl PlayerBody {
                 .step(input)
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn apply_external_displacement(&mut self, displacement: Vec3) -> Result<(), String> {
+        match self {
+            Self::Mesh {
+                controller,
+                collider,
+            } => controller
+                .apply_external_displacement(displacement, collider.mesh())
+                .map_err(|error| error.to_string()),
+            Self::Plane(_) => Ok(()),
         }
     }
 }
@@ -709,15 +749,36 @@ impl PlayRuntime {
                 if body.step(input).is_err() {
                     break;
                 }
+                let position = body.position();
+                let reaction = self.dynamics.step(
+                    fixed_delta,
+                    [position.x, position.y, position.z],
+                );
+                if reaction[0] != 0.0 || reaction[1] != 0.0 || reaction[2] != 0.0 {
+                    let _ = body.apply_external_displacement(Vec3::new(
+                        reaction[0],
+                        reaction[1],
+                        reaction[2],
+                    ));
+                }
                 self.fixed_accumulator_seconds -= fixed_delta;
             }
 
             let position = body.position();
             sync_player_visual_transform(world, entity, position);
             sync_trigger_positions(world);
-            for intent in step_trigger_volumes(world, entity, position, &mut self.trigger_tracker)
-            {
-                self.interaction.enqueue(intent);
+            if self.dynamics.is_active() {
+                let pairs = self.dynamics.trigger_overlap_pairs();
+                let ids = self.dynamics.trigger_ids().clone();
+                for intent in self.rapier_trigger_tracker.diff_to_intents(&pairs, &ids) {
+                    self.interaction.enqueue(intent);
+                }
+            } else {
+                for intent in
+                    step_trigger_volumes(world, entity, position, &mut self.trigger_tracker)
+                {
+                    self.interaction.enqueue(intent);
+                }
             }
             self.flush_interactions(world);
         }
@@ -876,6 +937,9 @@ fn sync_player_visual_transform(
 /// Prefer a downward raycast and a tight local floor search. Global outdoor
 /// lowest-surface search teleports the chase camera into empty map regions and
 /// looks like “no location / eternal fall”.
+///
+/// Indoor authored spawns must not snap to a roof: casting from high above the
+/// player hits the roof **top** (upward normal) before the interior floor.
 fn spawn_player_on_mesh(
     config: CharacterControllerConfig3d,
     collider: &StaticSceneCollider3d,
@@ -932,16 +996,33 @@ fn spawn_player_on_mesh(
     ))
 }
 
+/// Max how far above the authored spawn a floor hit may land.
+///
+/// Roof tops over indoor markers sit well above this; interior floors sit at or
+/// slightly below the authored feet.
+const SPAWN_FLOOR_MAX_ABOVE_AUTHORED: f32 = 0.75;
+
+#[must_use]
+fn spawn_floor_hit_acceptable(hit_y: f32, authored_y: f32) -> bool {
+    hit_y.is_finite()
+        && authored_y.is_finite()
+        && hit_y <= authored_y + SPAWN_FLOOR_MAX_ABOVE_AUTHORED
+}
+
 fn try_spawn_by_downward_raycast(
     config: CharacterControllerConfig3d,
     mesh: &TriangleMesh3d,
     spawn: Vec3,
 ) -> Result<Option<CharacterController3d>, CharacterControllerError3d> {
+    // Probe from near authored feet first. A high outdoor cast (spawn.y+6) hits
+    // roof tops that cover indoor rooms and teleports the player onto the roof.
     let origins = [
-        Vec3::new(spawn.x, spawn.y + 6.0, spawn.z),
-        Vec3::new(spawn.x, spawn.y + 1.5, spawn.z),
+        Vec3::new(spawn.x, spawn.y + 0.35, spawn.z),
         spawn,
+        Vec3::new(spawn.x, spawn.y + 1.5, spawn.z),
+        Vec3::new(spawn.x, spawn.y + 6.0, spawn.z),
     ];
+    let mut best: Option<(f32, CharacterController3d)> = None;
     for origin in origins {
         let Ok(ray) = Ray3d::new(origin, Vec3::new(0.0, -1.0, 0.0)) else {
             continue;
@@ -959,6 +1040,9 @@ fn try_spawn_by_downward_raycast(
         if hit.normal.y < 0.35 {
             continue;
         }
+        if !spawn_floor_hit_acceptable(hit.position.y, spawn.y) {
+            continue;
+        }
         let position = Vec3::new(
             hit.position.x,
             hit.position.y + config.radius + 0.02,
@@ -968,15 +1052,96 @@ fn try_spawn_by_downward_raycast(
             .resolve_sphere(position, config.radius, config.collision_iterations)
             .map_err(CharacterCollisionError3d::from)
             .map_err(CharacterControllerError3d::Collision)?;
-        if clearance.contacts != 0 {
-            // Nudge to resolved pose when barely intersecting the floor.
+        let controller = if clearance.contacts != 0 {
             let mut controller = CharacterController3d::new(config, clearance.position)?;
             controller.place_on_triangle_mesh(mesh)?;
-            return Ok(Some(controller));
+            controller
+        } else {
+            CharacterController3d::new(config, position)?
+        };
+        let elevation_error = (controller.position().y - spawn.y).abs();
+        match &best {
+            Some((best_error, _)) if *best_error <= elevation_error => {}
+            _ => best = Some((elevation_error, controller)),
         }
-        return Ok(Some(CharacterController3d::new(config, position)?));
     }
-    Ok(None)
+    Ok(best.map(|(_, controller)| controller))
+}
+
+fn build_dynamics_overlay(
+    body: Option<&PlayerBody>,
+    character_radius: f32,
+) -> DynamicsOverlay3d {
+    let (spawn, solid) = match body {
+        Some(PlayerBody::Mesh {
+            controller,
+            collider,
+        }) => {
+            let position = controller.position();
+            (
+                [position.x, position.y, position.z],
+                Some(collider.mesh()),
+            )
+        }
+        Some(PlayerBody::Plane(motor)) => {
+            let position = motor.position();
+            ([position.x, position.y, position.z], None)
+        }
+        None => ([0.0, 1.0, 0.0], None),
+    };
+    let radius = character_radius.max(0.05);
+    let result = match solid {
+        Some(mesh) => DynamicsOverlay3d::around_spawn_with_solid_mesh(spawn, radius, mesh),
+        None => DynamicsOverlay3d::around_spawn(spawn, radius),
+    };
+    match result {
+        Ok(overlay) => overlay,
+        Err(error) => {
+            play_log(format!(
+                "yuyib-play: dynamics overlay unavailable: {error}"
+            ));
+            DynamicsOverlay3d::around_spawn(spawn, radius).unwrap_or_else(|_| {
+                DynamicsOverlay3d::around_spawn([0.0, 0.0, 0.0], 0.3).expect("stub overlay")
+            })
+        }
+    }
+}
+
+fn register_rapier_trigger_sensors(
+    dynamics: &mut DynamicsOverlay3d,
+    world: &mut yuyib_ecs::prelude::World,
+) {
+    if !dynamics.is_active() {
+        return;
+    }
+    use yuyib_gameplay::Trigger;
+    use yuyib_physics::{Position3d, SphereCollider3d};
+
+    let mut query = world.query::<(&Trigger, &Position3d, &SphereCollider3d)>();
+    let mut count = 0_usize;
+    for (trigger, position, sphere) in query.iter(world) {
+        if !trigger.enabled {
+            continue;
+        }
+        let center = position.get();
+        if let Err(error) = dynamics.register_trigger_sphere(
+            [center.x, center.y, center.z],
+            sphere.sphere().radius(),
+            trigger.trigger.as_str(),
+        ) {
+            play_log(format!(
+                "yuyib-play: Rapier trigger `{}` skipped: {error}",
+                trigger.trigger.as_str()
+            ));
+            continue;
+        }
+        count += 1;
+    }
+    if count > 0 {
+        play_log(format!(
+            "yuyib-play: {count} Rapier trigger sensor(s) registered (sphere-query path off)"
+        ));
+    }
 }
 
 fn plane_motor_fallback(
@@ -1098,6 +1263,21 @@ mod pin_tests {
     }
 }
 
+#[cfg(test)]
+mod spawn_tests {
+    use super::spawn_floor_hit_acceptable;
+
+    #[test]
+    fn rejects_roof_hits_above_authored_indoor_spawn() {
+        let authored_y = 1.58_f32;
+        assert!(spawn_floor_hit_acceptable(1.0, authored_y));
+        assert!(spawn_floor_hit_acceptable(authored_y, authored_y));
+        assert!(spawn_floor_hit_acceptable(authored_y + 0.5, authored_y));
+        assert!(!spawn_floor_hit_acceptable(authored_y + 2.0, authored_y));
+        assert!(!spawn_floor_hit_acceptable(4.5, authored_y));
+    }
+}
+
 fn attach_gltf_hierarchy(
     project: &Path,
     world: &mut yuyib_ecs::prelude::World,
@@ -1147,13 +1327,36 @@ fn attach_gltf_hierarchy(
         return Ok(false);
     }
     let _ = cache;
-    let imported = yuyib_gltf::import_scene_path(&absolute).map_err(|error| error.to_string())?;
+    let cook_root = play_cook_cache_root(project);
+    let (imported, cook_hit) = import_gltf_with_cook_cache(&absolute, &cook_root)?;
+    eprintln!(
+        "yuyib-play: glTF {} {} (cook={})",
+        if cook_hit { "cook hit" } else { "cook miss" },
+        absolute.display(),
+        cook_root.display()
+    );
     let spawned = spawn_scene(world, models, &imported, SceneSelection::Default)
         .map_err(|error| error.to_string())?;
     for child in spawned.roots() {
         set_parent_3d(world, *child, root).map_err(|error| error.to_string())?;
     }
     Ok(true)
+}
+
+fn play_cook_cache_root(project: &Path) -> PathBuf {
+    project.join(".yuyib_cook")
+}
+
+/// Same disk cook path as Editor Preview / `project.cook` / ypack hydrate.
+fn import_gltf_with_cook_cache(
+    absolute: &Path,
+    cook_root: &Path,
+) -> Result<(yuyib_gltf::ImportedAsset, bool), String> {
+    let bytes = fs::read(absolute).map_err(|error| error.to_string())?;
+    let parent = absolute.parent().unwrap_or_else(|| Path::new("."));
+    let cache = CookCache::new(cook_root);
+    import_scene_bytes_cached_at(&bytes, parent, ImportOptions::default(), &cache)
+        .map_err(|error| error.to_string())
 }
 
 fn resolve_model(
@@ -1397,4 +1600,76 @@ fn vec3_field(payload: &Value, key: &str) -> Result<Option<[f32; 3]>, String> {
         }
     }
     Ok(Some(out))
+}
+
+#[cfg(test)]
+mod cook_cache_tests {
+    use super::{import_gltf_with_cook_cache, play_cook_cache_root};
+    use std::fs;
+
+    fn temporary_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "yuyib_play_cook_{label}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("assets/models")).expect("dirs");
+        root
+    }
+
+    fn valid_triangle_glb() -> Vec<u8> {
+        let mut binary = Vec::new();
+        binary.extend([0_u16, 1, 2].into_iter().flat_map(u16::to_le_bytes));
+        binary.extend([0_u8; 2]);
+        for position in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            binary.extend(position.into_iter().flat_map(f32::to_le_bytes));
+        }
+        let json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"root","mesh":0}],"buffers":[{"byteLength":44}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":6},{"buffer":0,"byteOffset":8,"byteLength":36}],"accessors":[{"bufferView":0,"componentType":5123,"count":3,"type":"SCALAR"},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],"meshes":[{"primitives":[{"attributes":{"POSITION":1},"indices":0}]}]}"#;
+        let mut padded_json = json.to_vec();
+        while !padded_json.len().is_multiple_of(4) {
+            padded_json.push(b' ');
+        }
+        while !binary.len().is_multiple_of(4) {
+            binary.push(0);
+        }
+        let total = 12 + 8 + padded_json.len() + 8 + binary.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend(b"glTF");
+        glb.extend(2_u32.to_le_bytes());
+        glb.extend(u32::try_from(total).expect("glb size").to_le_bytes());
+        glb.extend(u32::try_from(padded_json.len()).expect("json size").to_le_bytes());
+        glb.extend(0x4E4F_534A_u32.to_le_bytes());
+        glb.extend(padded_json);
+        glb.extend(u32::try_from(binary.len()).expect("bin size").to_le_bytes());
+        glb.extend(0x004E_4942_u32.to_le_bytes());
+        glb.extend(binary);
+        glb
+    }
+
+    #[test]
+    fn play_cook_cache_miss_then_hit() {
+        let root = temporary_root("hit");
+        let abs = root.join("assets/models/hero.glb");
+        fs::write(&abs, valid_triangle_glb()).expect("write");
+        let cook_root = play_cook_cache_root(&root);
+
+        let (_, first_hit) = import_gltf_with_cook_cache(&abs, &cook_root).expect("first");
+        assert!(!first_hit);
+        let (_, second_hit) = import_gltf_with_cook_cache(&abs, &cook_root).expect("second");
+        assert!(second_hit);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn play_cook_cache_root_is_project_dot_yuyib_cook() {
+        let project = std::path::Path::new("D:/games/demo");
+        assert_eq!(
+            play_cook_cache_root(project),
+            project.join(".yuyib_cook")
+        );
+    }
 }

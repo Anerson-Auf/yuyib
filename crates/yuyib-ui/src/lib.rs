@@ -6,7 +6,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+    hash::{Hash, Hasher},
+};
 
 /// Stable widget identifier derived from application-owned source keys.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -75,7 +79,10 @@ impl Color {
 }
 
 /// Default vertical scrollbar thumb thickness in logical pixels.
-pub const SCROLL_THUMB_THICKNESS: u32 = 4;
+pub const SCROLL_THUMB_THICKNESS: u32 = 8;
+
+/// Hit-test width for the thumb/track (may exceed the painted thickness).
+pub const SCROLL_THUMB_HIT_THICKNESS: u32 = 16;
 
 /// Minimum thumb height so a tiny overflow remains visible.
 const SCROLL_THUMB_MIN_HEIGHT: u32 = 8;
@@ -378,6 +385,33 @@ impl WidgetStyle {
     }
 }
 
+/// Opaque application-owned image/icon identifier for retained UI.
+///
+/// The UI tree stores only this id. Decode, GPU upload and atlas packing stay
+/// with the host (or a later `ApplicationUi` image registry).
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct UiImageId(u64);
+
+impl UiImageId {
+    /// Creates an application-defined image id.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the raw identifier.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for UiImageId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "ui-image-{}", self.0)
+    }
+}
+
 /// Semantic widget type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WidgetKind {
@@ -389,6 +423,8 @@ pub enum WidgetKind {
     Label(String),
     /// Pressable semantic action.
     Button(String),
+    /// Non-interactive image/icon keyed by [`UiImageId`].
+    Image(UiImageId),
 }
 
 impl WidgetKind {
@@ -430,7 +466,9 @@ impl Widget {
             kind: WidgetKind::Label(text.into()),
             enabled: true,
             constraints: LayoutConstraints::default(),
-            style: WidgetStyle::default(),
+            style: WidgetStyle::default()
+                .with_foreground(ColorToken::Text)
+                .with_min_size(Size::new(0, 20)),
             children: Vec::new(),
         }
     }
@@ -445,8 +483,26 @@ impl Widget {
             constraints: LayoutConstraints::default(),
             style: WidgetStyle::default()
                 .with_background(ColorToken::Accent)
+                .with_foreground(ColorToken::Text)
                 .with_padding(Insets::all(8))
                 .with_min_size(Size::new(80, 32)),
+            children: Vec::new(),
+        }
+    }
+
+    /// Creates a non-interactive image/icon slot.
+    ///
+    /// Intrinsic size defaults to 24×24; override with
+    /// [`Self::with_constraints`] / style `min_size`. The host resolves
+    /// [`UiImageId`] to pixels or a GPU texture outside this crate.
+    #[must_use]
+    pub fn image(id: WidgetId, image: UiImageId) -> Self {
+        Self {
+            id,
+            kind: WidgetKind::Image(image),
+            enabled: true,
+            constraints: LayoutConstraints::default(),
+            style: WidgetStyle::default().with_min_size(Size::new(24, 24)),
             children: Vec::new(),
         }
     }
@@ -508,6 +564,18 @@ impl Widget {
         &self.kind
     }
 
+    /// Returns image id when this widget is an [`WidgetKind::Image`].
+    #[must_use]
+    pub const fn image_id(&self) -> Option<UiImageId> {
+        match &self.kind {
+            WidgetKind::Image(id) => Some(*id),
+            WidgetKind::Container(_)
+            | WidgetKind::ScrollView
+            | WidgetKind::Label(_)
+            | WidgetKind::Button(_) => None,
+        }
+    }
+
     /// Returns the label or button caption, if this widget has one.
     ///
     /// Renderers should prefer this method over matching [`WidgetKind`] so
@@ -517,7 +585,7 @@ impl Widget {
     pub fn text(&self) -> Option<&str> {
         match &self.kind {
             WidgetKind::Label(text) | WidgetKind::Button(text) => Some(text),
-            WidgetKind::Container(_) | WidgetKind::ScrollView => None,
+            WidgetKind::Container(_) | WidgetKind::ScrollView | WidgetKind::Image(_) => None,
         }
     }
 
@@ -871,16 +939,26 @@ pub struct UiInputState {
     pressed: Option<WidgetId>,
     focused: Option<WidgetId>,
     scroll_offsets: BTreeMap<WidgetId, u32>,
+    scroll_drag: Option<ScrollThumbDrag>,
+}
+
+/// Active vertical scrollbar thumb drag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScrollThumbDrag {
+    scroll_view: WidgetId,
+    /// Pointer Y minus thumb top at grab time (keeps the grab point stable).
+    grab_offset_y: i32,
 }
 
 impl UiInputState {
-    /// Clears pointer hover/press state without changing keyboard focus.
+    /// Clears pointer hover/press/drag state without changing keyboard focus.
     ///
     /// A platform adapter normally calls this after its cursor leaves the UI
     /// surface. It intentionally emits no synthetic action.
     pub fn clear_pointer(&mut self) {
         self.hovered = None;
         self.pressed = None;
+        self.scroll_drag = None;
     }
 
     /// Clears pointer and keyboard-focus state without emitting an action.
@@ -889,6 +967,24 @@ impl UiInputState {
     pub fn clear(&mut self) {
         self.clear_pointer();
         self.focused = None;
+    }
+
+    /// Returns a stable fingerprint of scroll offsets that affect retained layout.
+    ///
+    /// Hover/press/focus are excluded: they change overlays only, not widget
+    /// bounds or scroll clips. Hosts use this to skip full layout rebuilds on
+    /// pointer motion.
+    #[must_use]
+    pub fn scroll_layout_fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (id, offset) in &self.scroll_offsets {
+            id.get().hash(&mut hasher);
+            offset.hash(&mut hasher);
+        }
+        // Thumb drag changes scroll continuously; include presence so a zeroed
+        // map during drag start still invalidates when offsets update.
+        self.scroll_drag.is_some().hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Returns hovered widget.
@@ -914,6 +1010,15 @@ impl UiInputState {
     pub fn scroll_offset(&self, id: WidgetId) -> u32 {
         self.scroll_offsets.get(&id).copied().unwrap_or(0)
     }
+
+    /// Returns the scroll viewport currently captured by a thumb drag, if any.
+    #[must_use]
+    pub const fn scroll_dragging(&self) -> Option<WidgetId> {
+        match self.scroll_drag {
+            Some(drag) => Some(drag.scroll_view),
+            None => None,
+        }
+    }
 }
 
 /// Semantic interaction transition.
@@ -929,7 +1034,8 @@ pub enum UiAction {
     Focused(WidgetId),
     /// Focused button was activated with Enter or Space.
     Activated(WidgetId),
-    /// A viewport accepted wheel input and changed its retained offset.
+    /// A viewport accepted wheel or scrollbar-thumb input and changed its
+    /// retained offset.
     Scrolled(WidgetId),
 }
 
@@ -954,7 +1060,12 @@ impl UiResponse {
     }
 }
 
-/// Hit-tests a pointer sample and emits semantic button events.
+/// Hit-tests a pointer sample and emits semantic button / scrollbar events.
+///
+/// Scrollbar thumb drag has pointer capture: while a drag is active, Move and
+/// PrimaryUp update that viewport and do not hit-test buttons. PrimaryDown on
+/// the thumb starts a drag; PrimaryDown on the track jumps the thumb under the
+/// pointer and starts a drag. Wheel scrolling remains [`handle_scroll_input`].
 ///
 /// # Errors
 ///
@@ -971,6 +1082,47 @@ pub fn handle_input(
         | PointerInput::PrimaryDown(point)
         | PointerInput::PrimaryUp(point) => point,
     };
+
+    if let Some(drag) = state.scroll_drag {
+        let response = apply_scroll_thumb_drag(tree, layout, state, drag, point)?;
+        if matches!(input, PointerInput::PrimaryUp(_)) {
+            state.scroll_drag = None;
+            state.pressed = None;
+        }
+        return Ok(response);
+    }
+
+    if let PointerInput::PrimaryDown(point) = input
+        && let Some(hit) = hit_scrollbar(tree, layout, state, point)?
+    {
+        state.pressed = None;
+        match hit {
+            ScrollbarHit::Thumb {
+                scroll_view,
+                grab_offset_y,
+            } => {
+                state.scroll_drag = Some(ScrollThumbDrag {
+                    scroll_view,
+                    grab_offset_y,
+                });
+                return Ok(UiResponse {
+                    target: Some(scroll_view),
+                    actions: Vec::new(),
+                });
+            }
+            ScrollbarHit::Track { scroll_view } => {
+                let response = jump_scroll_to_track_point(tree, layout, state, scroll_view, point)?;
+                if let Some(thumb) = scroll_thumb_bounds(tree, layout, state, scroll_view)? {
+                    state.scroll_drag = Some(ScrollThumbDrag {
+                        scroll_view,
+                        grab_offset_y: point.y.saturating_sub(thumb.origin.y),
+                    });
+                }
+                return Ok(response);
+            }
+        }
+    }
+
     let target = layout.paint_order.iter().rev().copied().find(|id| {
         layout.interactive.contains(id)
             && layout.bounds(*id).is_some_and(|rect| rect.contains(point))
@@ -1095,6 +1247,253 @@ pub fn vertical_scroll_thumb_bounds(
             viewport.origin.y.saturating_add(to_i32(thumb_y)),
         ),
         size: Size::new(thickness, thumb_height),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollbarHit {
+    Thumb {
+        scroll_view: WidgetId,
+        grab_offset_y: i32,
+    },
+    Track {
+        scroll_view: WidgetId,
+    },
+}
+
+fn hit_scrollbar(
+    tree: &UiTree,
+    layout: &UiLayout,
+    state: &UiInputState,
+    point: Point,
+) -> Result<Option<ScrollbarHit>, UiError> {
+    for id in layout.paint_order.iter().rev().copied() {
+        let Some(metrics) = scroll_view_metrics(tree, layout, id)? else {
+            continue;
+        };
+        if !metrics.viewport.contains(point)
+            || layout
+                .clip(id)
+                .is_some_and(|clip| !clip.contains(point))
+        {
+            continue;
+        }
+        let Some(thumb) = vertical_scroll_thumb_bounds(
+            metrics.viewport,
+            metrics.content_height,
+            state.scroll_offset(id),
+            SCROLL_THUMB_THICKNESS,
+        ) else {
+            continue;
+        };
+        let hit_thumb = thumb_hit_bounds(thumb, metrics.viewport);
+        if hit_thumb.contains(point) {
+            return Ok(Some(ScrollbarHit::Thumb {
+                scroll_view: id,
+                grab_offset_y: point.y.saturating_sub(thumb.origin.y),
+            }));
+        }
+        if track_hit_bounds(metrics.viewport).contains(point) {
+            return Ok(Some(ScrollbarHit::Track { scroll_view: id }));
+        }
+    }
+    Ok(None)
+}
+
+fn thumb_hit_bounds(thumb: Rect, viewport: Rect) -> Rect {
+    let width = SCROLL_THUMB_HIT_THICKNESS
+        .max(thumb.size.width)
+        .min(viewport.size.width);
+    Rect {
+        origin: Point::new(
+            viewport
+                .origin
+                .x
+                .saturating_add(to_i32(viewport.size.width.saturating_sub(width))),
+            thumb.origin.y,
+        ),
+        size: Size::new(width, thumb.size.height),
+    }
+}
+
+fn track_hit_bounds(viewport: Rect) -> Rect {
+    let width = SCROLL_THUMB_HIT_THICKNESS
+        .max(SCROLL_THUMB_THICKNESS)
+        .min(viewport.size.width);
+    Rect {
+        origin: Point::new(
+            viewport
+                .origin
+                .x
+                .saturating_add(to_i32(viewport.size.width.saturating_sub(width))),
+            viewport.origin.y,
+        ),
+        size: Size::new(width, viewport.size.height),
+    }
+}
+
+struct ScrollViewMetrics {
+    viewport: Rect,
+    content_height: u32,
+}
+
+fn scroll_view_metrics(
+    tree: &UiTree,
+    layout: &UiLayout,
+    id: WidgetId,
+) -> Result<Option<ScrollViewMetrics>, UiError> {
+    let Some(widget) = scroll_view_by_id(tree.root(), id) else {
+        return Ok(None);
+    };
+    let viewport = layout
+        .bounds(id)
+        .ok_or(UiError::UnknownLayoutWidget(id))?;
+    let content = widget
+        .children
+        .first()
+        .and_then(|child| layout.bounds(child.id))
+        .ok_or(UiError::UnknownLayoutWidget(id))?;
+    Ok(Some(ScrollViewMetrics {
+        viewport,
+        content_height: content.size.height,
+    }))
+}
+
+fn scroll_thumb_bounds(
+    tree: &UiTree,
+    layout: &UiLayout,
+    state: &UiInputState,
+    id: WidgetId,
+) -> Result<Option<Rect>, UiError> {
+    let Some(metrics) = scroll_view_metrics(tree, layout, id)? else {
+        return Ok(None);
+    };
+    Ok(vertical_scroll_thumb_bounds(
+        metrics.viewport,
+        metrics.content_height,
+        state.scroll_offset(id),
+        SCROLL_THUMB_THICKNESS,
+    ))
+}
+
+fn apply_scroll_thumb_drag(
+    tree: &UiTree,
+    layout: &UiLayout,
+    state: &mut UiInputState,
+    drag: ScrollThumbDrag,
+    point: Point,
+) -> Result<UiResponse, UiError> {
+    let Some(metrics) = scroll_view_metrics(tree, layout, drag.scroll_view)? else {
+        state.scroll_drag = None;
+        return Ok(UiResponse::default());
+    };
+    let overflow = metrics
+        .content_height
+        .saturating_sub(metrics.viewport.size.height);
+    if overflow == 0 {
+        state.scroll_drag = None;
+        state.scroll_offsets.remove(&drag.scroll_view);
+        return Ok(UiResponse {
+            target: Some(drag.scroll_view),
+            actions: Vec::new(),
+        });
+    }
+    let Some(thumb) = vertical_scroll_thumb_bounds(
+        metrics.viewport,
+        metrics.content_height,
+        state.scroll_offset(drag.scroll_view),
+        SCROLL_THUMB_THICKNESS,
+    ) else {
+        state.scroll_drag = None;
+        return Ok(UiResponse::default());
+    };
+    let travel = metrics
+        .viewport
+        .size
+        .height
+        .saturating_sub(thumb.size.height);
+    let thumb_top = point.y.saturating_sub(drag.grab_offset_y);
+    let relative = thumb_top.saturating_sub(metrics.viewport.origin.y);
+    let thumb_y = relative.clamp(0, to_i32(travel));
+    let next = if travel == 0 {
+        0
+    } else {
+        let thumb_y = u32::try_from(thumb_y).unwrap_or(0);
+        u32::try_from((u64::from(thumb_y) * u64::from(overflow)) / u64::from(travel))
+            .unwrap_or(overflow)
+            .min(overflow)
+    };
+    set_scroll_offset(state, drag.scroll_view, next)
+}
+
+fn jump_scroll_to_track_point(
+    tree: &UiTree,
+    layout: &UiLayout,
+    state: &mut UiInputState,
+    id: WidgetId,
+    point: Point,
+) -> Result<UiResponse, UiError> {
+    let Some(metrics) = scroll_view_metrics(tree, layout, id)? else {
+        return Ok(UiResponse::default());
+    };
+    let overflow = metrics
+        .content_height
+        .saturating_sub(metrics.viewport.size.height);
+    if overflow == 0 {
+        return Ok(UiResponse {
+            target: Some(id),
+            actions: Vec::new(),
+        });
+    }
+    let Some(thumb) = vertical_scroll_thumb_bounds(
+        metrics.viewport,
+        metrics.content_height,
+        state.scroll_offset(id),
+        SCROLL_THUMB_THICKNESS,
+    ) else {
+        return Ok(UiResponse {
+            target: Some(id),
+            actions: Vec::new(),
+        });
+    };
+    let travel = metrics
+        .viewport
+        .size
+        .height
+        .saturating_sub(thumb.size.height);
+    let half = to_i32(thumb.size.height / 2);
+    let relative = point
+        .y
+        .saturating_sub(metrics.viewport.origin.y)
+        .saturating_sub(half);
+    let thumb_y = relative.clamp(0, to_i32(travel));
+    let next = if travel == 0 {
+        0
+    } else {
+        let thumb_y = u32::try_from(thumb_y).unwrap_or(0);
+        u32::try_from((u64::from(thumb_y) * u64::from(overflow)) / u64::from(travel))
+            .unwrap_or(overflow)
+            .min(overflow)
+    };
+    set_scroll_offset(state, id, next)
+}
+
+fn set_scroll_offset(
+    state: &mut UiInputState,
+    id: WidgetId,
+    next: u32,
+) -> Result<UiResponse, UiError> {
+    let current = state.scroll_offset(id);
+    if next == current {
+        return Ok(UiResponse {
+            target: Some(id),
+            actions: Vec::new(),
+        });
+    }
+    state.scroll_offsets.insert(id, next);
+    Ok(UiResponse {
+        target: Some(id),
+        actions: vec![UiAction::Scrolled(id)],
     })
 }
 
@@ -1745,6 +2144,8 @@ mod tests {
         let computed = layout_with_measurer(&tree, Size::new(100, 100), &mut measurer)
             .expect("measured layout");
 
+        // `with_style(WidgetStyle::default()…)` replaces the label's default
+        // min_size (0×20); measured height is content + padding only.
         assert_eq!(
             computed.bounds(id("caption")).expect("caption").size,
             Size::new(36, 17)
@@ -2003,6 +2404,73 @@ mod tests {
     }
 
     #[test]
+    fn scrollbar_thumb_drag_updates_offset_and_captures_pointer() {
+        let tree = scroll_tree();
+        let layout = layout_with_input_state(&tree, Size::new(100, 100), &UiInputState::default())
+            .expect("layout");
+        let mut state = UiInputState::default();
+        let viewport = layout.bounds(id("scroll")).expect("viewport");
+        let thumb = vertical_scroll_thumb_bounds(
+            viewport,
+            120,
+            0,
+            SCROLL_THUMB_THICKNESS,
+        )
+        .expect("thumb");
+        let grab = Point::new(thumb.origin.x + 1, thumb.origin.y + 2);
+
+        let down = handle_input(&tree, &layout, &mut state, PointerInput::PrimaryDown(grab))
+            .expect("thumb down");
+        assert_eq!(down.target(), Some(id("scroll")));
+        assert_eq!(state.scroll_dragging(), Some(id("scroll")));
+        assert!(down.actions().is_empty());
+
+        let travel = viewport.size.height.saturating_sub(thumb.size.height);
+        let bottom = Point::new(
+            grab.x,
+            viewport
+                .origin
+                .y
+                .saturating_add(to_i32(travel))
+                .saturating_add(2),
+        );
+        let dragged = handle_input(&tree, &layout, &mut state, PointerInput::Move(bottom))
+            .expect("thumb drag");
+        assert_eq!(dragged.actions(), &[UiAction::Scrolled(id("scroll"))]);
+        assert_eq!(state.scroll_offset(id("scroll")), 80);
+
+        let up = handle_input(&tree, &layout, &mut state, PointerInput::PrimaryUp(bottom))
+            .expect("thumb up");
+        assert_eq!(state.scroll_dragging(), None);
+        assert_eq!(up.target(), Some(id("scroll")));
+    }
+
+    #[test]
+    fn scrollbar_track_click_jumps_and_starts_drag() {
+        let tree = scroll_tree();
+        let layout = layout_with_input_state(&tree, Size::new(100, 100), &UiInputState::default())
+            .expect("layout");
+        let mut state = UiInputState::default();
+        let viewport = layout.bounds(id("scroll")).expect("viewport");
+        let track = Point::new(
+            viewport
+                .origin
+                .x
+                .saturating_add(to_i32(viewport.size.width.saturating_sub(2))),
+            viewport
+                .origin
+                .y
+                .saturating_add(to_i32(viewport.size.height.saturating_sub(4))),
+        );
+
+        let response = handle_input(&tree, &layout, &mut state, PointerInput::PrimaryDown(track))
+            .expect("track click");
+        assert_eq!(response.actions(), &[UiAction::Scrolled(id("scroll"))]);
+        assert!(state.scroll_offset(id("scroll")) > 0);
+        assert_eq!(state.scroll_dragging(), Some(id("scroll")));
+    }
+
+    #[test]
     fn scroll_view_requires_one_column_content_child() {
         assert!(matches!(
             UiBuilder::new(id("root"), LayoutKind::Column)
@@ -2029,6 +2497,34 @@ mod tests {
     }
 
     #[test]
+    fn image_widget_uses_default_min_size_and_exposes_id() {
+        let image = UiImageId::new(7);
+        let tree = UiBuilder::new(id("root"), LayoutKind::Row)
+            .child(Widget::image(id("icon"), image))
+            .build()
+            .expect("tree");
+        let computed = layout(&tree, Size::new(200, 40)).expect("layout");
+        let bounds = computed.bounds(id("icon")).expect("icon");
+        assert_eq!(bounds.size, Size::new(24, 24));
+        assert_eq!(tree.root().children()[0].image_id(), Some(image));
+        assert_eq!(tree.root().children()[0].text(), None);
+    }
+
+    #[test]
+    fn image_widget_rejects_children() {
+        let result = UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(
+                Widget::image(id("icon"), UiImageId::new(1))
+                    .with_children(vec![Widget::label(id("nested"), "no")]),
+            )
+            .build();
+        assert!(matches!(
+            result,
+            Err(UiError::NonContainerHasChildren(_))
+        ));
+    }
+
+    #[test]
     fn vertical_scroll_thumb_tracks_offset_within_viewport() {
         let viewport = Rect {
             origin: Point::new(0, 0),
@@ -2043,7 +2539,7 @@ mod tests {
         let clamped = vertical_scroll_thumb_bounds(viewport, 120, 500, SCROLL_THUMB_THICKNESS)
             .expect("overflow");
 
-        assert_eq!(top.origin.x, 96);
+        assert_eq!(top.origin.x, 92);
         assert_eq!(top.origin.y, 0);
         assert_eq!(top.size.width, SCROLL_THUMB_THICKNESS);
         assert!(top.size.height >= SCROLL_THUMB_MIN_HEIGHT);

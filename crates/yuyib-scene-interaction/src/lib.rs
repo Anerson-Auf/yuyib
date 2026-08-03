@@ -92,12 +92,20 @@ mod tests {
                 payload: None,
             }
         ));
-        assert!(!play_capabilities().supports(
+        assert!(play_capabilities().supports(
             &SceneInteractionIntent::AddComponent {
                 entity: EntityGuid::new(),
                 schema: SCHEMA_MODEL_3D.to_owned(),
                 version: None,
                 payload: None,
+            }
+        ));
+        assert!(play_capabilities().supports(
+            &SceneInteractionIntent::AddComponent {
+                entity: EntityGuid::new(),
+                schema: SCHEMA_PARENT_3D.to_owned(),
+                version: None,
+                payload: Some(serde_json::json!({ "parent": EntityGuid::new().to_string() })),
             }
         ));
     }

@@ -41,12 +41,16 @@ use yuyib_ui::{
 #[cfg(feature = "ui-text")]
 use yuyib_ui::{LayoutWithMeasureError, UiMeasurer, layout_with_measurer_and_input_state};
 #[cfg(feature = "ui")]
-use yuyib_ui::{UiInputState, UiResponse};
+use yuyib_ui::UiResponse;
+#[cfg(feature = "ui-text")]
+use yuyib_ui::UiInputState;
 #[cfg(feature = "ui")]
 use yuyib_ui_render::{
-    UiInputRenderOptions, UiRectangle, UiRenderError, UiRenderLimits, UiRenderStats, UiRenderer,
-    UiVisualStyle,
+    UiInputRenderOptions, UiRenderError, UiRenderLimits, UiRenderStats, UiRenderer,
+    extract_draw_list, extract_draw_list_with_input, extract_image_draw_list,
 };
+#[cfg(feature = "ui-text")]
+use yuyib_ui_render::UiRectangle;
 #[cfg(feature = "ui-text")]
 use yuyib_ui_text::{FontSource, TextEngine, TextError, TextLayoutOptions, TextLimits};
 #[cfg(feature = "ui-text")]
@@ -60,6 +64,9 @@ use yuyib_webview::{
     HostEventError, PageEvent, PageSessionId, WebViewBounds, WebViewBoundsError, WebViewBuilder,
     WebViewError, WebViewHost,
 };
+
+#[cfg(feature = "ui")]
+pub use yuyib_ui_render::{UiDrawList, UiImageDrawList, UiVisualStyle};
 
 /// Render scheduling policy for a high-level application.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -825,14 +832,19 @@ impl Error for NativeUiTextError {
 /// overlay pass. The adapter keeps its explicit [`yuyib_input::UiDpiPolicy`].
 /// With the `ui-text` feature, [`Self::with_text`] adds labels and button
 /// captions from one explicitly configured font. Glyph draws honour retained
-/// [`UiLayout::clip`] from `ScrollView` (WGPU scissor). IME, accessibility and
+/// [`UiLayout::clip`] from `ScrollView` (WGPU scissor). Customise rectangle
+/// chrome via [`Self::with_visual_style`]; for full paint control use
+/// [`Self::extract_draw_list`] / [`Self::extract_image_draw_list`] and a
+/// host-owned [`UiRenderer`] (or custom textured pass). IME, accessibility and
 /// custom render ordering remain lower-level host responsibilities.
 #[cfg(feature = "ui")]
 pub struct ApplicationUi {
     tree: UiTree,
     tokens: UiTokens,
     limits: UiRenderLimits,
-    layout: Option<(UiSize, UiLayout)>,
+    visuals: UiVisualStyle,
+    /// Cached layout keyed by presentation size and scroll fingerprint.
+    layout: Option<(UiSize, u64, UiLayout)>,
     renderer: Option<UiRenderer>,
     #[cfg(feature = "ui-text")]
     text: Option<ApplicationUiText>,
@@ -860,6 +872,10 @@ struct ApplicationUiText {
     rasterizer: TextRasterizer,
     glyph_renderer: Option<TextGlyphRenderer>,
     gpu_atlas: Option<GpuGlyphAtlas>,
+    /// Glyph regions already uploaded to [`Self::gpu_atlas`].
+    uploaded_glyph_count: usize,
+    /// CPU glyph batches reused while layout size + scroll fingerprint match.
+    batches_cache: Option<(UiSize, u64, Vec<ApplicationUiTextBatch>)>,
 }
 
 #[cfg(feature = "ui-text")]
@@ -875,16 +891,25 @@ impl ApplicationUiText {
             rasterizer,
             glyph_renderer: None,
             gpu_atlas: None,
+            uploaded_glyph_count: 0,
+            batches_cache: None,
         })
     }
 
-    fn layout_options(&self, widget: &Widget, available: UiSize) -> TextLayoutOptions {
+    fn invalidate_frame_caches(&mut self) {
+        self.batches_cache = None;
+    }
+
+    /// `widget_box` is the full layout bounds of the widget (padding included).
+    /// Wrap width is the content box after horizontal padding — callers must not
+    /// pass an already-padded inner size or padding is subtracted twice.
+    fn layout_options(&self, widget: &Widget, widget_box: UiSize) -> TextLayoutOptions {
         let horizontal_padding = widget
             .style()
             .padding
             .left
             .saturating_add(widget.style().padding.right);
-        let width = available.width.saturating_sub(horizontal_padding);
+        let width = widget_box.width.saturating_sub(horizontal_padding);
         TextLayoutOptions {
             font_size: self.config.font_size,
             line_height: self.config.line_height,
@@ -905,6 +930,7 @@ impl ApplicationUiText {
         layout: &UiLayout,
         tokens: UiTokens,
         limits: UiRenderLimits,
+        visuals: UiVisualStyle,
         input: Option<&UiInputState>,
     ) -> Result<UiRenderStats, NativeUiTextError> {
         let stats = match input {
@@ -916,16 +942,30 @@ impl ApplicationUiText {
                     tokens,
                     UiInputRenderOptions::new(state)
                         .with_limits(limits)
-                        // Hover/press/focus overlays are drawn after glyphs.
-                        .with_visuals(UiVisualStyle::default().with_focus_outline(None)),
+                        // Focus outline on the rect pass would sit under glyphs;
+                        // hosts that need both use extract_draw_list + custom order.
+                        .with_visuals(visuals.with_focus_outline(None)),
                 )
                 .map_err(NativeUiTextError::Ui)?,
             None => rectangles
                 .draw(frame, root, layout, tokens, limits)
                 .map_err(NativeUiTextError::Ui)?,
         };
-        let mut batches = Vec::new();
-        self.collect_text(root, layout, tokens, &mut batches)?;
+        let size = UiSize::new(frame.surface_size()[0], frame.surface_size()[1]);
+        let scroll_key = input.map_or(0, yuyib_ui::UiInputState::scroll_layout_fingerprint);
+        let batches = match self.batches_cache.as_ref() {
+            Some((cached_size, cached_scroll, batches))
+                if *cached_size == size && *cached_scroll == scroll_key =>
+            {
+                batches.clone()
+            }
+            _ => {
+                let mut batches = Vec::new();
+                self.collect_text(root, layout, tokens, &mut batches)?;
+                self.batches_cache = Some((size, scroll_key, batches.clone()));
+                batches
+            }
+        };
         if batches.is_empty() {
             return Ok(stats);
         }
@@ -938,19 +978,24 @@ impl ApplicationUiText {
                     .upload_atlas(frame, self.rasterizer.atlas(), self.config.gpu_limits)
                     .map_err(NativeUiTextError::Gpu)?,
             );
+            self.uploaded_glyph_count = self.rasterizer.atlas().glyph_count();
         }
         let Some(gpu_atlas) = self.gpu_atlas.as_mut() else {
             return Ok(stats);
         };
         let viewport = TextViewport::new(0, 0, frame.surface_size()[0], frame.surface_size()[1]);
-        glyph_renderer
-            .update_atlas(
-                frame,
-                gpu_atlas,
-                self.rasterizer.atlas(),
-                self.config.gpu_limits,
-            )
-            .map_err(NativeUiTextError::Gpu)?;
+        let cpu_glyphs = self.rasterizer.atlas().glyph_count();
+        if cpu_glyphs != self.uploaded_glyph_count {
+            glyph_renderer
+                .update_atlas(
+                    frame,
+                    gpu_atlas,
+                    self.rasterizer.atlas(),
+                    self.config.gpu_limits,
+                )
+                .map_err(NativeUiTextError::Gpu)?;
+            self.uploaded_glyph_count = cpu_glyphs;
+        }
         for batch in &batches {
             let options = TextGlyphDrawOptions::new(viewport)
                 .with_limits(self.config.gpu_limits)
@@ -997,7 +1042,7 @@ impl ApplicationUiText {
         batches: &mut Vec<ApplicationUiTextBatch>,
     ) -> Result<(), NativeUiTextError> {
         let padding = widget.style().padding;
-        let inner = yuyib_ui::Rect {
+        let padded = yuyib_ui::Rect {
             origin: yuyib_ui::Point::new(
                 bounds
                     .origin
@@ -1018,6 +1063,13 @@ impl ApplicationUiText {
                     .height
                     .saturating_sub(padding.top.saturating_add(padding.bottom)),
             ),
+        };
+        // Padding can consume a fixed-height box; still draw into the raw bounds
+        // so captions are not silently dropped while backgrounds remain visible.
+        let inner = if padded.size.width == 0 || padded.size.height == 0 {
+            bounds
+        } else {
+            padded
         };
         if inner.size.width == 0 || inner.size.height == 0 {
             return Ok(());
@@ -1041,10 +1093,24 @@ impl ApplicationUiText {
         push_text_batch(batches, text_clip_rect(layout, widget.id()), &translated)?;
         Ok(())
     }
+
+    /// Test/helper: shape+rasterize every caption and return total glyph quads.
+    #[cfg(test)]
+    fn count_text_quads(
+        &mut self,
+        root: &Widget,
+        layout: &UiLayout,
+        tokens: UiTokens,
+    ) -> Result<usize, NativeUiTextError> {
+        let mut batches = Vec::new();
+        self.collect_text(root, layout, tokens, &mut batches)?;
+        Ok(batches.iter().map(|batch| batch.draw_list.quads().len()).sum())
+    }
 }
 
 /// One glyph submission with a shared scroll viewport clip.
 #[cfg(feature = "ui-text")]
+#[derive(Clone, Debug)]
 struct ApplicationUiTextBatch {
     clip: Option<TextClipRect>,
     draw_list: TextDrawList,
@@ -1075,10 +1141,12 @@ fn push_text_batch(
     if let Some(last) = batches.last_mut()
         && last.clip == clip
     {
-        last.draw_list
-            .append(quads)
-            .map_err(|_| NativeUiTextError::MetricsOutsideUiRange)?;
-        return Ok(());
+        match last.draw_list.append(quads) {
+            Ok(()) => return Ok(()),
+            // Atlas size mismatch mid-frame: start a fresh batch instead of
+            // dropping the whole UI text pass (which left only empty rects).
+            Err(_) => {}
+        }
     }
     let mut draw_list = TextDrawList::default();
     draw_list
@@ -1248,7 +1316,6 @@ fn to_f32_i32(value: i32) -> f32 {
     value as f32
 }
 
-#[cfg(feature = "ui-text")]
 #[cfg(feature = "ui")]
 impl ApplicationUi {
     /// Creates optional UI lifecycle state from a validated retained tree.
@@ -1258,6 +1325,7 @@ impl ApplicationUi {
             tree,
             tokens: UiTokens::default(),
             limits: UiRenderLimits::default(),
+            visuals: UiVisualStyle::default(),
             layout: None,
             renderer: None,
             #[cfg(feature = "ui-text")]
@@ -1279,6 +1347,46 @@ impl ApplicationUi {
     pub const fn render_limits(mut self, limits: UiRenderLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// Sets rectangle chrome (borders, focus outline, scroll thumb).
+    ///
+    /// This is the high-level escape hatch into [`UiVisualStyle`]. For a full
+    /// custom paint pass, call [`Self::extract_draw_list`] and feed a host-owned
+    /// [`UiRenderer`]. Event hooks remain frame-boundary [`UiResponse`] values
+    /// from [`Self::with_winit_input`] — there is no DOM-style listener registry.
+    #[must_use]
+    pub const fn with_visual_style(mut self, visuals: UiVisualStyle) -> Self {
+        self.visuals = visuals;
+        self
+    }
+
+    /// Returns the configured visual style.
+    #[must_use]
+    pub const fn visual_style(&self) -> UiVisualStyle {
+        self.visuals
+    }
+
+    /// Replaces visual style after construction.
+    pub fn set_visual_style(&mut self, visuals: UiVisualStyle) {
+        self.visuals = visuals;
+    }
+
+    /// Replaces the retained tree and invalidates the layout cache.
+    ///
+    /// Clears pointer/drag input state so hover/press cannot leak across trees
+    /// (used by dialogue overlays that rebuild per node). Keyboard focus is
+    /// also cleared.
+    pub fn replace_tree(&mut self, tree: UiTree) {
+        self.tree = tree;
+        self.layout = None;
+        #[cfg(feature = "ui-text")]
+        if let Some(text) = &mut self.text {
+            text.invalidate_frame_caches();
+        }
+        if let Some(input) = &mut self.input {
+            input.state.clear();
+        }
     }
 
     /// Подключает готовое нативное рисование подписей и текста кнопок.
@@ -1350,7 +1458,7 @@ impl ApplicationUi {
     /// Returns the current cached layout, if one has been requested.
     #[must_use]
     pub fn cached_layout(&self) -> Option<&UiLayout> {
-        self.layout.as_ref().map(|(_, layout)| layout)
+        self.layout.as_ref().map(|(_, _, layout)| layout)
     }
 
     /// Computes or reuses a layout for an explicit presentation size.
@@ -1358,16 +1466,22 @@ impl ApplicationUi {
     /// This CPU-only method is useful for hosts that want to inspect layout
     /// before a native application starts.
     ///
+    /// Layout is rebuilt when the presentation size changes or when scroll
+    /// offsets change. Hover/press/focus alone do not invalidate the cache —
+    /// they only affect overlay draws.
+    ///
     /// # Errors
     ///
     /// Returns [`ApplicationUiError`] when the retained layout constraints are
     /// invalid.
     pub fn layout_for(&mut self, size: UiSize) -> Result<&UiLayout, ApplicationUiError> {
-        let should_rebuild = self.input.is_some()
-            || self
-                .layout
-                .as_ref()
-                .is_none_or(|(cached, _)| *cached != size);
+        let scroll_key = self
+            .input
+            .as_ref()
+            .map_or(0, |input| input.state.scroll_layout_fingerprint());
+        let should_rebuild = self.layout.as_ref().is_none_or(|(cached_size, cached_scroll, _)| {
+            *cached_size != size || *cached_scroll != scroll_key
+        });
         if should_rebuild {
             let default_input = yuyib_ui::UiInputState::default();
             let input_state = self
@@ -1387,16 +1501,55 @@ impl ApplicationUi {
                 layout_with_input_state(&self.tree, size, input_state)
                     .map_err(ApplicationUiError::Layout)?
             };
-            self.layout = Some((size, layout));
+            self.layout = Some((size, scroll_key, layout));
+            #[cfg(feature = "ui-text")]
+            if let Some(text) = &mut self.text {
+                text.invalidate_frame_caches();
+            }
         }
         self.layout
             .as_ref()
-            .map(|(_, layout)| layout)
+            .map(|(_, _, layout)| layout)
             .ok_or(ApplicationUiError::LayoutCacheUnavailable)
+    }
+
+    /// CPU-only: count glyph quads that the text pass would submit for `size`.
+    ///
+    /// Used by tests to catch silent caption drops (padding-eaten boxes, empty
+    /// scroll clips) without opening a window.
+    ///
+    /// # Errors
+    ///
+    /// Returns layout or text-prep failures.
+    #[cfg(all(test, feature = "ui-text"))]
+    fn test_text_quad_count(&mut self, size: UiSize) -> Result<usize, ApplicationUiError> {
+        self.layout_for(size)?;
+        let layout = self
+            .cached_layout()
+            .ok_or(ApplicationUiError::LayoutCacheUnavailable)?
+            .clone();
+        let tokens = self.tokens;
+        let root = self.tree.root().clone();
+        let text = self
+            .text
+            .as_mut()
+            .ok_or(ApplicationUiError::LayoutCacheUnavailable)?;
+        text.count_text_quads(&root, &layout, tokens)
+            .map_err(ApplicationUiError::TextRender)
     }
 
     fn initialize(&mut self, renderer: &Renderer) {
         self.renderer = Some(UiRenderer::new(renderer));
+    }
+
+    /// Test helper: bind a frame-local [`UiRenderer`] and render into `frame`.
+    #[cfg(all(test, feature = "ui-text"))]
+    fn test_render_to_frame(
+        &mut self,
+        frame: &mut RenderFrame<'_>,
+    ) -> Result<UiRenderStats, ApplicationUiError> {
+        self.renderer = Some(UiRenderer::new_for_frame(frame));
+        self.render(frame)
     }
 
     fn handle_window_event(&mut self, event: &WindowEvent) -> bool {
@@ -1437,7 +1590,7 @@ impl ApplicationUi {
         };
         let layout = layout
             .as_ref()
-            .map(|(_, layout)| layout)
+            .map(|(_, _, layout)| layout)
             .ok_or(ApplicationUiError::LayoutCacheUnavailable)?;
         let responses = input
             .adapter
@@ -1466,6 +1619,8 @@ impl ApplicationUi {
         #[cfg(feature = "ui-text")]
         let input = self.input.as_ref().map(|value| &value.state);
         #[cfg(feature = "ui-text")]
+        let visuals = self.visuals;
+        #[cfg(feature = "ui-text")]
         if let Some(text) = &mut self.text {
             return text
                 .render(
@@ -1475,6 +1630,7 @@ impl ApplicationUi {
                     &layout,
                     self.tokens,
                     self.limits,
+                    visuals,
                     input,
                 )
                 .map_err(ApplicationUiError::TextRender);
@@ -1486,12 +1642,64 @@ impl ApplicationUi {
                     self.tree.root(),
                     &layout,
                     self.tokens,
-                    UiInputRenderOptions::new(&input.state).with_limits(self.limits),
+                    UiInputRenderOptions::new(&input.state)
+                        .with_limits(self.limits)
+                        .with_visuals(self.visuals),
                 )
                 .map_err(ApplicationUiError::Render);
         }
         renderer
             .draw(frame, self.tree.root(), &layout, self.tokens, self.limits)
+            .map_err(ApplicationUiError::Render)
+    }
+
+    /// CPU extract of the current overlay as a [`UiDrawList`] (no GPU).
+    ///
+    /// Layouts for `size` first. When Winit input is attached, uses the retained
+    /// [`UiInputState`] and [`Self::visual_style`]. Hosts can then draw with a
+    /// custom [`UiRenderer`] / pass order.
+    ///
+    /// # Errors
+    ///
+    /// Returns layout or extract failures.
+    pub fn extract_draw_list(&mut self, size: UiSize) -> Result<UiDrawList, ApplicationUiError> {
+        self.layout_for(size)?;
+        let layout = self
+            .cached_layout()
+            .ok_or(ApplicationUiError::LayoutCacheUnavailable)?;
+        if let Some(input) = &self.input {
+            extract_draw_list_with_input(
+                self.tree.root(),
+                layout,
+                self.tokens,
+                &input.state,
+                self.visuals,
+                self.limits,
+            )
+            .map_err(ApplicationUiError::Render)
+        } else {
+            extract_draw_list(self.tree.root(), layout, self.tokens, self.limits)
+                .map_err(ApplicationUiError::Render)
+        }
+    }
+
+    /// CPU extract of [`yuyib_ui::WidgetKind::Image`] quads (no GPU).
+    ///
+    /// Layouts for `size` first. The host resolves [`yuyib_ui::UiImageId`] to
+    /// textures; this method only returns destination bounds and clip.
+    ///
+    /// # Errors
+    ///
+    /// Returns layout or extract failures.
+    pub fn extract_image_draw_list(
+        &mut self,
+        size: UiSize,
+    ) -> Result<UiImageDrawList, ApplicationUiError> {
+        self.layout_for(size)?;
+        let layout = self
+            .cached_layout()
+            .ok_or(ApplicationUiError::LayoutCacheUnavailable)?;
+        extract_image_draw_list(self.tree.root(), layout, self.limits)
             .map_err(ApplicationUiError::Render)
     }
 }
@@ -1547,6 +1755,155 @@ pub fn pause_overlay_tree(
                     Widget::label(WidgetId::from_key("pause-hint"), resume_hint)
                         .with_style(hint_style),
                 ]),
+        )
+        .build()
+}
+
+/// Widget key for the Continue button on terminal dialogue nodes.
+#[cfg(feature = "ui")]
+pub const DIALOGUE_CONTINUE_WIDGET_KEY: &str = "dlg-continue";
+
+/// Plain UI payload for [`dialogue_overlay_tree`].
+///
+/// Kept renderer/gameplay-agnostic so `yuyib-app` does not depend on
+/// `yuyib-gameplay`. Hosts map [`yuyib_gameplay::DialoguePresentation`] into
+/// this struct (see the `dialogue_choice_flow` example).
+#[cfg(feature = "ui")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DialogueOverlayContent {
+    /// Optional speaker line above the body.
+    pub speaker: Option<String>,
+    /// Main dialogue body.
+    pub body: String,
+    /// Visible choices as `(stable_key, label)`. Prefer
+    /// `DialogueChoiceId::widget_key()` for keys.
+    pub choices: Vec<(String, String)>,
+    /// When true and `choices` is empty, emit a Continue button.
+    pub show_continue: bool,
+}
+
+#[cfg(feature = "ui")]
+impl DialogueOverlayContent {
+    /// Creates body-only content with an automatic Continue affordance.
+    #[must_use]
+    pub fn line(body: impl Into<String>) -> Self {
+        Self {
+            speaker: None,
+            body: body.into(),
+            choices: Vec::new(),
+            show_continue: true,
+        }
+    }
+
+    /// Sets the speaker line.
+    #[must_use]
+    pub fn with_speaker(mut self, speaker: impl Into<String>) -> Self {
+        self.speaker = Some(speaker.into());
+        self
+    }
+
+    /// Replaces choices (disables Continue when non-empty).
+    #[must_use]
+    pub fn with_choices(mut self, choices: Vec<(String, String)>) -> Self {
+        self.show_continue = choices.is_empty();
+        self.choices = choices;
+        self
+    }
+}
+
+/// Builds a dimmed fullscreen dialogue panel (speaker, body, choice buttons).
+///
+/// Intended for [`ApplicationUi::with_active_flag`] + [`ApplicationUi::replace_tree`]
+/// while a dialogue session is active. Choice widget ids are
+/// `WidgetId::from_key(stable_key)`. Continue uses [`DIALOGUE_CONTINUE_WIDGET_KEY`].
+///
+/// LL escape: host may ignore this helper and feed a custom [`UiTree`] /
+/// `extract_draw_list` path.
+///
+/// # Errors
+///
+/// Returns [`UiError`] when widget IDs collide.
+#[cfg(feature = "ui")]
+pub fn dialogue_overlay_tree(content: &DialogueOverlayContent) -> Result<UiTree, UiError> {
+    let dim = WidgetStyle::default().with_background(ColorToken::Custom(UiColor::rgba(
+        4, 8, 18, 180,
+    )));
+    let panel = WidgetStyle::default()
+        .with_background(ColorToken::Custom(UiColor::rgb(18, 28, 48)))
+        .with_padding(Insets::all(20))
+        .with_gap(10);
+    let speaker_style = WidgetStyle::default()
+        .with_foreground(ColorToken::Custom(UiColor::rgb(250, 204, 21)))
+        .with_padding(Insets::all(4));
+    let body_style = WidgetStyle::default()
+        .with_foreground(ColorToken::Text)
+        .with_padding(Insets::all(4));
+    let choice_style = WidgetStyle::default()
+        .with_background(ColorToken::Accent)
+        .with_padding(Insets::all(8))
+        .with_min_size(yuyib_ui::Size::new(200, 32));
+
+    let mut children = Vec::new();
+    if let Some(speaker) = &content.speaker {
+        children.push(
+            Widget::label(WidgetId::from_key("dlg-speaker"), speaker.clone())
+                .with_style(speaker_style),
+        );
+    }
+    children.push(
+        Widget::label(WidgetId::from_key("dlg-body"), content.body.clone()).with_style(body_style),
+    );
+    for (key, label) in &content.choices {
+        children.push(
+            Widget::button(WidgetId::from_key(key), label.clone())
+                .with_constraints(
+                    LayoutConstraints::auto()
+                        .with_width(Dimension::Fill)
+                        .with_height(Dimension::Points(36)),
+                )
+                .with_style(choice_style),
+        );
+    }
+    if content.show_continue && content.choices.is_empty() {
+        children.push(
+            Widget::button(
+                WidgetId::from_key(DIALOGUE_CONTINUE_WIDGET_KEY),
+                "Продолжить",
+            )
+            .with_constraints(
+                LayoutConstraints::auto()
+                    .with_width(Dimension::Fill)
+                    .with_height(Dimension::Points(36)),
+            )
+            .with_style(choice_style),
+        );
+    }
+
+    let panel_height = 120_u32
+        .saturating_add(u32::try_from(children.len().saturating_mul(40)).unwrap_or(u32::MAX))
+        .min(520);
+
+    UiBuilder::new(WidgetId::from_key("dlg-root"), LayoutKind::Absolute)
+        .child(
+            Widget::container(WidgetId::from_key("dlg-dim"), LayoutKind::Absolute)
+                .with_constraints(
+                    LayoutConstraints::auto()
+                        .with_width(Dimension::Fill)
+                        .with_height(Dimension::Fill)
+                        .with_absolute_position(Point::new(0, 0)),
+                )
+                .with_style(dim),
+        )
+        .child(
+            Widget::container(WidgetId::from_key("dlg-panel"), LayoutKind::Column)
+                .with_constraints(
+                    LayoutConstraints::auto()
+                        .with_width(Dimension::Points(560))
+                        .with_height(Dimension::Points(panel_height))
+                        .with_absolute_position(Point::new(200, 160)),
+                )
+                .with_style(panel)
+                .with_children(children),
         )
         .build()
 }
@@ -2283,7 +2640,7 @@ impl ApplicationHandler for ApplicationHost {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "ui")]
-    use super::{ApplicationUi, pause_overlay_tree};
+    use super::{ApplicationUi, UiVisualStyle, pause_overlay_tree};
     use super::{Application, ApplicationHost, CursorControl, RenderLoop};
     #[cfg(feature = "webview")]
     use super::{
@@ -2310,10 +2667,15 @@ mod tests {
     use yuyib_ui::{LayoutKind, Size, UiAction, UiBuilder, Widget, WidgetId};
     #[cfg(feature = "ui-text")]
     use yuyib_ui::{
-        Dimension, LayoutConstraints, UiInputState, UiTree, layout_with_input_state,
+        Color as UiColor, ColorToken, Dimension, Insets, LayoutConstraints, UiInputState, UiTree,
+        WidgetStyle, layout_with_input_state,
     };
     #[cfg(feature = "ui-text")]
+    use yuyib_ui_text::FontSource;
+    #[cfg(feature = "ui-text")]
     use yuyib_ui_text_render::TextClipRect;
+    #[cfg(feature = "ui-text")]
+    use super::NativeUiTextConfig;
     #[cfg(feature = "webview")]
     use yuyib_webview::{BridgeLimits, EndpointName, PageEvent, PageSessionId, WebViewBuilder};
 
@@ -2555,6 +2917,54 @@ mod tests {
 
     #[cfg(feature = "ui")]
     #[test]
+    fn application_ui_visual_style_escape_and_extract() {
+        let tree = pause_overlay_tree("Paused", "Esc").expect("pause tree");
+        let style = UiVisualStyle::default().with_focus_outline(None);
+        let mut ui = ApplicationUi::new(tree).with_visual_style(style);
+        assert_eq!(ui.visual_style(), style);
+        let list = ui
+            .extract_draw_list(Size::new(640, 360))
+            .expect("extract");
+        assert!(!list.is_empty());
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn application_ui_extracts_image_quads() {
+        use yuyib_ui::UiImageId;
+
+        let icon = UiImageId::new(42);
+        let tree = UiBuilder::new(WidgetId::from_key("root"), LayoutKind::Row)
+            .child(Widget::image(WidgetId::from_key("icon"), icon))
+            .build()
+            .expect("tree");
+        let mut ui = ApplicationUi::new(tree);
+        let list = ui
+            .extract_image_draw_list(Size::new(100, 40))
+            .expect("images");
+        assert_eq!(list.quads().len(), 1);
+        assert_eq!(list.quads()[0].image, icon);
+        assert_eq!(list.quads()[0].bounds.size, Size::new(24, 24));
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn dialogue_overlay_tree_and_replace_tree() {
+        use super::{DialogueOverlayContent, dialogue_overlay_tree};
+
+        let content = DialogueOverlayContent::line("Hello")
+            .with_speaker("NPC")
+            .with_choices(vec![("dlg-choice:yes".into(), "Yes".into())]);
+        let tree = dialogue_overlay_tree(&content).expect("dialogue tree");
+        let mut ui = ApplicationUi::new(tree);
+        assert!(ui.tree().root().children().len() >= 1);
+        let next = dialogue_overlay_tree(&DialogueOverlayContent::line("Bye")).expect("next");
+        ui.replace_tree(next);
+        assert!(ui.cached_layout().is_none());
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
     fn optional_ui_emits_buffered_input_before_render_and_clears_on_focus_loss() {
         let button = WidgetId::from_key("action");
         let tree = UiBuilder::new(WidgetId::from_key("input-root"), LayoutKind::Column)
@@ -2738,6 +3148,183 @@ mod tests {
                             <= outer_clip.origin.y
                                 + i32::try_from(outer_clip.size.height).unwrap_or(i32::MAX)
                 })
+        );
+    }
+
+    #[cfg(feature = "ui-text")]
+    #[test]
+    fn gallery_like_headers_and_scroll_emit_glyph_quads() {
+        const FONT: &str = r"C:\Windows\Fonts\segoeui.ttf";
+        if !std::path::Path::new(FONT).is_file() {
+            return;
+        }
+
+        let title = WidgetStyle::default()
+            .with_background(ColorToken::Custom(UiColor::rgb(27, 44, 79)))
+            .with_foreground(ColorToken::Text)
+            .with_padding(Insets::all(12))
+            .with_min_size(Size::new(0, 22));
+        let note = WidgetStyle::default()
+            .with_background(ColorToken::Custom(UiColor::rgb(24, 39, 65)))
+            .with_foreground(ColorToken::Text)
+            .with_padding(Insets::all(8))
+            .with_min_size(Size::new(0, 22));
+
+        let tree = UiBuilder::new(WidgetId::from_key("root"), LayoutKind::Column)
+            .child(
+                Widget::label(
+                    WidgetId::from_key("gallery-title"),
+                    "Yuyib native UI — текущая галерея возможностей",
+                )
+                .with_constraints(LayoutConstraints::auto().with_width(Dimension::Fill))
+                .with_style(title),
+            )
+            .child(
+                Widget::label(
+                    WidgetId::from_key("gallery-status"),
+                    "ApplicationUi + visual_style + text + Winit",
+                )
+                .with_constraints(LayoutConstraints::auto().with_width(Dimension::Fill))
+                .with_style(note),
+            )
+            .child(
+                Widget::scroll_view(WidgetId::from_key("gallery-buttons"))
+                    .with_constraints(
+                        LayoutConstraints::auto()
+                            .with_width(Dimension::Fill)
+                            .with_height(Dimension::Fill),
+                    )
+                    .with_children(vec![
+                        Widget::container(
+                            WidgetId::from_key("gallery-buttons-content"),
+                            LayoutKind::Column,
+                        )
+                        .with_constraints(
+                            LayoutConstraints::auto()
+                                .with_width(Dimension::Fill)
+                                .with_height(Dimension::Points(400)),
+                        )
+                        .with_style(WidgetStyle::default().with_padding(Insets::all(8)).with_gap(6))
+                        .with_children(vec![
+                            Widget::label(WidgetId::from_key("buttons-title"), "Кнопки и ScrollView")
+                                .with_style(note),
+                            Widget::button(WidgetId::from_key("button-play"), "Запустить")
+                                .with_constraints(
+                                    LayoutConstraints::auto().with_width(Dimension::Fill),
+                                ),
+                            Widget::label(
+                                WidgetId::from_key("diagnostic-row-0"),
+                                "Диагностика #00: bounded retained UI scroll row",
+                            )
+                            .with_constraints(
+                                LayoutConstraints::auto().with_width(Dimension::Fill),
+                            )
+                            .with_style(
+                                WidgetStyle::default()
+                                    .with_background(ColorToken::SurfaceMuted)
+                                    .with_foreground(ColorToken::Text)
+                                    .with_padding(Insets::all(6))
+                                    .with_min_size(Size::new(0, 28)),
+                            ),
+                        ]),
+                    ]),
+            )
+            .build()
+            .expect("gallery-like tree");
+
+        let mut ui = ApplicationUi::new(tree)
+            .with_text(NativeUiTextConfig::new(FontSource::file(FONT)))
+            .expect("text config");
+
+        let layout = ui
+            .layout_for(Size::new(1280, 760))
+            .expect("layout")
+            .clone();
+        let title_bounds = layout
+            .bounds(WidgetId::from_key("gallery-title"))
+            .expect("title bounds");
+        let status_bounds = layout
+            .bounds(WidgetId::from_key("gallery-status"))
+            .expect("status bounds");
+        let row_bounds = layout
+            .bounds(WidgetId::from_key("diagnostic-row-0"))
+            .expect("row bounds");
+        assert!(
+            title_bounds.size.height >= 22,
+            "title height collapsed: {title_bounds:?}"
+        );
+        assert!(
+            status_bounds.size.height >= 22,
+            "status height collapsed: {status_bounds:?}"
+        );
+        assert!(
+            row_bounds.size.height >= 28,
+            "diagnostic row height collapsed: {row_bounds:?}"
+        );
+        assert!(
+            layout
+                .clip(WidgetId::from_key("diagnostic-row-0"))
+                .is_some_and(|clip| clip.size.width > 0 && clip.size.height > 0),
+            "scroll clip must be non-empty for left-column captions"
+        );
+
+        let quads = ui
+            .test_text_quad_count(Size::new(1280, 760))
+            .expect("text quads");
+        assert!(
+            quads > 40,
+            "expected captions for headers + scroll labels, got {quads} quads"
+        );
+    }
+
+    #[cfg(feature = "ui-text")]
+    #[test]
+    fn application_ui_text_pass_is_visible_on_offscreen_target() {
+        const FONT: &str = r"C:\Windows\Fonts\segoeui.ttf";
+        if !std::path::Path::new(FONT).is_file() {
+            return;
+        }
+
+        let tree = UiBuilder::new(WidgetId::from_key("root"), LayoutKind::Column)
+            .child(
+                Widget::button(WidgetId::from_key("play"), "Запустить")
+                    .with_constraints(
+                        LayoutConstraints::auto()
+                            .with_width(Dimension::Points(220))
+                            .with_height(Dimension::Points(48)),
+                    )
+                    .with_style(
+                        WidgetStyle::default()
+                            .with_background(ColorToken::Custom(UiColor::rgb(20, 20, 20)))
+                            .with_foreground(ColorToken::Custom(UiColor::rgb(255, 255, 255)))
+                            .with_padding(Insets::all(8)),
+                    ),
+            )
+            .build()
+            .expect("tree");
+
+        let mut ui = ApplicationUi::new(tree)
+            .with_text(NativeUiTextConfig::new(FontSource::file(FONT)))
+            .expect("text");
+
+        let mut gpu = yuyib_render::OffscreenRenderer::new(320, 120).expect("gpu");
+        let clear = yuyib_render::ClearColor::linear(0.0, 0.0, 0.0, 1.0);
+        let capture = gpu
+            .render_and_capture_rgba8(clear, |frame| {
+                ui.test_render_to_frame(frame).expect("render ui+text");
+            })
+            .expect("capture");
+
+        let mut bright = 0_u32;
+        for pixel in capture.pixels().chunks_exact(4) {
+            // Glyphs are white; button fill is near-black. Count near-white texels.
+            if pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200 {
+                bright += 1;
+            }
+        }
+        assert!(
+            bright > 30,
+            "ApplicationUi text pass produced no visible glyphs (bright={bright})"
         );
     }
 }

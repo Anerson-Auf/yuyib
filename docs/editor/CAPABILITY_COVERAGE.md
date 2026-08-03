@@ -14,10 +14,13 @@ Capability coverage отвечает на вопрос: «как пользов�
 > viewport/Play evidence. **Asset (incremental):** `yuyib.gltf-import` /
 > `yuyib.gltf-preview` — `GltfPreviewAdapter` over production `GltfSceneLoad`
 > + settings mapping + non-destructive reimport + **Bounds/Collision/Normals/Tangents/UV** (Preview-only) + preview
-> **cache key/invalidation** evidence + **mesh/material selection**; animation
-> selection still open (not full Asset DoD). **Coverage gate (incremental):**
-> `validate_coverage_gate` + `AssetCoverageEvidence` enforced in scoped tests;
-> canonical `CoverageManifest::to_pretty_json` + golden fixture in
+> **cache key/invalidation** evidence + **mesh/material/animation clip selection**
+> (inventory + Inspector select + playback; not full Asset DoD). **Coverage gate (incremental):**
+> `validate_coverage_gate` + `AssetCoverageEvidence`; capability docs/source;
+> Visual→schema (+ runtime source + fields, shell allowlist); system source;
+> migration path `1→current`; import-settings→Asset surface;
+> Apply Play⇒Visual only; canonical
+> `CoverageManifest::to_pretty_json` + golden fixture in
 > `yuyib-gltf-authoring`; GitHub Actions foundation CI в `.github/workflows/`.
 > Этот policy-документ не второй source of truth — machine snapshot важнее.
 
@@ -80,18 +83,24 @@ Exact serialization может измениться до реализации, �
 
 Текущий registry уже делает hard error для duplicate IDs, dangling capability/
 component references, пустых или противоречивых surfaces и preview adapter-а у
-`Unavailable` capability. Следующий evidence gate обязан дополнительно
-отклонять:
+`Unavailable` capability. `validate_coverage_gate` дополнительно отклоняет:
 
-- duplicate capability, schema, importer-settings, plugin или system stable ID;
-- curated runtime capability без coverage record;
-- `Visual` без command/validation mapping;
-- persisted `Visual` без schema/materializer;
-- `Asset` без settings schema, preview или diagnostics;
-- migration gap для поддерживаемой persisted version;
-- dangling docs/source/adapter reference;
-- Apply Play property, не объявленной authored;
-- Editor-only dependency в shipping/headless feature graph.
+- `Asset` без settings schema, preview adapter или diagnostics (**enforced**);
+- `Visual` без `ComponentDescriptor` (shell: `yuyib.application`,
+  `yuyib.game-lifecycle`) (**enforced**);
+- Visual schema без runtime `SourceNavigation` или без Inspector fields (**enforced**);
+- capability без documentation / source (**enforced**);
+- registered system без `SourceNavigation` (**enforced**);
+- migration gap `1 → current` для component / import-settings (**enforced**);
+- import-settings schema на capability без Asset surface (**enforced**);
+- `apply_play_changes` на non-Visual capability (**enforced**; Unavailable 2D
+  schemas no longer advertise Apply Play).
+
+Ещё не machine-gated (нет API или вне registry):
+
+- `Visual` без command/validation mapping / materializer id;
+- FS existence dangling docs/source;
+- Editor-only dependency в shipping/headless Cargo graph.
 
 Human-readable documentation и Editor palette генерируются из тех же records.
 Ручная параллельная таблица не является source of truth.
@@ -107,15 +116,15 @@ Human-readable documentation и Editor palette генерируются из т�
 | Project/Application/Game profile | Есть частично | `Unavailable` | Project creation/open и profile diagnostics |
 | glTF source/import settings | Есть importer foundation | `Unavailable` | `Asset`: bounded import/reimport, settings, diagnostics |
 | Image/texture assets | Есть decode/assets foundation | `Unavailable` | `Asset`: channels/color-space/size preview |
-| Mesh/material/animation subresources | Есть 3D foundation | `Unavailable` | `Asset`: selection, clip playback, material assignment |
+| Mesh/material/animation subresources | Есть 3D foundation | Asset Preview selection closed thin | Full Asset DoD (assign in scene / clip mixer UI) open |
 | 3D transform/hierarchy | Есть ECS foundation | `Visual` | hierarchy, Inspector, gizmo, round-trip — **closed** |
 | Camera/light/model instance | Есть частично | Model/Light `Visual`; Camera follow-up | Light transform/cone/Play — **closed** |
-| Collision/bounds/normals/tangents/UV | Есть разные runtime paths | All five Preview overlays + animation clip selection | Bounds AABB + collision wireframe + normals/tangents shafts + UV0 markers + clip inventory/playback in Asset Preview |
+| Collision/bounds/normals/tangents/UV | Есть разные runtime paths | All five Preview overlays + animation clip inventory/select/playback closed thin | Full Asset DoD open |
 | 3D PBR/render presets | Есть частично | partial Scene/Play PBR parity | Preview Asset route still open |
 | Scene persistence/materialization | `.yscene` foundation | partial | GUID, schemas, opaque preservation — **closed** for TRS/Model/Light |
 | Play Mode | Game lifecycle есть | process-isolated `yuyib-play` | Player motor + mesh physics + lights — **closed**; Apply Play TRS whitelist — **closed** |
 | System/source navigation | ECS schedules есть | partial | Systems list + open `source.file` / runtime/authoring paths |
-| Code workspace | Monaco + diagnostics-only RA | partial (E1 enough) | Completion/hover/rename → end-game |
+| Code workspace | Monaco + RA diagnostics/completion/hover/**signatureHelp**/definition/references/rename/code actions/executeCommand | partial (E1 enough) | Broader command surface beyond `rust-analyzer.*` |
 | 2D authoring | Runtime foundation partial | `Unavailable` | Следующий slice после 3D Asset coverage |
 | Custom low-level Rust/WGPU | Есть escape hatches | `CodeOnly` target | Docs/navigation, без фиктивного visual control |
 

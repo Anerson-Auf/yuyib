@@ -43,24 +43,45 @@
         </div>
       </header>
       <div class="project-launcher-card">
-        <div class="project-launcher-brand"><span class="brand-mark"><span class="brand-core"></span></span><div><strong id="launcherTitle">Yuyib Editor</strong><span>Open an existing project or create a new one</span></div></div>
-        <label class="launcher-field"><span>Project name</span><input id="launcherProjectName" type="text" maxlength="64" placeholder="My Game" autocomplete="off" /></label>
-        <label class="launcher-field"><span>Profile</span>
-          <select id="launcherProfile">
-            <option value="game3d" selected>Game 3D</option>
-            <option value="game2d">Game 2D</option>
-            <option value="application">Application</option>
-          </select>
-        </label>
-        <div class="launcher-actions">
-          <button id="launcherCreateButton" class="primary-button">Create project…</button>
-          <button id="launcherOpenButton" class="toolbar-action">Open project folder…</button>
+        <div class="project-launcher-brand"><span class="brand-mark"><span class="brand-core"></span></span><div><strong id="launcherTitle">Yuyib Editor</strong><span id="launcherSubtitle">Open an existing project or create a new one</span></div></div>
+        <nav id="launcherSteps" class="launcher-steps" aria-label="Project wizard steps">
+          <button type="button" class="launcher-step is-active" data-launcher-step="choose">1. Start</button>
+          <button type="button" class="launcher-step" data-launcher-step="create" disabled>2. Create</button>
+          <button type="button" class="launcher-step" data-launcher-step="open" disabled>2. Open</button>
+        </nav>
+        <div id="launcherPaneChoose" class="launcher-pane">
+          <p class="launcher-help">No <code>project.yuyib</code> is open. Create a scaffold or open an existing project folder.</p>
+          <div class="launcher-actions">
+            <button id="launcherChooseCreate" class="primary-button" type="button">Create new project…</button>
+            <button id="launcherChooseOpen" class="toolbar-action" type="button">Open existing…</button>
+          </div>
         </div>
-        <label class="launcher-field"><span>Or paste project folder path</span><input id="launcherOpenPath" type="text" placeholder="D:\games\my-project" autocomplete="off" /></label>
-        <div class="launcher-actions">
-          <button id="launcherOpenPathButton" class="toolbar-action">Open path</button>
+        <div id="launcherPaneCreate" class="launcher-pane is-hidden">
+          <label class="launcher-field"><span>Project name</span><input id="launcherProjectName" type="text" maxlength="64" placeholder="My Game" autocomplete="off" /></label>
+          <label class="launcher-field"><span>Profile</span>
+            <select id="launcherProfile">
+              <option value="game3d" selected>Game 3D</option>
+              <option value="game2d">Game 2D</option>
+              <option value="application">Application</option>
+            </select>
+          </label>
+          <div class="launcher-actions">
+            <button id="launcherCreateButton" class="primary-button" type="button">Choose parent folder &amp; create…</button>
+            <button id="launcherBackFromCreate" class="toolbar-action" type="button">Back</button>
+          </div>
+          <p class="launcher-help">Creates <code>parent/Name/</code> with <code>project.yuyib</code>, <code>scenes/main.yscene</code>, and a starter <code>Cargo.toml</code>.</p>
         </div>
-        <p class="launcher-help">Create picks a <strong>parent</strong> folder and writes <code>parent/Name/</code> with <code>project.yuyib</code>. Open must select that project folder (the one that contains <code>project.yuyib</code>), not the monorepo or a parent of several projects.</p>
+        <div id="launcherPaneOpen" class="launcher-pane is-hidden">
+          <div class="launcher-actions">
+            <button id="launcherOpenButton" class="primary-button" type="button">Open project folder…</button>
+            <button id="launcherBackFromOpen" class="toolbar-action" type="button">Back</button>
+          </div>
+          <label class="launcher-field"><span>Or paste project folder path</span><input id="launcherOpenPath" type="text" placeholder="D:\games\my-project" autocomplete="off" /></label>
+          <div class="launcher-actions">
+            <button id="launcherOpenPathButton" class="toolbar-action" type="button">Open path</button>
+          </div>
+          <p class="launcher-help">Select the folder that <strong>directly</strong> contains <code>project.yuyib</code> (not the engine monorepo).</p>
+        </div>
         <p id="launcherStatus" class="launcher-status"></p>
       </div>
     </div>
@@ -104,6 +125,9 @@
           <button type="button" data-menu="assets-focus">Assets</button>
           <button type="button" data-menu="scene-open">Scene</button>
           <button type="button" data-menu="build-check">Build</button>
+          <button type="button" data-menu="build-cook">Cook</button>
+          <button type="button" data-menu="build-ypack">Ypack</button>
+          <button type="button" data-menu="build-ypack-import">Import ypack</button>
           <button type="button" data-menu="help-about">Help</button>
         </nav>
         <div class="project-chip"><span class="status-dot status-dot--ok"></span><span id="projectNameLabel">No project</span><span class="branch-name">—</span></div>
@@ -141,6 +165,9 @@
         <div class="toolbar-right">
           <button id="syncCodeButton" class="toolbar-action" title="Export scene entities to Rust projection files">Sync Code</button>
           <button id="applyCodeButton" class="toolbar-action" title="Apply Rust projection files back to the open scene">Apply Code</button>
+          <button id="cookButton" class="toolbar-action" title="Cook project glTF/GLB sources into .yuyib_cook">Cook assets</button>
+          <button id="exportYpackButton" class="toolbar-action" title="Export .yuyib_cook into a shipping *.ypack">Export ypack</button>
+          <button id="importYpackButton" class="toolbar-action" title="Hydrate .yuyib_cook from a *.ypack (no source re-import)">Import ypack</button>
           <button id="saveButton" class="toolbar-action"><span class="save-indicator"></span>Save scene <kbd>Ctrl S</kbd></button>
           <button id="buildButton" class="toolbar-action toolbar-action--accent" title="Run scoped Cargo check"><svg><use href="#i-terminal"/></svg>Cargo check</button>
         </div>

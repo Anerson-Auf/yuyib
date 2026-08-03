@@ -27,6 +27,8 @@
 `yuyib::ui_render` — первый WGPU-мост: `extract_draw_list` выдаёт
 повторяемый список прямоугольников, а `UiRenderer` записывает один цветной
 проход поверх существующего `RenderFrame`. Порядок дерева сохраняется.
+Отдельно `extract_image_draw_list` выдаёт destination-quads для
+`Widget::image` / `UiImageId` (без GPU sampling — хост сам биндит текстуры).
 Низкоуровневый пользователь сам согласует область рендера и DPI.
 
 ## Живая галерея
@@ -35,11 +37,12 @@
 cargo run -p yuyib --example native_ui_gallery
 ```
 
-Пример показывает весь текущий набор готовых элементов: `Container`, `Label`,
-`Button`; три вида раскладки и размеры `Auto`, `Points`, `Fill`. Кнопки можно
+Пример показывает текущий набор готовых элементов: `Container`, `Label`,
+`Button`, `Image` (`UiImageId`; фон как stand-in), `ScrollView` (колесо /
+thumb drag / track click), три вида раскладки и размеры `Auto`, `Points`,
+`Fill`. `ApplicationUi::with_visual_style` настраивает thumb. Кнопки можно
 нажимать мышью и клавиатурой; полученные действия печатаются в терминал.
-Такой список отражает текущий scope: несуществующие пока текстовые поля, флажки,
-списки и прокрутка пример не имитирует.
+Текстовые поля и GPU texture sampling для Image в примере не имитируются.
 
 ## Текст в готовом Application UI
 
@@ -95,8 +98,10 @@ constraint column. `layout_with_input_state` применяет retained offset 
 CPU intersection и WGPU scissor; `ApplicationUi::with_text` применяет тот же
 `UiLayout::clip` к glyph pass через `TextClipRect`. При overflow input-aware
 extract рисует вертикальный thumb (`UiVisualStyle::scroll_thumb`, геометрия
-`vertical_scroll_thumb_bounds`) — без drag и inertia. Вложенные `ScrollView`
-пересекают clip на layout path. Virtualization пока отсутствует.
+`vertical_scroll_thumb_bounds`). **Thumb drag** и **клик по track** идут через
+`handle_input` (pointer capture, hit-width `SCROLL_THUMB_HIT_THICKNESS`); inertia
+пока нет. Вложенные `ScrollView` пересекают clip на layout path. Virtualization
+пока отсутствует.
 
 Клавиатурная поддержка пока семантическая: нет ввода текста/IME, перевода
 раскладки, политики повторов или системной доступности.
@@ -107,9 +112,18 @@ extract рисует вертикальный thumb (`UiVisualStyle::scroll_thum
 `UiDpiPolicy` задаётся явно: физические пиксели либо переданный масштаб
 логических пикселей. Для высокоуровневого пути используйте
 `ApplicationUi::with_winit_input(adapter, on_response)`: приложение выдаёт
-ответы в порядке поступления до пользовательского `on_render`, затем рисует
-UI поверх результата. Для собственной политики событий остаётся
-`on_window_event`.
+ответы на границе кадра. Внешний вид прямоугольников настраивается через
+`ApplicationUi::with_visual_style(UiVisualStyle)` (border / focus outline /
+scroll thumb). Для полного контроля порядка проходов —
+`extract_draw_list` / `extract_image_draw_list` (`Widget::image` /
+`UiImageId`; хост биндит текстуры — GPU image pass в engine ещё нет) + свой
+`UiRenderer`. Диалоги: domain в `yuyib::gameplay`
+(`DialogueSession` / `StoryFlags`); UI-helper
+`dialogue_overlay_tree` + `ApplicationUi::replace_tree` (JSON asset — позже).
+Слушатели — это `on_response` / `UiResponse` на
+кадре, не DOM `addEventListener`. Ответы идут в порядке поступления до
+пользовательского `on_render`, затем рисуется UI поверх результата. Для
+собственной политики событий остаётся `on_window_event`.
 
 Текущий GPU-мост рисует заполненные прямоугольники, внутренние границы и
 контур фокуса. `UiClipRect` добавляет одну явную прямоугольную область

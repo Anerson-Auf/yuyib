@@ -1,18 +1,16 @@
-//! Embedded and external (JSON `.tsj`) tileset resolution.
+//! Embedded and external (JSON `.tsj` / XML `.tsx`) tileset resolution.
 
 use yuyib_2d::{PixelPoint, TextureSize};
 use yuyib_assets::ImportDependencyKind;
 
-use super::{
-    RawTile, TiledImportError, TiledImportLimits, strip_utf8_bom,
-};
+use super::{RawTile, TiledImportError, TiledImportLimits};
 
 /// Host-supplied external tileset document (`uri` as written in map `source`).
 #[derive(Clone, Copy, Debug)]
 pub struct ExternalTilesetBytes<'a> {
     /// Logical URI matching the map tileset `source` field.
     pub uri: &'a str,
-    /// Complete tileset JSON bytes (`.tsj` / JSON tileset).
+    /// Complete tileset document bytes (JSON `.tsj` or XML `.tsx`).
     pub bytes: &'a [u8],
 }
 
@@ -35,6 +33,10 @@ pub(super) struct ResolvedTileset {
     pub region_origins: Vec<PixelPoint>,
     pub region_size: TextureSize,
     pub solid_by_local: Vec<bool>,
+    /// Local-id animations: `(base_local_id, frames: [(local_tileid, duration_ms)])`.
+    pub animations: Vec<(u32, Vec<(u32, u32)>)>,
+    /// Global region index of local id 0 (concatenated atlas order).
+    pub region_base: u32,
     /// When the map referenced `source`, this is the tileset document URI.
     pub external_source_uri: Option<String>,
 }
@@ -59,7 +61,7 @@ impl ResolvedTileset {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct RawTileset {
+pub(crate) struct RawTileset {
     pub firstgid: Option<u32>,
     pub name: Option<String>,
     pub image: Option<String>,
@@ -117,7 +119,7 @@ pub(super) fn resolve_map_tileset(
                 limit: limits.max_manifest_bytes,
             });
         }
-        let file: RawTileset = serde_json::from_slice(strip_utf8_bom(bytes))?;
+        let file = super::parse_tileset_document(bytes)?;
         if let Some(kind) = file.tileset_type.as_deref() {
             if kind != "tileset" {
                 return Err(TiledImportError::Unsupported(
@@ -229,6 +231,7 @@ fn build_resolved(
     }
 
     let mut solid_by_local = vec![false; tilecount as usize];
+    let mut animations = Vec::new();
     if let Some(tiles) = &body.tiles {
         for tile in tiles {
             if tile.id >= tilecount {
@@ -238,6 +241,38 @@ fn build_resolved(
             }
             if tile_has_solid(tile) {
                 solid_by_local[tile.id as usize] = true;
+            }
+            if let Some(frames) = &tile.animation {
+                if frames.is_empty() {
+                    return Err(TiledImportError::Unsupported(
+                        "tile animation must have at least one frame",
+                    ));
+                }
+                if frames.len() > MAX_TILE_ANIM_FRAMES {
+                    return Err(TiledImportError::Unsupported(
+                        "tile animation exceeds frame limit",
+                    ));
+                }
+                if animations.len() >= MAX_ANIMATED_TILES {
+                    return Err(TiledImportError::Unsupported(
+                        "too many animated tiles in tileset",
+                    ));
+                }
+                let mut converted = Vec::with_capacity(frames.len());
+                for frame in frames {
+                    if frame.tileid >= tilecount {
+                        return Err(TiledImportError::Unsupported(
+                            "animation tileid exceeds tilecount",
+                        ));
+                    }
+                    if frame.duration == 0 {
+                        return Err(TiledImportError::Unsupported(
+                            "animation frame duration must be > 0",
+                        ));
+                    }
+                    converted.push((frame.tileid, frame.duration));
+                }
+                animations.push((tile.id, converted));
             }
         }
     }
@@ -251,9 +286,16 @@ fn build_resolved(
         region_origins,
         region_size,
         solid_by_local,
+        animations,
+        region_base: 0,
         external_source_uri,
     })
 }
+
+/// Max frames per Tiled tile animation.
+pub(super) const MAX_TILE_ANIM_FRAMES: usize = 64;
+/// Max animated tiles per tileset.
+pub(super) const MAX_ANIMATED_TILES: usize = 256;
 
 fn tile_has_solid(tile: &RawTile) -> bool {
     tile.properties

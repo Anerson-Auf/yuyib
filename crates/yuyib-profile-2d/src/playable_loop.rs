@@ -16,7 +16,7 @@ use yuyib_platform::winit::event::{ElementState, WindowEvent};
 use yuyib_platform::winit::keyboard::{KeyCode, PhysicalKey};
 use yuyib_render::RenderFrame;
 
-use super::{CameraFollow2d, Game2dProfile, Game2dProfileError};
+use super::{CameraFollow2d, CameraFollowRuntime2d, Game2dProfile, Game2dProfileError};
 
 /// Construction knobs for [`PlayableLoop2d`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,9 +73,16 @@ impl PlayableLoopDesc2d {
 pub struct PlayableLoop2d {
     actor: Entity,
     input: HeldMoveInput2d,
+    /// Optional host-injected stick / network axis (right/down, typically [-1, 1]).
+    external_axis: Option<[f32; 2]>,
     tile_limits: TileKinematicAabbLimits2d,
     max_delta: Duration,
     camera: CameraFollow2d,
+    camera_runtime: CameraFollowRuntime2d,
+    /// Last estimated actor velocity (wu/s) for look-ahead.
+    look_velocity: [f32; 2],
+    /// Last render surface size for viewport-aware camera bounds.
+    surface_size: Option<[u32; 2]>,
 }
 
 impl PlayableLoop2d {
@@ -85,9 +92,13 @@ impl PlayableLoop2d {
         Self {
             actor: desc.actor,
             input: HeldMoveInput2d::default(),
+            external_axis: None,
             tile_limits: desc.tile_limits,
             max_delta: desc.max_delta,
             camera: desc.camera,
+            camera_runtime: CameraFollowRuntime2d::new(),
+            look_velocity: [0.0, 0.0],
+            surface_size: None,
         }
     }
 
@@ -103,15 +114,47 @@ impl PlayableLoop2d {
         self.camera
     }
 
+    /// Mutable camera follow (zoom / pan / shake trauma).
+    pub fn camera_follow_mut(&mut self) -> &mut CameraFollow2d {
+        &mut self.camera
+    }
+
+    /// Replaces the camera follow policy (e.g. after entering a new location).
+    pub fn set_camera_follow(&mut self, camera: CameraFollow2d) {
+        self.camera = camera;
+        self.camera_runtime.reset();
+    }
+
+    /// Hard-cuts cinematic smoothing (next frame snaps to ideal).
+    pub fn reset_camera_runtime(&mut self) {
+        self.camera_runtime.reset();
+    }
+
     /// Forwards window keyboard events into held WASD / arrow axes.
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
         self.input.handle(event);
     }
 
-    /// Returns the current semantic movement input.
+    /// Injects a host-filtered move axis (gamepad stick, touch pad, network).
+    ///
+    /// Non-finite values are ignored. Components are clamped to `[-1, 1]`.
+    /// Merged with keyboard via max-abs per axis each [`Self::step`].
+    pub fn set_external_move_axis(&mut self, axis: [f32; 2]) {
+        if !axis.iter().all(|v| v.is_finite()) {
+            return;
+        }
+        self.external_axis = Some([axis[0].clamp(-1.0, 1.0), axis[1].clamp(-1.0, 1.0)]);
+    }
+
+    /// Clears any host-injected move axis (keyboard-only again).
+    pub fn clear_external_move_axis(&mut self) {
+        self.external_axis = None;
+    }
+
+    /// Returns the current semantic movement input (keyboard ∪ external).
     #[must_use]
     pub fn movement(&self) -> SpriteMoveInput2d {
-        self.input.movement()
+        merge_move_input(self.input.movement(), self.external_axis)
     }
 
     /// Steps kinematic motion, sprite animations, and camera follow.
@@ -129,7 +172,8 @@ impl PlayableLoop2d {
         } else {
             delta.min(self.max_delta)
         };
-        let input = self.input.movement();
+        let dt = delta.as_secs_f32();
+        let input = self.movement();
         let movement = step_kinematic_sprite_controller_2d(
             profile.world_mut(),
             self.actor,
@@ -137,8 +181,13 @@ impl PlayableLoop2d {
             delta,
             self.tile_limits,
         )?;
+        if dt.is_finite() && dt > 0.0 {
+            let applied = movement.movement.applied_delta;
+            self.look_velocity = [applied.x / dt, applied.y / dt];
+        }
         profile.step_animations(delta);
-        self.sync_camera(profile)?;
+        let _ = self.camera.tick(dt);
+        self.sync_camera(profile, dt)?;
         Ok(movement)
     }
 
@@ -152,14 +201,26 @@ impl PlayableLoop2d {
         profile: &mut Game2dProfile,
         frame: &mut RenderFrame<'_>,
     ) -> Result<Game2dSceneStats, PlayableLoopError2d> {
-        self.sync_camera(profile)?;
+        self.surface_size = Some(frame.surface_size());
+        self.sync_camera(profile, 0.0)?;
         profile.render(frame).map_err(PlayableLoopError2d::Profile)
     }
 
-    fn sync_camera(&self, profile: &mut Game2dProfile) -> Result<(), PlayableLoopError2d> {
+    fn sync_camera(
+        &mut self,
+        profile: &mut Game2dProfile,
+        dt_seconds: f32,
+    ) -> Result<(), PlayableLoopError2d> {
         let position = actor_position(profile.world(), self.actor)?;
-        self.camera
-            .apply(profile.scene_mut().camera_mut(), position);
+        let camera = profile.scene_mut().camera_mut();
+        self.camera.apply_cinematic(
+            &mut self.camera_runtime,
+            camera,
+            position,
+            self.look_velocity,
+            dt_seconds,
+            self.surface_size,
+        );
         Ok(())
     }
 }
@@ -169,6 +230,22 @@ fn actor_position(world: &World, actor: Entity) -> Result<[f32; 2], PlayableLoop
         .get::<Sprite2d>(actor)
         .map(|sprite| sprite.position)
         .ok_or(PlayableLoopError2d::MissingSprite(actor))
+}
+
+fn merge_move_input(
+    keyboard: SpriteMoveInput2d,
+    external: Option<[f32; 2]>,
+) -> SpriteMoveInput2d {
+    let Some(ext) = external else {
+        return keyboard;
+    };
+    let k = keyboard.axis();
+    SpriteMoveInput2d::new([max_abs(k.x, ext[0]), max_abs(k.y, ext[1])])
+        .unwrap_or_else(|_| SpriteMoveInput2d::idle())
+}
+
+fn max_abs(a: f32, b: f32) -> f32 {
+    if b.abs() >= a.abs() { b } else { a }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -254,5 +331,25 @@ impl Error for PlayableLoopError2d {
 impl From<KinematicSpriteControllerError2d> for PlayableLoopError2d {
     fn from(value: KinematicSpriteControllerError2d) -> Self {
         Self::Kinematic(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_move_input;
+    use yuyib_game_2d::SpriteMoveInput2d;
+
+    #[test]
+    fn external_axis_wins_on_larger_abs() {
+        let keyboard = SpriteMoveInput2d::new([0.2, 0.0]).expect("k");
+        let merged = merge_move_input(keyboard, Some([-0.8, 0.0]));
+        assert!((merged.axis().x - (-0.8)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn keyboard_wins_when_stick_weaker() {
+        let keyboard = SpriteMoveInput2d::new([1.0, 0.0]).expect("k");
+        let merged = merge_move_input(keyboard, Some([0.25, 0.0]));
+        assert!((merged.axis().x - 1.0).abs() < 1e-5);
     }
 }

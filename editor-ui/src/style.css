@@ -1319,6 +1319,35 @@ input[type="range"] { height: 4px; accent-color: var(--cyan); }
   margin-top: 6px;
 }
 
+.launcher-steps {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.launcher-step {
+  flex: 1;
+  border: 1px solid #2a3344;
+  background: transparent;
+  color: #8b97ab;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
+.launcher-step.is-active {
+  color: #e8eef8;
+  border-color: #5b8cff;
+}
+
+.launcher-step:disabled {
+  opacity: 0.45;
+}
+
+.launcher-pane.is-hidden {
+  display: none;
+}
+
 .launcher-help,
 .launcher-status {
   margin: 12px 0 0;

@@ -11,6 +11,11 @@ description = "Editor Play Mode runtime: load a project .yscene into a native 3D
 name = "yuyib-play"
 path = "src/main.rs"
 
+[features]
+default = []
+## Side-by-side Rapier props overlay (CharacterController mesh motor unchanged).
+physics-rapier = ["yuyib/physics-rapier"]
+
 [dependencies]
 blake3 = "1.8.2"
 serde_json = "1.0.149"

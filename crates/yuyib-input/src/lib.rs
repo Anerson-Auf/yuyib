@@ -10,9 +10,11 @@
 //!
 //! This initial Windows/Winit adapter handles only keyboard `KeyCode` events
 //! with an identified physical code. It deliberately does **not** claim mouse,
-//! text input, touch, gamepad, rebinding persistence, IME, or controller
-//! vibration support. Focus loss clears every held mapped key and emits normal
-//! action cancellation on the next [`WinitKeyboardAdapter::emit_frame`] call.
+//! text input, touch, gamepad HID, rebinding persistence, IME, or controller
+//! vibration support. Hosts can still feed filtered analog axes through
+//! [`VirtualStick2d`] into 2D playable loops. Focus loss clears every held
+//! mapped key and emits normal action cancellation on the next
+//! [`WinitKeyboardAdapter::emit_frame`] call.
 //!
 //! [`WinitUiAdapter`] separately buffers Winit cursor, primary-mouse, and
 //! navigation-key input for a retained [`UiTree`]. It has no event loop or
@@ -40,6 +42,9 @@
 
 mod follow_camera;
 mod player_character;
+mod virtual_stick;
+#[cfg(feature = "gamepad")]
+mod gamepad;
 
 pub use follow_camera::{
     CharacterCameraMode3d, CharacterFollowCamera3d, CharacterFollowCameraError3d,
@@ -48,6 +53,9 @@ pub use player_character::{
     PlayerCharacterBindings3d, PlayerCharacterControlConfig3d, PlayerCharacterControlError3d,
     PlayerCharacterControls3d, actions as player_actions,
 };
+pub use virtual_stick::{VirtualStick2d, VirtualStickError2d};
+#[cfg(feature = "gamepad")]
+pub use gamepad::{GilrsGamepadAdapter2d, GilrsGamepadError2d};
 
 use std::{
     collections::{BTreeSet, VecDeque},

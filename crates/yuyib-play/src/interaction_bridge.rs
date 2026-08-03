@@ -7,11 +7,16 @@ use std::collections::BTreeMap;
 
 use yuyib_authoring::EntityGuid;
 use yuyib_ecs::prelude::{Entity, World};
-use yuyib_game_3d::{DirectionalLight3d, LocalTransform3d, Model3d, Transform3d, WorldTransform3d};
+use yuyib_game_3d::{
+    DirectionalLight3d, LocalTransform3d, Model3d, Parent3d, Transform3d, WorldTransform3d,
+    set_parent_3d,
+};
+use yuyib_game_3d_authoring::{PARENT_3D_SCHEMA, validate_parent_field};
 use yuyib_gameplay::{QuestBook, QuestSignal, QuestTransition};
+use yuyib_model::ModelHandle;
 use yuyib_scene_interaction::{
     BridgeCapabilities, SCHEMA_DIRECTIONAL_LIGHT_3D, SCHEMA_LOCAL_TRANSFORM_3D, SCHEMA_MODEL_3D,
-    SCHEMA_TRANSFORM_3D, SceneInteractionBatchResult, SceneInteractionBridge,
+    SCHEMA_PARENT_3D, SCHEMA_TRANSFORM_3D, SceneInteractionBatchResult, SceneInteractionBridge,
     SceneInteractionIntent, SceneInteractionSignal, TransformSpace, play_capabilities,
     translation_schemas, try_parse_quest_progress_signal, try_parse_trigger_signal, validate_intent,
 };
@@ -22,12 +27,25 @@ use yuyib_play::play_log::play_log;
 pub struct PlayWorldBridge<'world> {
     world: &'world mut World,
     entities: &'world BTreeMap<EntityGuid, Entity>,
+    /// Fallback handle for `AddComponent` `yuyib.model3d` when payload has no asset.
+    proxy_model: Option<ModelHandle>,
 }
 
 impl<'world> PlayWorldBridge<'world> {
     /// Borrows the Play world and GUID map from materialization.
     pub fn new(world: &'world mut World, entities: &'world BTreeMap<EntityGuid, Entity>) -> Self {
-        Self { world, entities }
+        Self {
+            world,
+            entities,
+            proxy_model: None,
+        }
+    }
+
+    /// Sets the proxy cube / fallback model used by `AddComponent` model3d.
+    #[must_use]
+    pub fn with_proxy_model(mut self, proxy: ModelHandle) -> Self {
+        self.proxy_model = Some(proxy);
+        self
     }
 
     fn resolve(&self, guid: EntityGuid) -> Result<Entity, String> {
@@ -254,6 +272,37 @@ impl<'world> PlayWorldBridge<'world> {
                 self.world.entity_mut(runtime).insert(light);
                 Ok(true)
             }
+            SCHEMA_MODEL_3D => {
+                if self.world.get::<Model3d>(runtime).is_some() {
+                    return Err(format!("play entity {entity} already has Model3d"));
+                }
+                let proxy = self.proxy_model.ok_or_else(|| {
+                    "play AddComponent model3d requires a proxy ModelHandle on the bridge"
+                        .to_owned()
+                })?;
+                let model = model3d_from_payload(payload, proxy)?;
+                self.world.entity_mut(runtime).insert(model);
+                Ok(true)
+            }
+            SCHEMA_PARENT_3D => {
+                if self.world.get::<Parent3d>(runtime).is_some() {
+                    return Err(format!("play entity {entity} already has Parent3d"));
+                }
+                let parent_guid = parent_guid_from_payload(payload)?;
+                match parent_guid {
+                    None => {
+                        // Authored root marker: no ECS parent edge.
+                        Ok(true)
+                    }
+                    Some(parent_guid) => {
+                        let parent = self.resolve(parent_guid)?;
+                        set_parent_3d(self.world, runtime, parent)
+                            .map_err(|error| error.to_string())?;
+                        self.world.entity_mut(runtime).remove::<WorldTransform3d>();
+                        Ok(true)
+                    }
+                }
+            }
             _ => Err(format!(
                 "play AddComponent does not support `{schema}` yet"
             )),
@@ -452,6 +501,54 @@ fn directional_light_from_payload(
         .map_err(|error| error.to_string())
 }
 
+fn model3d_from_payload(
+    payload: Option<&serde_json::Value>,
+    proxy: ModelHandle,
+) -> Result<Model3d, String> {
+    let mut model = Model3d::new(proxy);
+    let Some(payload) = payload else {
+        return Ok(model);
+    };
+    // Asset path resolve stays on the materialize path; Intent AddComponent uses
+    // the Play proxy cube when `model` is null / absent.
+    if let Some(visible) = payload.get("visible").and_then(serde_json::Value::as_bool) {
+        model.visible = visible;
+    }
+    if let Some(order) = payload.get("render_order") {
+        let order = order.as_i64().ok_or_else(|| {
+            "model3d.render_order requires a JSON integer".to_owned()
+        })?;
+        model.render_order = i32::try_from(order)
+            .map_err(|_| "model3d.render_order out of i32 range".to_owned())?;
+    }
+    if let Some(mesh) = payload.get("mesh") {
+        if mesh.is_null() {
+            model.mesh = None;
+        } else {
+            let index = mesh.as_u64().ok_or_else(|| {
+                "model3d.mesh requires null or a non-negative JSON integer".to_owned()
+            })?;
+            model.mesh = Some(usize::try_from(index).map_err(|_| {
+                "model3d.mesh out of usize range".to_owned()
+            })?);
+        }
+    }
+    Ok(model)
+}
+
+fn parent_guid_from_payload(
+    payload: Option<&serde_json::Value>,
+) -> Result<Option<EntityGuid>, String> {
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let value = payload
+        .get("parent")
+        .unwrap_or(&serde_json::Value::Null);
+    validate_parent_field(PARENT_3D_SCHEMA, "parent", value, None)
+        .map_err(|error| error.to_string())
+}
+
 fn vec3_or(
     payload: &serde_json::Value,
     key: &str,
@@ -511,6 +608,8 @@ pub struct PlayInteractionHost {
     pub pending: Vec<SceneInteractionIntent>,
     /// Optional gameplay quest book (register/start from the game / tests).
     pub quests: Option<QuestBook>,
+    /// Proxy model for Play `AddComponent` `yuyib.model3d` (usually the scene cube).
+    proxy_model: Option<ModelHandle>,
     current_signals: Vec<SceneInteractionSignal>,
     next_signals: Vec<SceneInteractionSignal>,
 }
@@ -519,6 +618,11 @@ impl PlayInteractionHost {
     /// Attaches a quest book owned by the Play host (no UI).
     pub fn set_quest_book(&mut self, book: QuestBook) {
         self.quests = Some(book);
+    }
+
+    /// Sets the fallback [`ModelHandle`] for Intent `AddComponent` model3d.
+    pub fn set_proxy_model(&mut self, proxy: ModelHandle) {
+        self.proxy_model = Some(proxy);
     }
 
     /// Queues one intent for the next flush.
@@ -541,6 +645,9 @@ impl PlayInteractionHost {
         }
         let intents = std::mem::take(&mut self.pending);
         let mut bridge = PlayWorldBridge::new(world, entities);
+        if let Some(proxy) = self.proxy_model {
+            bridge = bridge.with_proxy_model(proxy);
+        }
         let batch = bridge.apply_intents(&intents)?;
         self.next_signals.extend(batch.signals.iter().cloned());
         Ok(batch)
@@ -601,9 +708,13 @@ impl PlayInteractionHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yuyib_game_3d::{DirectionalLight3d, LocalTransform3d, Model3d, Parent3d, Transform3d};
     use yuyib_gameplay::{ObjectiveId, QuestDefinition, QuestId, QuestObjective};
     use yuyib_model::Model;
-    use yuyib_scene_interaction::SceneInteractionBridge;
+    use yuyib_scene_interaction::{
+        SCHEMA_DIRECTIONAL_LIGHT_3D, SCHEMA_MODEL_3D, SCHEMA_PARENT_3D, SCHEMA_TRANSFORM_3D,
+        SceneInteractionBridge,
+    };
 
     #[test]
     fn emit_signal_queues_without_entities() {
@@ -739,5 +850,128 @@ mod tests {
             })
             .expect_err("duplicate");
         assert!(err.contains("already has Transform3d"));
+    }
+
+    #[test]
+    fn add_model3d_uses_proxy_handle() {
+        let mut models = yuyib_assets::Assets::<Model>::new();
+        let proxy = models.insert(Model::cube(0.5).expect("cube"));
+        let mut world = World::new();
+        let entity = world.spawn(Transform3d::IDENTITY).id();
+        let guid = EntityGuid::new();
+        let mut map = BTreeMap::new();
+        map.insert(guid, entity);
+        {
+            let mut bridge = PlayWorldBridge::new(&mut world, &map).with_proxy_model(proxy);
+            bridge
+                .apply_intent(SceneInteractionIntent::AddComponent {
+                    entity: guid,
+                    schema: SCHEMA_MODEL_3D.to_owned(),
+                    version: None,
+                    payload: Some(serde_json::json!({
+                        "model": null,
+                        "mesh": null,
+                        "visible": true,
+                        "render_order": 2
+                    })),
+                })
+                .expect("add model");
+        }
+        let model = world.get::<Model3d>(entity).expect("model");
+        assert_eq!(model.model, proxy);
+        assert!(model.visible);
+        assert_eq!(model.render_order, 2);
+        assert!(model.mesh.is_none());
+        let _keep = models;
+    }
+
+    #[test]
+    fn add_model3d_rejects_without_proxy() {
+        let mut world = World::new();
+        let entity = world.spawn(Transform3d::IDENTITY).id();
+        let guid = EntityGuid::new();
+        let mut map = BTreeMap::new();
+        map.insert(guid, entity);
+        let mut bridge = PlayWorldBridge::new(&mut world, &map);
+        let err = bridge
+            .apply_intent(SceneInteractionIntent::AddComponent {
+                entity: guid,
+                schema: SCHEMA_MODEL_3D.to_owned(),
+                version: None,
+                payload: None,
+            })
+            .expect_err("needs proxy");
+        assert!(err.contains("proxy ModelHandle"));
+    }
+
+    #[test]
+    fn add_parent3d_resolves_guid_map() {
+        let mut world = World::new();
+        let parent = world.spawn(Transform3d::IDENTITY).id();
+        let child = world.spawn(Transform3d::IDENTITY).id();
+        let parent_guid = EntityGuid::new();
+        let child_guid = EntityGuid::new();
+        let mut map = BTreeMap::new();
+        map.insert(parent_guid, parent);
+        map.insert(child_guid, child);
+        {
+            let mut bridge = PlayWorldBridge::new(&mut world, &map);
+            bridge
+                .apply_intent(SceneInteractionIntent::AddComponent {
+                    entity: child_guid,
+                    schema: SCHEMA_PARENT_3D.to_owned(),
+                    version: None,
+                    payload: Some(serde_json::json!({
+                        "parent": parent_guid.to_string()
+                    })),
+                })
+                .expect("add parent");
+        }
+        assert_eq!(
+            world.get::<Parent3d>(child).expect("parent").entity(),
+            parent
+        );
+        assert!(world.get::<LocalTransform3d>(child).is_some());
+    }
+
+    #[test]
+    fn add_parent3d_rejects_unknown_guid() {
+        let mut world = World::new();
+        let child = world.spawn(Transform3d::IDENTITY).id();
+        let child_guid = EntityGuid::new();
+        let missing = EntityGuid::new();
+        let mut map = BTreeMap::new();
+        map.insert(child_guid, child);
+        let mut bridge = PlayWorldBridge::new(&mut world, &map);
+        let err = bridge
+            .apply_intent(SceneInteractionIntent::AddComponent {
+                entity: child_guid,
+                schema: SCHEMA_PARENT_3D.to_owned(),
+                version: None,
+                payload: Some(serde_json::json!({
+                    "parent": missing.to_string()
+                })),
+            })
+            .expect_err("unknown parent");
+        assert!(err.contains("not in the materialized GUID map"));
+    }
+
+    #[test]
+    fn add_parent3d_null_is_root_marker() {
+        let mut world = World::new();
+        let entity = world.spawn(Transform3d::IDENTITY).id();
+        let guid = EntityGuid::new();
+        let mut map = BTreeMap::new();
+        map.insert(guid, entity);
+        let mut bridge = PlayWorldBridge::new(&mut world, &map);
+        bridge
+            .apply_intent(SceneInteractionIntent::AddComponent {
+                entity: guid,
+                schema: SCHEMA_PARENT_3D.to_owned(),
+                version: None,
+                payload: Some(serde_json::json!({ "parent": null })),
+            })
+            .expect("null parent");
+        assert!(world.get::<Parent3d>(entity).is_none());
     }
 }

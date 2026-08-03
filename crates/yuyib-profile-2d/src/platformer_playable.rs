@@ -22,7 +22,7 @@ use yuyib_platform::winit::event::{ElementState, WindowEvent};
 use yuyib_platform::winit::keyboard::{KeyCode, PhysicalKey};
 use yuyib_render::RenderFrame;
 
-use super::{CameraFollow2d, Game2dProfile, Game2dProfileError};
+use super::{CameraFollow2d, CameraFollowRuntime2d, Game2dProfile, Game2dProfileError};
 
 const MAX_FIXED_STEPS_PER_FRAME: usize = 8;
 
@@ -107,11 +107,16 @@ pub struct PlatformerPlayable2d {
     controller: PlatformerController2d,
     actor: Entity,
     input: HeldPlatformerInput2d,
+    /// Optional host-injected horizontal stick (typically [-1, 1]).
+    external_move_x: Option<f32>,
     pixels_per_unit: f32,
     fixed_delta_seconds: f32,
     max_frame_delta: Duration,
     camera: CameraFollow2d,
+    camera_runtime: CameraFollowRuntime2d,
+    look_velocity: [f32; 2],
     fixed_accumulator_seconds: f32,
+    surface_size: Option<[u32; 2]>,
 }
 
 impl PlatformerPlayable2d {
@@ -135,11 +140,15 @@ impl PlatformerPlayable2d {
             controller,
             actor: desc.actor,
             input: HeldPlatformerInput2d::default(),
+            external_move_x: None,
             pixels_per_unit: desc.pixels_per_unit,
             fixed_delta_seconds,
             max_frame_delta: desc.max_frame_delta,
             camera: desc.camera,
+            camera_runtime: CameraFollowRuntime2d::new(),
+            look_velocity: [0.0, 0.0],
             fixed_accumulator_seconds: 0.0,
+            surface_size: None,
         })
     }
 
@@ -147,6 +156,28 @@ impl PlatformerPlayable2d {
     #[must_use]
     pub const fn actor(&self) -> Entity {
         self.actor
+    }
+
+    /// Returns the camera follow policy.
+    #[must_use]
+    pub const fn camera_follow(&self) -> CameraFollow2d {
+        self.camera
+    }
+
+    /// Mutable camera follow (zoom / pan / shake trauma).
+    pub fn camera_follow_mut(&mut self) -> &mut CameraFollow2d {
+        &mut self.camera
+    }
+
+    /// Replaces the camera follow policy.
+    pub fn set_camera_follow(&mut self, camera: CameraFollow2d) {
+        self.camera = camera;
+        self.camera_runtime.reset();
+    }
+
+    /// Hard-cuts cinematic smoothing (next frame snaps to ideal).
+    pub fn reset_camera_runtime(&mut self) {
+        self.camera_runtime.reset();
     }
 
     /// Returns whether the capsule is grounded.
@@ -182,6 +213,22 @@ impl PlatformerPlayable2d {
         self.input.handle(event);
     }
 
+    /// Injects a host-filtered horizontal stick axis (gamepad / touch / network).
+    ///
+    /// Non-finite values are ignored. Value is clamped to `[-1, 1]` and merged
+    /// with keyboard via max-abs each fixed step.
+    pub fn set_external_move_axis(&mut self, move_x: f32) {
+        if !move_x.is_finite() {
+            return;
+        }
+        self.external_move_x = Some(move_x.clamp(-1.0, 1.0));
+    }
+
+    /// Clears any host-injected horizontal axis.
+    pub fn clear_external_move_axis(&mut self) {
+        self.external_move_x = None;
+    }
+
     /// Accumulates frame time, runs fixed motor steps, syncs sprite + camera.
     ///
     /// # Errors
@@ -212,7 +259,7 @@ impl PlatformerPlayable2d {
             if self.fixed_accumulator_seconds < fixed {
                 break;
             }
-            let input = self.input.platformer_input(first)?;
+            let input = self.input.platformer_input(first, self.external_move_x)?;
             first = false;
             let step = self.controller.step(&mut self.dynamics, input)?;
             sync_sprite(
@@ -221,12 +268,18 @@ impl PlatformerPlayable2d {
                 step.translation,
                 self.pixels_per_unit,
             )?;
+            // Physics Y-up → sprite Y-down for look-ahead.
+            self.look_velocity = [
+                step.velocity[0] * self.pixels_per_unit,
+                -step.velocity[1] * self.pixels_per_unit,
+            ];
             last = Some(step);
             self.fixed_accumulator_seconds -= fixed;
         }
 
         profile.step_animations(frame_delta);
-        self.sync_camera(profile)?;
+        let _ = self.camera.tick(frame_seconds);
+        self.sync_camera(profile, frame_seconds)?;
         Ok(last)
     }
 
@@ -240,20 +293,32 @@ impl PlatformerPlayable2d {
         profile: &mut Game2dProfile,
         frame: &mut RenderFrame<'_>,
     ) -> Result<Game2dSceneStats, PlatformerPlayableError2d> {
-        self.sync_camera(profile)?;
+        self.surface_size = Some(frame.surface_size());
+        self.sync_camera(profile, 0.0)?;
         profile
             .render(frame)
             .map_err(PlatformerPlayableError2d::Profile)
     }
 
-    fn sync_camera(&self, profile: &mut Game2dProfile) -> Result<(), PlatformerPlayableError2d> {
+    fn sync_camera(
+        &mut self,
+        profile: &mut Game2dProfile,
+        dt_seconds: f32,
+    ) -> Result<(), PlatformerPlayableError2d> {
         let position = profile
             .world()
             .get::<Sprite2d>(self.actor)
             .map(|sprite| sprite.position)
             .ok_or(PlatformerPlayableError2d::MissingSprite(self.actor))?;
-        self.camera
-            .apply(profile.scene_mut().camera_mut(), position);
+        let camera = profile.scene_mut().camera_mut();
+        self.camera.apply_cinematic(
+            &mut self.camera_runtime,
+            camera,
+            position,
+            self.look_velocity,
+            dt_seconds,
+            self.surface_size,
+        );
         Ok(())
     }
 }
@@ -316,8 +381,13 @@ impl HeldPlatformerInput2d {
     fn platformer_input(
         &mut self,
         consume_jump_edge: bool,
+        external_move_x: Option<f32>,
     ) -> Result<PlatformerInput2d, PlatformerPlayableError2d> {
-        let move_x = f32::from(i8::from(self.right) - i8::from(self.left));
+        let keyboard_x = f32::from(i8::from(self.right) - i8::from(self.left));
+        let move_x = match external_move_x {
+            Some(ext) if ext.abs() >= keyboard_x.abs() => ext,
+            _ => keyboard_x,
+        };
         let jump = if consume_jump_edge {
             let pressed = self.jump_pressed;
             self.jump_pressed = false;

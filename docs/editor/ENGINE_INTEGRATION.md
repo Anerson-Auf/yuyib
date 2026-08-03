@@ -9,8 +9,10 @@ Editor. Сначала прочитайте этот файл, затем тол
 > document/process core, viewport shell, scene bridge и Monaco — foundation.
 > Visual materializers закрыты для TRS / Model / DirectionalLight; glTF Asset
 > preview — incremental (не full DoD). Apply Play (TRS whitelist) и rust-analyzer
-> diagnostics-only — closed (E1); texture remap closed; LSP completion/hover —
-> **deferred to end-game**; project wizard / cook export — открыты.
+> diagnostics + completion + hover + signatureHelp + definition + references + rename + code actions + allowlisted
+> `executeCommand` (`rust-analyzer.*`) — closed
+> (E1); texture remap closed; `project.cook` + export/import `*.ypack` hydrate
+> closed; cooked-only binary without importers — open.
 > Операционный статус: [`ENGINE_HANDOFF.md`](ENGINE_HANDOFF.md).
 > **SoT:** [`SOURCE_OF_TRUTH.md`](SOURCE_OF_TRUTH.md).
 > Практический authoring API: [`AUTHORING_GUIDE.md`](AUTHORING_GUIDE.md).

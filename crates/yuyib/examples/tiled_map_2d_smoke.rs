@@ -1,4 +1,4 @@
-//! Headless M7 smoke: Tiled JSON → `TileMap2d` (embedded + external `.tsj`).
+//! Headless M7 smoke: Tiled JSON/TMX → `TileMap2d` (embedded + external `.tsj`/`.tsx`).
 //!
 //! ```text
 //! cargo run -p yuyib --example tiled_map_2d_smoke --features two-d
@@ -25,8 +25,11 @@ const DEMO_ATLAS_PNG: &[u8] = &[
 ];
 
 const MAP_JSON: &str = include_str!("fixtures/tiled_unit_room.json");
+const MAP_TMX: &str = include_str!("fixtures/tiled_unit_room.tmx");
 const EXTERNAL_MAP_JSON: &str = include_str!("fixtures/tiled_external_tileset_room.json");
 const EXTERNAL_TILESET_JSON: &str = include_str!("fixtures/demo_atlas.tsj");
+const EXTERNAL_MAP_TMX: &str = include_str!("fixtures/tiled_external_tileset_room.tmx");
+const EXTERNAL_TILESET_TSX: &str = include_str!("fixtures/demo_atlas.tsx");
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut registry = ImporterRegistry::<ImportedTiledMap>::default();
@@ -71,8 +74,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut textures = Assets::<Texture>::new();
     let texture = textures.insert(image.texture().clone());
     let bound = imported.asset.bind_texture_with_world_tile_size(texture, [32.0, 32.0])?;
-    let (tile_map, _collision, objects) = bound.into_parts();
-    if tile_map.grid() != [4, 3] {
+    let (tile_maps, _collision, objects) = bound.into_parts();
+    if tile_maps.len() != 1 || tile_maps[0].grid() != [4, 3] {
         return Err("bound tile map grid mismatch".into());
     }
     if objects.len() != 1 {
@@ -107,8 +110,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
+    let tmx = TiledMapImporter::default().import_map(ImportSource::new(
+        "fixtures/tiled_unit_room.tmx",
+        MAP_TMX.as_bytes(),
+    ))?;
+    if tmx.asset.grid() != [4, 3] || tmx.asset.cells() != map.cells() {
+        return Err("tmx import mismatch vs json room".into());
+    }
+
+    let external_tsx = TiledMapImporter::default().import_map_with_external_tilesets(
+        ImportSource::new(
+            "fixtures/tiled_external_tileset_room.tmx",
+            EXTERNAL_MAP_TMX.as_bytes(),
+        ),
+        &[ExternalTilesetBytes::new(
+            "demo_atlas.tsx",
+            EXTERNAL_TILESET_TSX.as_bytes(),
+        )],
+    )?;
+    if external_tsx.asset.grid() != [4, 3]
+        || external_tsx.dependencies[0].uri != "demo_atlas.tsx"
+    {
+        return Err("external tsx import mismatch".into());
+    }
+
     println!(
-        "tiled_map_2d_smoke OK: grid=4x3 layer=ground solid_tiles={solid_count} objects={} external_tsj=ok",
+        "tiled_map_2d_smoke OK: grid=4x3 layer=ground solid_tiles={solid_count} objects={} external_tsj=ok tmx=ok tsx=ok",
         objects[0].objects().len()
     );
     Ok(())

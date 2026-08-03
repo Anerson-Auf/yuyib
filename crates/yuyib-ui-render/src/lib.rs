@@ -6,8 +6,10 @@
 //! a colour-only pass through yuyib-render. An optional rectangular clip
 //! performs CPU geometry intersection and a bounded WGPU scissor pass. It
 //! deliberately does not provide text glyphs, fonts, scrollbar drag/inertia,
-//! rounded corners, images, accessibility, windows, Winit integration, HTML,
-//! CSS, `WebView`, or a UI application loop.
+//! rounded corners, GPU textured image sampling, accessibility, windows,
+//! Winit integration, HTML, CSS, `WebView`, or a UI application loop.
+//! Hosts may still extract opaque [`UiImageQuad`] lists via
+//! [`extract_image_draw_list`] and bind textures themselves.
 
 #![forbid(unsafe_code)]
 
@@ -17,8 +19,8 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use yuyib_render::{RenderFrame, Renderer, wgpu};
 use yuyib_ui::{
-    Color, SCROLL_THUMB_THICKNESS, UiInputState, UiLayout, UiTokens, Widget, WidgetId, WidgetKind,
-    vertical_scroll_thumb_bounds,
+    Color, SCROLL_THUMB_THICKNESS, UiImageId, UiInputState, UiLayout, UiTokens, Widget, WidgetId,
+    WidgetKind, vertical_scroll_thumb_bounds,
 };
 
 /// An explicit logical-pixel clipping rectangle for one UI render pass.
@@ -266,18 +268,58 @@ impl UiDrawList {
     }
 }
 
-/// Limits retained UI rectangle upload work.
+/// Limits retained UI rectangle and image-quad upload work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiRenderLimits {
     /// Maximum coloured rectangles accepted in one draw list.
     pub max_rectangles: usize,
+    /// Maximum image quads accepted in one [`UiImageDrawList`].
+    pub max_images: usize,
 }
 
 impl Default for UiRenderLimits {
     fn default() -> Self {
         Self {
             max_rectangles: 100_000,
+            max_images: 100_000,
         }
+    }
+}
+
+/// One renderer-neutral image/icon quad in paint order.
+///
+/// Bounds are layout logical pixels, optionally CPU-cropped to `clip`. The
+/// host resolves [`UiImageId`] to a GPU texture or CPU bitmap; this crate does
+/// not sample textures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiImageQuad {
+    /// Retained widget that produced this quad.
+    pub widget: WidgetId,
+    /// Application-owned image key from [`WidgetKind::Image`].
+    pub image: UiImageId,
+    /// Logical-pixel destination rectangle after clip intersection.
+    pub bounds: yuyib_ui::Rect,
+    /// Optional pass / scroll clip retained for a host scissor stage.
+    pub clip: Option<UiClipRect>,
+}
+
+/// Ordered image/icon quads extracted from a retained UI tree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UiImageDrawList {
+    quads: Vec<UiImageQuad>,
+}
+
+impl UiImageDrawList {
+    /// Returns image quads in retained-tree paint order.
+    #[must_use]
+    pub fn quads(&self) -> &[UiImageQuad] {
+        &self.quads
+    }
+
+    /// Returns whether this list contains no image quads.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.quads.is_empty()
     }
 }
 
@@ -289,6 +331,13 @@ pub enum UiRenderError {
     /// The draw list exceeded the configured bounded-work limit.
     TooManyRectangles {
         /// Observed rectangle count.
+        actual: usize,
+        /// Configured maximum.
+        limit: usize,
+    },
+    /// The image draw list exceeded the configured bounded-work limit.
+    TooManyImages {
+        /// Observed image-quad count.
         actual: usize,
         /// Configured maximum.
         limit: usize,
@@ -310,6 +359,9 @@ impl fmt::Display for UiRenderError {
                     formatter,
                     "UI rectangle count {actual} exceeds limit {limit}"
                 )
+            }
+            Self::TooManyImages { actual, limit } => {
+                write!(formatter, "UI image count {actual} exceeds limit {limit}")
             }
             Self::ZeroSurfaceSize => {
                 formatter.write_str("UI cannot render to a zero-sized surface")
@@ -408,6 +460,45 @@ pub fn extract_draw_list_with_input(
     limits: UiRenderLimits,
 ) -> Result<UiDrawList, UiRenderError> {
     extract_draw_list_with_input_clipped(root, layout, tokens, input, visuals, None, limits)
+}
+
+/// Extracts [`WidgetKind::Image`] widgets into paint-order destination quads.
+///
+/// The list is separate from colour [`UiDrawList`] so hosts can bind textures
+/// without mixing them into the solid-colour WGPU pass. Empty trees and trees
+/// without images succeed with an empty list.
+///
+/// # Errors
+///
+/// Returns a structured error for missing layout rectangles or bounded list
+/// overflow. This function performs no GPU work.
+pub fn extract_image_draw_list(
+    root: &Widget,
+    layout: &UiLayout,
+    limits: UiRenderLimits,
+) -> Result<UiImageDrawList, UiRenderError> {
+    extract_image_draw_list_clipped(root, layout, None, limits)
+}
+
+/// Extracts image widgets with an optional explicit pass clip.
+///
+/// Geometry is CPU-intersected with `clip` and with any [`UiLayout::clip`] from
+/// nested `ScrollView` viewports. Empty intersections are omitted without
+/// consuming the image limit.
+///
+/// # Errors
+///
+/// Returns a structured error for missing layout rectangles or bounded list
+/// overflow. This function performs no GPU work.
+pub fn extract_image_draw_list_clipped(
+    root: &Widget,
+    layout: &UiLayout,
+    clip: Option<UiClipRect>,
+    limits: UiRenderLimits,
+) -> Result<UiImageDrawList, UiRenderError> {
+    let mut quads = Vec::new();
+    extract_image_widget(root, layout, clip, limits, &mut quads)?;
+    Ok(UiImageDrawList { quads })
 }
 
 /// Extracts retained fills and input decorations with an optional pass clip.
@@ -742,6 +833,62 @@ fn extract_widget(
     {
         append_scroll_thumb(widget, layout, color, clip, context)?;
     }
+    Ok(())
+}
+
+fn extract_image_widget(
+    widget: &Widget,
+    layout: &UiLayout,
+    pass_clip: Option<UiClipRect>,
+    limits: UiRenderLimits,
+    quads: &mut Vec<UiImageQuad>,
+) -> Result<(), UiRenderError> {
+    let bounds = layout
+        .bounds(widget.id())
+        .ok_or(UiRenderError::MissingLayoutBounds(widget.id()))?;
+    let layout_clip = layout.clip(widget.id()).map(UiClipRect::new);
+    if let (Some(first), Some(second)) = (pass_clip, layout_clip)
+        && intersect_rectangles(first.bounds(), second.bounds()).is_none()
+    {
+        return Ok(());
+    }
+    let clip = merge_clips(pass_clip, layout_clip);
+    if let Some(image) = widget.image_id() {
+        push_image_quad(
+            UiImageQuad {
+                widget: widget.id(),
+                image,
+                bounds,
+                clip,
+            },
+            limits,
+            quads,
+        )?;
+    }
+    for child in widget.children() {
+        extract_image_widget(child, layout, pass_clip, limits, quads)?;
+    }
+    Ok(())
+}
+
+fn push_image_quad(
+    mut quad: UiImageQuad,
+    limits: UiRenderLimits,
+    quads: &mut Vec<UiImageQuad>,
+) -> Result<(), UiRenderError> {
+    if let Some(clip) = quad.clip {
+        let Some(bounds) = intersect_rectangles(quad.bounds, clip.bounds()) else {
+            return Ok(());
+        };
+        quad.bounds = bounds;
+    }
+    if quads.len() >= limits.max_images {
+        return Err(UiRenderError::TooManyImages {
+            actual: quads.len().saturating_add(1),
+            limit: limits.max_images,
+        });
+    }
+    quads.push(quad);
     Ok(())
 }
 
@@ -1184,7 +1331,10 @@ mod tests {
                 tree.root(),
                 &layout,
                 UiTokens::default(),
-                UiRenderLimits { max_rectangles: 1 }
+                UiRenderLimits {
+                    max_rectangles: 1,
+                    max_images: 100_000,
+                },
             ),
             Err(UiRenderError::TooManyRectangles { .. })
         ));
@@ -1248,7 +1398,10 @@ mod tests {
                 UiTokens::default(),
                 &UiInputState::default(),
                 UiVisualStyle::none().with_widget_border(Some(border)),
-                UiRenderLimits { max_rectangles: 4 },
+                UiRenderLimits {
+                    max_rectangles: 4,
+                    max_images: 100_000,
+                },
             ),
             Err(UiRenderError::TooManyRectangles {
                 actual: 5,
@@ -1306,7 +1459,10 @@ mod tests {
             &layout,
             UiTokens::default(),
             Some(clip),
-            UiRenderLimits { max_rectangles: 0 },
+            UiRenderLimits {
+                max_rectangles: 0,
+                max_images: 100_000,
+            },
         )
         .expect("empty clipped draw list");
 
@@ -1560,5 +1716,61 @@ mod tests {
         assert_eq!(vertices.len(), 6);
         assert_eq!(vertices[0].position, [-1.0, 1.0]);
         assert_eq!(vertices[2].position, [0.0, 0.5]);
+    }
+
+    #[test]
+    fn image_extraction_follows_paint_order_and_honours_clip() {
+        let first = yuyib_ui::UiImageId::new(11);
+        let second = yuyib_ui::UiImageId::new(22);
+        let tree = UiBuilder::new(id("root"), LayoutKind::Row)
+            .child(Widget::image(id("a"), first))
+            .child(Widget::button(id("button"), "Play"))
+            .child(Widget::image(id("b"), second))
+            .build()
+            .expect("tree");
+        let layout = yuyib_ui::layout(&tree, Size::new(200, 40)).expect("layout");
+        let list = extract_image_draw_list(tree.root(), &layout, UiRenderLimits::default())
+            .expect("images");
+        assert_eq!(
+            list.quads()
+                .iter()
+                .map(|quad| (quad.widget, quad.image))
+                .collect::<Vec<_>>(),
+            vec![(id("a"), first), (id("b"), second)]
+        );
+        assert_eq!(list.quads()[0].bounds.size, Size::new(24, 24));
+
+        let clip = UiClipRect::new(yuyib_ui::Rect {
+            origin: yuyib_ui::Point::new(0, 0),
+            size: Size::new(12, 12),
+        });
+        let clipped =
+            extract_image_draw_list_clipped(tree.root(), &layout, Some(clip), UiRenderLimits::default())
+                .expect("clipped images");
+        assert_eq!(clipped.quads().len(), 1);
+        assert_eq!(clipped.quads()[0].widget, id("a"));
+        assert_eq!(clipped.quads()[0].bounds.size, Size::new(12, 12));
+        assert_eq!(clipped.quads()[0].clip, Some(clip));
+    }
+
+    #[test]
+    fn image_extraction_rejects_bounded_overflow() {
+        let tree = UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(Widget::image(id("one"), yuyib_ui::UiImageId::new(1)))
+            .child(Widget::image(id("two"), yuyib_ui::UiImageId::new(2)))
+            .build()
+            .expect("tree");
+        let layout = yuyib_ui::layout(&tree, Size::new(100, 100)).expect("layout");
+        assert!(matches!(
+            extract_image_draw_list(
+                tree.root(),
+                &layout,
+                UiRenderLimits {
+                    max_rectangles: 100_000,
+                    max_images: 1,
+                },
+            ),
+            Err(UiRenderError::TooManyImages { actual: 2, limit: 1 })
+        ));
     }
 }

@@ -18,7 +18,10 @@ use std::{
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use yuyib_assets::{Assets, CookCache};
+use yuyib_assets::{
+    Assets, CookCache, collect_ypack_entries_from_cook_root, hydrate_cook_cache_from_ypack,
+    write_ypack,
+};
 use yuyib_authoring::{AssetGuid, AuthoringRegistry, EntityGuid, TransactionError};
 use yuyib_ecs::{bevy_ecs::entity::Entity, prelude::World};
 use yuyib_editor_core::{
@@ -84,8 +87,15 @@ use crate::{
         WindowControlRequest, WorkspaceMode, create_bridge,
     },
     editor_gizmo::{self, GizmoLayout, GizmoState, GizmoUnlitPass},
-    gltf_preview::{GltfPreviewFrame, GltfPreviewReimport, GltfPreviewSession},
-    lsp_ra::{LspDiagnostic, LspStatus, RustAnalyzerSession},
+    gltf_preview::{
+        GltfPreviewError, GltfPreviewFrame, GltfPreviewReimport, GltfPreviewSession,
+        HostGltfPreviewStore, preview_asset_guid,
+    },
+    lsp_ra::{
+        LspCodeAction, LspCompletionItem, LspDiagnostic, LspExecuteCommandResult, LspFileEdits,
+        LspHover, LspLocation, LspRenameResult, LspSignatureHelp, LspStatus, RustAnalyzerSession,
+        is_allowed_lsp_command,
+    },
     scene_authoring::{SceneMutationError, SceneSession, SceneSessionError},
     scene_interaction::EditorDocumentBridge,
     viewport_gizmo::{GizmoAxis, GizmoToolKind, apply_axis_scale, axis_parameter, rotate_quat},
@@ -157,6 +167,7 @@ pub struct EditorApp {
     authored_scene: Option<SceneSession>,
     asset_index: Option<ProjectAssetIndex>,
     gltf_preview: Option<GltfPreviewSession>,
+    gltf_preview_store: HostGltfPreviewStore,
     /// Asset Preview AABB wireframe (`preview.overlay.set` / Bounds).
     preview_overlay_bounds: bool,
     /// Asset Preview collision mesh wireframe (`preview.overlay.set` / Collision).
@@ -195,6 +206,12 @@ pub struct EditorApp {
     rust_analyzer: Option<RustAnalyzerSession>,
     /// Absolute path last opened in RA (for didClose on switch).
     lsp_open_path: Option<PathBuf>,
+    /// Background `project.cook` batch is running.
+    cook_export_inflight: bool,
+    /// Background `project.export_ypack` is running.
+    ypack_export_inflight: bool,
+    /// Background `project.import_ypack` hydrate is running.
+    ypack_import_inflight: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -327,6 +344,30 @@ enum EditorJob {
         result: Result<yuyib_gltf::ImportedAsset, String>,
         cook_hit: bool,
     },
+    CookAsset {
+        path: String,
+        index: usize,
+        total: usize,
+        cook_hit: bool,
+        error: Option<String>,
+    },
+    CookFinished {
+        total: usize,
+        hits: usize,
+        misses: usize,
+        errors: usize,
+    },
+    YpackExportFinished {
+        path: String,
+        entries: usize,
+        error: Option<String>,
+    },
+    YpackImportFinished {
+        path: String,
+        entries: usize,
+        written: usize,
+        error: Option<String>,
+    },
 }
 
 enum ProcessCompletion {
@@ -446,6 +487,7 @@ impl EditorApp {
             authored_scene: None,
             asset_index: None,
             gltf_preview: None,
+            gltf_preview_store: HostGltfPreviewStore::new(),
             preview_overlay_bounds: true,
             preview_overlay_collision: false,
             preview_overlay_normals: true,
@@ -468,6 +510,9 @@ impl EditorApp {
             projection_watch_revisions: HashMap::new(),
             rust_analyzer: None,
             lsp_open_path: None,
+            cook_export_inflight: false,
+            ypack_export_inflight: false,
+            ypack_import_inflight: false,
         })
     }
 
@@ -606,6 +651,18 @@ impl EditorApp {
                 EditorCommand::CargoCheck(request) => self.start_cargo_check(&request),
                 EditorCommand::ReadSource(request) => self.read_source(&request),
                 EditorCommand::ChangeSource(request) => self.change_source(&request),
+                EditorCommand::LspCompletion(request) => self.request_lsp_completion(request),
+                EditorCommand::LspHover(request) => self.request_lsp_hover(request),
+                EditorCommand::LspSignatureHelp(request) => {
+                    self.request_lsp_signature_help(request)
+                }
+                EditorCommand::LspDefinition(request) => self.request_lsp_definition(request),
+                EditorCommand::LspReferences(request) => self.request_lsp_references(request),
+                EditorCommand::LspRename(request) => self.request_lsp_rename(request),
+                EditorCommand::LspCodeAction(request) => self.request_lsp_code_action(request),
+                EditorCommand::LspExecuteCommand(request) => {
+                    self.request_lsp_execute_command(request)
+                }
                 EditorCommand::ListSources => self.publish_source_tree(),
                 EditorCommand::SaveSource(request) => self.save_source(&request),
                 EditorCommand::SetSelection(selection) => {
@@ -630,6 +687,9 @@ impl EditorApp {
                 }
                 EditorCommand::OpenProjectPath(request) => self.open_project_path(request),
                 EditorCommand::RefreshAssetIndex => self.publish_asset_index(),
+                EditorCommand::CookProject => self.start_project_cook(),
+                EditorCommand::ExportYpack(request) => self.start_ypack_export(request),
+                EditorCommand::ImportYpack(request) => self.start_ypack_import(request),
                 EditorCommand::OpenAsset(request) => self.open_asset(request),
                 EditorCommand::ReimportAsset(request) => self.reimport_asset(request),
                 EditorCommand::TrackAsset(request) => self.track_asset(request),
@@ -865,6 +925,7 @@ impl EditorApp {
                 };
                 self.asset_index = None;
                 self.gltf_preview = None;
+                self.gltf_preview_store.clear();
                 // Preview is always project-local; Scene GPU residency can stay warm
                 // when reopening the same root in-process.
                 self.preview_scene.clear_model_caches();
@@ -994,6 +1055,251 @@ impl EditorApp {
                 self.publish_diagnostic("error", "assets", &error.to_string());
             }
         }
+    }
+
+    /// Explicit project cook: batch-import known glTF sources into `.yuyib_cook`.
+    fn start_project_cook(&mut self) {
+        if self.project.is_none() {
+            self.publish_diagnostic("warning", "project.cook", "Open a project before cooking assets.");
+            return;
+        }
+        if self.cook_export_inflight {
+            self.publish_diagnostic(
+                "info",
+                "project.cook",
+                "Cook export is already running.",
+            );
+            return;
+        }
+        if self.asset_index.is_none() {
+            self.publish_asset_index();
+        }
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let targets = collect_gltf_cook_targets(
+            self.asset_index.as_ref(),
+            &self.project_root,
+            &project.asset_root,
+        );
+        if targets.is_empty() {
+            self.emit_value(
+                "host.process",
+                json!({
+                    "kind": "cook",
+                    "status": "finished",
+                    "total": 0,
+                    "hits": 0,
+                    "misses": 0,
+                    "errors": 0,
+                    "message": "No glTF/GLB sources found in the asset index",
+                }),
+            );
+            return;
+        }
+        self.cook_export_inflight = true;
+        let total = targets.len();
+        self.emit_value(
+            "host.process",
+            json!({
+                "kind": "cook",
+                "status": "started",
+                "total": total,
+                "completed": 0.0,
+            }),
+        );
+        let cook_root = editor_cook_cache_root(&self.project_root);
+        let sender = self.job_sender.clone();
+        thread::spawn(move || {
+            let mut hits = 0_usize;
+            let mut misses = 0_usize;
+            let mut errors = 0_usize;
+            for (index, (path, absolute)) in targets.into_iter().enumerate() {
+                let (cook_hit, error) = match import_gltf_with_cook_cache(&absolute, &cook_root) {
+                    Ok((_, true)) => {
+                        hits += 1;
+                        (true, None)
+                    }
+                    Ok((_, false)) => {
+                        misses += 1;
+                        (false, None)
+                    }
+                    Err(message) => {
+                        errors += 1;
+                        (false, Some(message))
+                    }
+                };
+                let _ = sender.try_send(EditorJob::CookAsset {
+                    path,
+                    index: index + 1,
+                    total,
+                    cook_hit,
+                    error,
+                });
+            }
+            let _ = sender.try_send(EditorJob::CookFinished {
+                total,
+                hits,
+                misses,
+                errors,
+            });
+        });
+    }
+
+    /// Packs `.yuyib_cook` artifacts into a versioned `*.ypack` shipping file.
+    fn start_ypack_export(&mut self, request: crate::bridge::YpackExportRequest) {
+        if self.project.is_none() {
+            self.publish_diagnostic(
+                "warning",
+                "project.export_ypack",
+                "Open a project before exporting a ypack.",
+            );
+            return;
+        }
+        if self.ypack_export_inflight {
+            self.publish_diagnostic(
+                "info",
+                "project.export_ypack",
+                "Ypack export is already running.",
+            );
+            return;
+        }
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let output = match resolve_ypack_output_path(
+            &self.project_root,
+            Some(project.name.as_str()),
+            request.path.as_deref(),
+        ) {
+            Ok(path) => path,
+            Err(message) => {
+                self.publish_diagnostic("error", "project.export_ypack", &message);
+                return;
+            }
+        };
+        let cook_root = editor_cook_cache_root(&self.project_root);
+        self.ypack_export_inflight = true;
+        self.emit_value(
+            "host.process",
+            json!({
+                "kind": "ypack",
+                "op": "export",
+                "status": "started",
+                "path": output.to_string_lossy(),
+                "completed": 0.05,
+            }),
+        );
+        let sender = self.job_sender.clone();
+        let output_display = output.to_string_lossy().replace('\\', "/");
+        thread::spawn(move || {
+            let result = (|| {
+                let entries = collect_ypack_entries_from_cook_root(&cook_root).map_err(|error| error.to_string())?;
+                if entries.is_empty() {
+                    return Err(
+                        "No cooked artifacts in `.yuyib_cook` — run Cook assets first".to_owned(),
+                    );
+                }
+                write_ypack(&output, &entries).map_err(|error| error.to_string())?;
+                Ok(entries.len())
+            })();
+            match result {
+                Ok(entries) => {
+                    let _ = sender.try_send(EditorJob::YpackExportFinished {
+                        path: output_display,
+                        entries,
+                        error: None,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.try_send(EditorJob::YpackExportFinished {
+                        path: output_display,
+                        entries: 0,
+                        error: Some(error),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Hydrates `.yuyib_cook` from a versioned `*.ypack` (no source re-import).
+    fn start_ypack_import(&mut self, request: crate::bridge::YpackImportRequest) {
+        if self.project.is_none() {
+            self.publish_diagnostic(
+                "warning",
+                "project.import_ypack",
+                "Open a project before importing a ypack.",
+            );
+            return;
+        }
+        if self.ypack_import_inflight {
+            self.publish_diagnostic(
+                "info",
+                "project.import_ypack",
+                "Ypack import is already running.",
+            );
+            return;
+        }
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let input = match resolve_ypack_output_path(
+            &self.project_root,
+            Some(project.name.as_str()),
+            request.path.as_deref(),
+        ) {
+            Ok(path) => path,
+            Err(message) => {
+                self.publish_diagnostic("error", "project.import_ypack", &message);
+                return;
+            }
+        };
+        if !input.is_file() {
+            self.publish_diagnostic(
+                "warning",
+                "project.import_ypack",
+                &format!(
+                    "Pack not found: {} — export a ypack first or pass an explicit path",
+                    input.display()
+                ),
+            );
+            return;
+        }
+        let cook_root = editor_cook_cache_root(&self.project_root);
+        self.ypack_import_inflight = true;
+        self.emit_value(
+            "host.process",
+            json!({
+                "kind": "ypack",
+                "op": "import",
+                "status": "started",
+                "path": input.to_string_lossy(),
+                "completed": 0.05,
+            }),
+        );
+        let sender = self.job_sender.clone();
+        let input_display = input.to_string_lossy().replace('\\', "/");
+        thread::spawn(move || {
+            let cache = CookCache::new(cook_root);
+            match hydrate_cook_cache_from_ypack(&input, &cache) {
+                Ok(report) => {
+                    let _ = sender.try_send(EditorJob::YpackImportFinished {
+                        path: input_display,
+                        entries: report.entries,
+                        written: report.written,
+                        error: None,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.try_send(EditorJob::YpackImportFinished {
+                        path: input_display,
+                        entries: 0,
+                        written: 0,
+                        error: Some(error.to_string()),
+                    });
+                }
+            }
+        });
     }
 
     fn open_asset(&mut self, request: AssetOpenRequest) {
@@ -1911,20 +2217,38 @@ impl EditorApp {
             }
         }
         let asset_root = project.asset_root.clone();
-        // New import targets preview_scene only — Scene residency stays warm.
-        self.preview_scene.clear_model_caches();
         let settings = self
             .resolve_gltf_import_settings(&normalized)
             .unwrap_or_else(default_settings_json);
-        match GltfPreviewSession::start_with_settings(
-            &self.project_root,
-            &asset_root,
-            &normalized,
-            &settings,
-        ) {
-            Ok(session) => {
+        let tracked = self.find_tracked_guid_for_source(&normalized);
+        let asset = preview_asset_guid(tracked.as_deref(), &normalized);
+
+        // Build the next session first so a failed open keeps the last-good preview.
+        let next = self.restore_or_start_gltf_preview(&asset_root, &normalized, &settings, asset);
+        match next {
+            Ok((session, cache_hit)) => {
+                if let Some(mut previous) = self.gltf_preview.take() {
+                    let previous_path = previous.relative_path().replace('\\', "/");
+                    if previous_path != normalized {
+                        if let Some(parked) = previous.park_cpu_ready() {
+                            let parked_path = parked.relative_path.clone();
+                            match self.gltf_preview_store.park(parked) {
+                                Ok(()) => eprintln!(
+                                    "yuyib-editor: glTF preview parked {parked_path} (store={})",
+                                    self.gltf_preview_store.len()
+                                ),
+                                Err(error) => eprintln!(
+                                    "yuyib-editor: glTF preview park failed for {parked_path}: {error}"
+                                ),
+                            }
+                        }
+                    }
+                }
+                // New import targets preview_scene only — Scene residency stays warm.
+                self.preview_scene.clear_model_caches();
                 eprintln!(
-                    "yuyib-editor: glTF preview start {}",
+                    "yuyib-editor: glTF preview {} {}",
+                    if cache_hit { "cache_hit" } else { "start" },
                     session.absolute_path().display()
                 );
                 self.gltf_preview = Some(session);
@@ -1933,9 +2257,9 @@ impl EditorApp {
                     json!({
                         "kind": "preview",
                         "status": "progress",
-                        "stage": "queued",
+                        "stage": if cache_hit { "cache_hit" } else { "queued" },
                         "path": normalized,
-                        "completed": 0.0
+                        "completed": if cache_hit { 1.0 } else { 0.0 }
                     }),
                 );
                 if let Some(window) = &self.window {
@@ -1943,14 +2267,49 @@ impl EditorApp {
                 }
             }
             Err(error) => {
-                // Do not clear an existing last-good session on a failed open of
-                // a different path; only clear when starting fresh fails with no session.
-                if self.gltf_preview.is_none() {
-                    self.gltf_preview = None;
-                }
                 self.publish_diagnostic("error", "asset.preview", &error.to_string());
             }
         }
+    }
+
+    fn restore_or_start_gltf_preview(
+        &mut self,
+        asset_root: &str,
+        normalized: &str,
+        settings: &serde_json::Value,
+        asset: AssetGuid,
+    ) -> Result<(GltfPreviewSession, bool), GltfPreviewError> {
+        let absolute = {
+            let relative = std::path::Path::new(normalized);
+            if asset_root.is_empty() {
+                self.project_root.join(relative)
+            } else {
+                self.project_root.join(asset_root).join(relative)
+            }
+        };
+        let cook_root = editor_cook_cache_root(&self.project_root);
+        let key = GltfPreviewSession::cache_key_for(normalized, &absolute, settings, asset);
+        if let Some(loaded) = self.gltf_preview_store.take(&key) {
+            let session = GltfPreviewSession::from_cpu_ready(
+                &self.project_root,
+                asset_root,
+                normalized,
+                settings,
+                asset,
+                loaded,
+                Some(&cook_root),
+            )?;
+            return Ok((session, true));
+        }
+        let session = GltfPreviewSession::start_with_settings_and_asset(
+            &self.project_root,
+            asset_root,
+            normalized,
+            settings,
+            asset,
+            Some(&cook_root),
+        )?;
+        Ok((session, false))
     }
 
     fn poll_gltf_preview(&mut self) {
@@ -2022,7 +2381,8 @@ impl EditorApp {
                     "status": "progress",
                     "stage": "gpu_upload",
                     "path": poll.relative_path,
-                    "completed": 0.5
+                    "completed": 0.5,
+                    "cook_hit": poll.cook_hit.unwrap_or(false)
                 }),
             );
             if let Some(window) = &self.window {
@@ -3222,21 +3582,475 @@ impl EditorApp {
         );
     }
 
+    fn request_lsp_completion(&mut self, request: crate::bridge::LspPositionRequest) {
+        if self.rust_analyzer.is_none()
+            || !self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Ready))
+        {
+            self.publish_lsp_completion(request.request_id, Vec::new());
+            return;
+        }
+        let absolute = self.resolve_project_source_path(&request.path);
+        let line = request.line.saturating_sub(1);
+        let character = request.column.saturating_sub(1);
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            session.request_completion(&absolute, line, character, request.request_id);
+        }
+    }
+
+    fn request_lsp_hover(&mut self, request: crate::bridge::LspPositionRequest) {
+        if self.rust_analyzer.is_none()
+            || !self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Ready))
+        {
+            self.publish_lsp_hover(request.request_id, None);
+            return;
+        }
+        let absolute = self.resolve_project_source_path(&request.path);
+        let line = request.line.saturating_sub(1);
+        let character = request.column.saturating_sub(1);
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            session.request_hover(&absolute, line, character, request.request_id);
+        }
+    }
+
+    fn request_lsp_signature_help(&mut self, request: crate::bridge::LspSignatureHelpRequest) {
+        if self.rust_analyzer.is_none()
+            || !self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Ready))
+        {
+            self.publish_lsp_signature_help(request.request_id, None);
+            return;
+        }
+        let absolute = self.resolve_project_source_path(&request.path);
+        let line = request.line.saturating_sub(1);
+        let character = request.column.saturating_sub(1);
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            session.request_signature_help(
+                &absolute,
+                line,
+                character,
+                request.trigger_kind,
+                request.trigger_character.as_deref(),
+                request.is_retrigger,
+                request.request_id,
+            );
+        }
+    }
+
+    fn request_lsp_definition(&mut self, request: crate::bridge::LspPositionRequest) {
+        if self.rust_analyzer.is_none()
+            || !self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Ready))
+        {
+            self.publish_lsp_definition(request.request_id, Vec::new());
+            return;
+        }
+        let absolute = self.resolve_project_source_path(&request.path);
+        let line = request.line.saturating_sub(1);
+        let character = request.column.saturating_sub(1);
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            session.request_definition(&absolute, line, character, request.request_id);
+        }
+    }
+
+    fn request_lsp_references(&mut self, request: crate::bridge::LspReferencesRequest) {
+        if self.rust_analyzer.is_none()
+            || !self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Ready))
+        {
+            self.publish_lsp_references(request.request_id, Vec::new());
+            return;
+        }
+        let absolute = self.resolve_project_source_path(&request.path);
+        let line = request.line.saturating_sub(1);
+        let character = request.column.saturating_sub(1);
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            session.request_references(
+                &absolute,
+                line,
+                character,
+                request.include_declaration,
+                request.request_id,
+            );
+        }
+    }
+
+    fn request_lsp_rename(&mut self, request: crate::bridge::LspRenameRequest) {
+        if request.new_name.trim().is_empty() {
+            self.publish_lsp_rename(
+                request.request_id,
+                LspRenameResult {
+                    files: Vec::new(),
+                    error: Some("new name must not be empty".to_owned()),
+                },
+            );
+            return;
+        }
+        if self.rust_analyzer.is_none()
+            || !self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Ready))
+        {
+            self.publish_lsp_rename(
+                request.request_id,
+                LspRenameResult {
+                    files: Vec::new(),
+                    error: Some("rust-analyzer is not ready".to_owned()),
+                },
+            );
+            return;
+        }
+        let absolute = self.resolve_project_source_path(&request.path);
+        let line = request.line.saturating_sub(1);
+        let character = request.column.saturating_sub(1);
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            session.request_rename(
+                &absolute,
+                line,
+                character,
+                &request.new_name,
+                request.request_id,
+            );
+        }
+    }
+
+    fn request_lsp_code_action(&mut self, request: crate::bridge::LspCodeActionRequest) {
+        if self.rust_analyzer.is_none()
+            || !self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Ready))
+        {
+            self.publish_lsp_code_action(request.request_id, Vec::new());
+            return;
+        }
+        let absolute = self.resolve_project_source_path(&request.path);
+        let start_line = request.start_line.saturating_sub(1);
+        let start_character = request.start_column.saturating_sub(1);
+        let end_line = request.end_line.saturating_sub(1);
+        let end_character = request.end_column.saturating_sub(1);
+        let diagnostics = request
+            .diagnostics
+            .into_iter()
+            .filter_map(monaco_marker_to_lsp_diagnostic)
+            .collect();
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            session.request_code_action(
+                &absolute,
+                start_line,
+                start_character,
+                end_line,
+                end_character,
+                diagnostics,
+                request.request_id,
+            );
+        }
+    }
+
+    fn publish_lsp_completion(&mut self, request_id: String, items: Vec<LspCompletionItem>) {
+        let payload_items: Vec<Value> = items
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "label": item.label,
+                    "kind": item.kind,
+                    "detail": item.detail,
+                    "documentation": item.documentation,
+                    "insert_text": item.insert_text,
+                    "filter_text": item.filter_text,
+                    "sort_text": item.sort_text,
+                })
+            })
+            .collect();
+        self.emit_value(
+            "host.lsp.completion",
+            json!({
+                "request_id": request_id,
+                "items": payload_items,
+            }),
+        );
+    }
+
+    fn publish_lsp_hover(&mut self, request_id: String, hover: Option<LspHover>) {
+        self.emit_value(
+            "host.lsp.hover",
+            json!({
+                "request_id": request_id,
+                "markdown": hover.map(|item| item.markdown),
+            }),
+        );
+    }
+
+    fn publish_lsp_signature_help(&mut self, request_id: String, help: Option<LspSignatureHelp>) {
+        let payload = help.map(|help| {
+            json!({
+                "signatures": help.signatures.iter().map(|signature| {
+                    json!({
+                        "label": signature.label,
+                        "documentation": signature.documentation,
+                        "active_parameter": signature.active_parameter,
+                        "parameters": signature.parameters.iter().map(|parameter| {
+                            json!({
+                                "label": parameter.label,
+                                "documentation": parameter.documentation,
+                            })
+                        }).collect::<Vec<_>>(),
+                    })
+                }).collect::<Vec<_>>(),
+                "active_signature": help.active_signature,
+                "active_parameter": help.active_parameter,
+            })
+        });
+        self.emit_value(
+            "host.lsp.signatureHelp",
+            json!({
+                "request_id": request_id,
+                "help": payload,
+            }),
+        );
+    }
+
+    fn publish_lsp_definition(&mut self, request_id: String, locations: Vec<LspLocation>) {
+        let payload: Vec<Value> = locations
+            .into_iter()
+            .map(|location| {
+                json!({
+                    "path": self.normalize_lsp_edit_path(&location.path),
+                    "start_line": location.start_line,
+                    "start_column": location.start_column,
+                    "end_line": location.end_line,
+                    "end_column": location.end_column,
+                })
+            })
+            .collect();
+        self.emit_value(
+            "host.lsp.definition",
+            json!({
+                "request_id": request_id,
+                "locations": payload,
+            }),
+        );
+    }
+
+    fn publish_lsp_references(&mut self, request_id: String, locations: Vec<LspLocation>) {
+        let payload: Vec<Value> = locations
+            .into_iter()
+            .map(|location| {
+                json!({
+                    "path": self.normalize_lsp_edit_path(&location.path),
+                    "start_line": location.start_line,
+                    "start_column": location.start_column,
+                    "end_line": location.end_line,
+                    "end_column": location.end_column,
+                })
+            })
+            .collect();
+        self.emit_value(
+            "host.lsp.references",
+            json!({
+                "request_id": request_id,
+                "locations": payload,
+            }),
+        );
+    }
+
+    fn publish_lsp_rename(&mut self, request_id: String, mut result: LspRenameResult) {
+        for file in &mut result.files {
+            file.path = self.normalize_lsp_edit_path(&file.path);
+        }
+        let files: Vec<Value> = result
+            .files
+            .into_iter()
+            .map(|file| lsp_file_edits_json(file))
+            .collect();
+        self.emit_value(
+            "host.lsp.rename",
+            json!({
+                "request_id": request_id,
+                "files": files,
+                "error": result.error,
+            }),
+        );
+    }
+
+    fn publish_lsp_code_action(&mut self, request_id: String, actions: Vec<LspCodeAction>) {
+        let payload_actions: Vec<Value> = actions
+            .into_iter()
+            .map(|mut action| {
+                for file in &mut action.files {
+                    file.path = self.normalize_lsp_edit_path(&file.path);
+                }
+                json!({
+                    "title": action.title,
+                    "kind": action.kind,
+                    "is_preferred": action.is_preferred,
+                    "disabled": action.disabled,
+                    "files": action.files.into_iter().map(lsp_file_edits_json).collect::<Vec<_>>(),
+                    "command": action.command.map(|command| json!({
+                        "command": command.command,
+                        "title": command.title,
+                        "arguments": command.arguments,
+                    })),
+                })
+            })
+            .collect();
+        self.emit_value(
+            "host.lsp.codeAction",
+            json!({
+                "request_id": request_id,
+                "actions": payload_actions,
+            }),
+        );
+    }
+
+    fn request_lsp_execute_command(&mut self, request: crate::bridge::LspExecuteCommandRequest) {
+        if !is_allowed_lsp_command(&request.command) {
+            self.publish_lsp_execute_command(
+                request.request_id,
+                LspExecuteCommandResult {
+                    files: Vec::new(),
+                    error: Some(format!(
+                        "command `{}` is not allowlisted (only rust-analyzer.*)",
+                        request.command
+                    )),
+                },
+            );
+            return;
+        }
+        if self.rust_analyzer.is_none()
+            || !self
+                .rust_analyzer
+                .as_ref()
+                .is_some_and(|session| matches!(session.status(), LspStatus::Ready))
+        {
+            self.publish_lsp_execute_command(
+                request.request_id,
+                LspExecuteCommandResult {
+                    files: Vec::new(),
+                    error: Some("rust-analyzer is not ready".to_owned()),
+                },
+            );
+            return;
+        }
+        if let Some(session) = self.rust_analyzer.as_mut() {
+            session.request_execute_command(
+                &request.command,
+                request.arguments,
+                request.request_id,
+            );
+        }
+    }
+
+    fn publish_lsp_execute_command(
+        &mut self,
+        request_id: String,
+        mut result: LspExecuteCommandResult,
+    ) {
+        for file in &mut result.files {
+            file.path = self.normalize_lsp_edit_path(&file.path);
+        }
+        let files: Vec<Value> = result
+            .files
+            .into_iter()
+            .map(lsp_file_edits_json)
+            .collect();
+        self.emit_value(
+            "host.lsp.executeCommand",
+            json!({
+                "request_id": request_id,
+                "files": files,
+                "error": result.error,
+            }),
+        );
+    }
+
+    fn normalize_lsp_edit_path(&self, path: &str) -> String {
+        let absolute = PathBuf::from(path);
+        if let Ok(relative) = absolute.strip_prefix(&self.project_root) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
+        let normalized_root = self.project_root.to_string_lossy().replace('\\', "/");
+        let normalized = path.replace('\\', "/");
+        let root_lower = normalized_root.to_ascii_lowercase();
+        let path_lower = normalized.to_ascii_lowercase();
+        if let Some(stripped) = path_lower.strip_prefix(&root_lower) {
+            let rest = stripped.trim_start_matches('/');
+            if !rest.is_empty() {
+                // Preserve original casing from the absolute path suffix.
+                let start = normalized.len().saturating_sub(rest.len());
+                return normalized[start..].to_owned();
+            }
+        }
+        normalized
+    }
+
     fn poll_rust_analyzer(&mut self) {
         let Some(session) = self.rust_analyzer.as_mut() else {
             return;
         };
         let mut status_updates = Vec::new();
         let mut diagnostic_updates = Vec::new();
+        let mut completion_updates = Vec::new();
+        let mut hover_updates = Vec::new();
+        let mut signature_help_updates = Vec::new();
+        let mut definition_updates = Vec::new();
+        let mut references_updates = Vec::new();
+        let mut rename_updates = Vec::new();
+        let mut code_action_updates = Vec::new();
+        let mut execute_command_updates = Vec::new();
         session.poll(
             |status| status_updates.push(status),
             |path, diagnostics| diagnostic_updates.push((path, diagnostics)),
+            |request_id, items| completion_updates.push((request_id, items)),
+            |request_id, hover| hover_updates.push((request_id, hover)),
+            |request_id, help| signature_help_updates.push((request_id, help)),
+            |request_id, locations| definition_updates.push((request_id, locations)),
+            |request_id, locations| references_updates.push((request_id, locations)),
+            |request_id, rename| rename_updates.push((request_id, rename)),
+            |request_id, actions| code_action_updates.push((request_id, actions)),
+            |request_id, result| execute_command_updates.push((request_id, result)),
         );
         for status in status_updates {
             self.emit_lsp_status(&status);
         }
         for (path, diagnostics) in diagnostic_updates {
             self.publish_lsp_diagnostics(path, diagnostics);
+        }
+        for (request_id, items) in completion_updates {
+            self.publish_lsp_completion(request_id, items);
+        }
+        for (request_id, hover) in hover_updates {
+            self.publish_lsp_hover(request_id, hover);
+        }
+        for (request_id, help) in signature_help_updates {
+            self.publish_lsp_signature_help(request_id, help);
+        }
+        for (request_id, locations) in definition_updates {
+            self.publish_lsp_definition(request_id, locations);
+        }
+        for (request_id, locations) in references_updates {
+            self.publish_lsp_references(request_id, locations);
+        }
+        for (request_id, rename) in rename_updates {
+            self.publish_lsp_rename(request_id, rename);
+        }
+        for (request_id, actions) in code_action_updates {
+            self.publish_lsp_code_action(request_id, actions);
+        }
+        for (request_id, result) in execute_command_updates {
+            self.publish_lsp_execute_command(request_id, result);
         }
     }
 
@@ -4004,6 +4818,105 @@ impl EditorApp {
                             );
                         }
                     }
+                }
+                EditorJob::CookAsset {
+                    path,
+                    index,
+                    total,
+                    cook_hit,
+                    error,
+                } => {
+                    let completed = if total == 0 {
+                        1.0
+                    } else {
+                        index as f64 / total as f64
+                    };
+                    if let Some(message) = error.as_ref() {
+                        self.publish_diagnostic(
+                            "warning",
+                            "project.cook",
+                            &format!("Cook failed for `{path}`: {message}"),
+                        );
+                    }
+                    self.emit_value(
+                        "host.process",
+                        json!({
+                            "kind": "cook",
+                            "status": "progress",
+                            "path": path,
+                            "index": index,
+                            "total": total,
+                            "completed": completed,
+                            "cook_hit": cook_hit,
+                            "error": error,
+                        }),
+                    );
+                }
+                EditorJob::CookFinished {
+                    total,
+                    hits,
+                    misses,
+                    errors,
+                } => {
+                    self.cook_export_inflight = false;
+                    self.emit_value(
+                        "host.process",
+                        json!({
+                            "kind": "cook",
+                            "status": "finished",
+                            "total": total,
+                            "hits": hits,
+                            "misses": misses,
+                            "errors": errors,
+                            "completed": 1.0,
+                        }),
+                    );
+                }
+                EditorJob::YpackExportFinished {
+                    path,
+                    entries,
+                    error,
+                } => {
+                    self.ypack_export_inflight = false;
+                    if let Some(message) = error.as_ref() {
+                        self.publish_diagnostic("warning", "project.export_ypack", message);
+                    }
+                    self.emit_value(
+                        "host.process",
+                        json!({
+                            "kind": "ypack",
+                            "op": "export",
+                            "status": if error.is_some() { "error" } else { "finished" },
+                            "path": path,
+                            "entries": entries,
+                            "error": error,
+                            "completed": 1.0,
+                        }),
+                    );
+                }
+                EditorJob::YpackImportFinished {
+                    path,
+                    entries,
+                    written,
+                    error,
+                } => {
+                    self.ypack_import_inflight = false;
+                    if let Some(message) = error.as_ref() {
+                        self.publish_diagnostic("warning", "project.import_ypack", message);
+                    }
+                    self.emit_value(
+                        "host.process",
+                        json!({
+                            "kind": "ypack",
+                            "op": "import",
+                            "status": if error.is_some() { "error" } else { "finished" },
+                            "path": path,
+                            "entries": entries,
+                            "written": written,
+                            "error": error,
+                            "completed": 1.0,
+                        }),
+                    );
                 }
             }
         }
@@ -5723,7 +6636,7 @@ impl EditorApp {
                 );
                 self.apply_orbit_camera();
             }
-            let (meshes, materials, animations, selected_mesh, selected_material, selected_animation) =
+            let (meshes, materials, animations, selected_mesh, selected_material, selected_animation, cook_hit) =
                 self.gltf_preview
                     .as_ref()
                     .map(|session| {
@@ -5734,6 +6647,7 @@ impl EditorApp {
                             session.selected_mesh(),
                             session.selected_material(),
                             session.selected_animation(),
+                            session.last_cook_hit().unwrap_or(false),
                         )
                     })
                     .unwrap_or_default();
@@ -5747,7 +6661,8 @@ impl EditorApp {
                     "completed": 1.0,
                     "primitive_count": gpu.total_primitives,
                     "gpu_bytes": gpu.total_geometry_bytes,
-                    "cache": "production",
+                    "cache": if cook_hit { "cook_hit" } else { "production" },
+                    "cook_hit": cook_hit,
                     "meshes": meshes,
                     "materials": materials,
                     "animations": animations,
@@ -6160,13 +7075,25 @@ fn normalized_component_coverage(coverage: &Value) -> Value {
                             "string" => "string",
                             _ => "specialized",
                         };
+                        let field_read_only = field["read_only"].as_bool().unwrap_or(false);
+                        let read_only = field_read_only || !visual || kind == "specialized";
+                        let read_only_reason = if !visual {
+                            Some("Coverage is not Visual — Inspector edits require a typed Visual adapter")
+                        } else if kind == "specialized" {
+                            Some("Specialized field — no Inspector control yet")
+                        } else if field_read_only {
+                            Some("Field is marked read-only by the authoring descriptor")
+                        } else {
+                            None
+                        };
                         Some(json!({
                             "path": field["path"],
                             "label": field["title"],
                             "kind": kind,
                             "unit": field["unit"],
                             "options": options.and_then(|value| value.get("values")).cloned().unwrap_or(Value::Null),
-                            "read_only": field["read_only"].as_bool().unwrap_or(false) || !visual,
+                            "read_only": read_only,
+                            "read_only_reason": read_only_reason,
                             "apply_play_changes": field["apply_play_changes"].as_bool().unwrap_or(false),
                             "documentation": field["documentation"]
                         }))
@@ -6650,6 +7577,149 @@ fn roots_equal(a: &Path, b: &Path) -> bool {
 /// Disk cook cache root for editor scene glTF imports (M3).
 fn editor_cook_cache_root(project_root: &Path) -> PathBuf {
     project_root.join(".yuyib_cook")
+}
+
+fn resolve_ypack_output_path(
+    project_root: &Path,
+    project_name: Option<&str>,
+    requested: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(raw) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+        return Ok(project_root.join(path));
+    }
+    let stem = project_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("project");
+    let safe: String = stem
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Ok(project_root.join("build").join(format!("{safe}.ypack")))
+}
+
+fn lsp_file_edits_json(file: LspFileEdits) -> Value {
+    let edits: Vec<Value> = file
+        .edits
+        .into_iter()
+        .map(|edit| {
+            json!({
+                "start_line": edit.start_line,
+                "start_column": edit.start_column,
+                "end_line": edit.end_line,
+                "end_column": edit.end_column,
+                "new_text": edit.new_text,
+            })
+        })
+        .collect();
+    json!({
+        "path": file.path,
+        "edits": edits,
+    })
+}
+
+/// Converts a Monaco marker payload (1-based) into an LSP diagnostic (0-based).
+fn monaco_marker_to_lsp_diagnostic(marker: Value) -> Option<Value> {
+    let start_line = marker
+        .get("startLineNumber")
+        .or_else(|| marker.get("start_line"))
+        .and_then(Value::as_u64)?
+        .saturating_sub(1);
+    let start_column = marker
+        .get("startColumn")
+        .or_else(|| marker.get("start_column"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let end_line = marker
+        .get("endLineNumber")
+        .or_else(|| marker.get("end_line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(start_line + 1)
+        .saturating_sub(1);
+    let end_column = marker
+        .get("endColumn")
+        .or_else(|| marker.get("end_column"))
+        .and_then(Value::as_u64)
+        .unwrap_or(start_column + 1)
+        .saturating_sub(1);
+    let severity = match marker.get("severity").and_then(Value::as_u64).unwrap_or(4) {
+        // Monaco MarkerSeverity → LSP DiagnosticSeverity
+        8 => 1_u64,
+        4 => 2,
+        2 => 3,
+        1 => 4,
+        other => other.clamp(1, 4),
+    };
+    Some(json!({
+        "range": {
+            "start": { "line": start_line, "character": start_column },
+            "end": { "line": end_line, "character": end_column }
+        },
+        "severity": severity,
+        "message": marker.get("message").and_then(Value::as_str).unwrap_or("diagnostic"),
+        "source": marker.get("source").and_then(Value::as_str).unwrap_or("rust-analyzer"),
+    }))
+}
+
+/// Collects glTF/GLB sources from the asset index for `project.cook`.
+///
+/// Returns `(project-relative display path, absolute filesystem path)` pairs,
+/// deduplicated by absolute path.
+fn collect_gltf_cook_targets(
+    index: Option<&ProjectAssetIndex>,
+    project_root: &Path,
+    asset_root: &str,
+) -> Vec<(String, PathBuf)> {
+    let Some(index) = index else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for item in &index.items {
+        if item.kind != AssetKind::GltfSource {
+            continue;
+        }
+        let absolute = resolve_asset_index_absolute(project_root, asset_root, &item.path);
+        if !absolute.is_file() {
+            continue;
+        }
+        let key = absolute.to_string_lossy().to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        let display = if asset_root.is_empty() {
+            item.path.replace('\\', "/")
+        } else {
+            format!(
+                "{}/{}",
+                asset_root.trim_matches(|c| c == '/' || c == '\\').replace('\\', "/"),
+                item.path.replace('\\', "/")
+            )
+        };
+        out.push((display, absolute));
+    }
+    out.sort_by(|left, right| left.0.cmp(&right.0));
+    out
+}
+
+fn resolve_asset_index_absolute(project_root: &Path, asset_root: &str, item_path: &str) -> PathBuf {
+    let cleaned = item_path.replace('/', std::path::MAIN_SEPARATOR_STR);
+    if asset_root.is_empty() {
+        project_root.join(cleaned)
+    } else {
+        project_root.join(asset_root).join(cleaned)
+    }
 }
 
 fn import_gltf_with_cook_cache(
@@ -7351,5 +8421,113 @@ mod tests {
             validate_component_field_edit("yuyib.parent3d", "parent", &json!(null), Some(&known))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn collect_gltf_cook_targets_skips_missing_and_dedups() {
+        use std::fs;
+
+        use yuyib_editor_core::{
+            AssetIndexItem, AssetKind, AssetOpenIntent, AssetTracking, ProjectAssetIndex,
+        };
+
+        use super::{collect_gltf_cook_targets, import_gltf_with_cook_cache};
+
+        let root = std::env::temp_dir().join(format!(
+            "yuyib_cook_export_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("assets/models")).expect("dirs");
+        let glb = valid_triangle_glb();
+        fs::write(root.join("assets/models/hero.glb"), &glb).expect("glb");
+        fs::write(root.join("assets/models/ghost.glb"), &glb).expect("ghost");
+        // ghost path is listed but we delete after index construction intent:
+        // missing file is skipped by collector when not on disk — write then remove.
+        fs::remove_file(root.join("assets/models/ghost.glb")).expect("remove ghost");
+
+        let index = ProjectAssetIndex {
+            revision: 1,
+            root: "assets".to_owned(),
+            items: vec![
+                AssetIndexItem {
+                    id: None,
+                    path: "models/hero.glb".to_owned(),
+                    name: "hero".to_owned(),
+                    kind: AssetKind::GltfSource,
+                    tracking: AssetTracking::UntrackedSource,
+                    open: Some(AssetOpenIntent::GltfPreview),
+                    preview: None,
+                    reimport: None,
+                    metadata: None,
+                },
+                AssetIndexItem {
+                    id: None,
+                    path: "models/hero.glb".to_owned(),
+                    name: "hero-dup".to_owned(),
+                    kind: AssetKind::GltfSource,
+                    tracking: AssetTracking::UntrackedSource,
+                    open: Some(AssetOpenIntent::GltfPreview),
+                    preview: None,
+                    reimport: None,
+                    metadata: None,
+                },
+                AssetIndexItem {
+                    id: None,
+                    path: "models/ghost.glb".to_owned(),
+                    name: "ghost".to_owned(),
+                    kind: AssetKind::GltfSource,
+                    tracking: AssetTracking::UntrackedSource,
+                    open: Some(AssetOpenIntent::GltfPreview),
+                    preview: None,
+                    reimport: None,
+                    metadata: None,
+                },
+            ],
+            diagnostics: Vec::new(),
+        };
+
+        let targets = collect_gltf_cook_targets(Some(&index), &root, "assets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0, "assets/models/hero.glb");
+
+        let cook_root = root.join(".yuyib_cook");
+        let (_, first_hit) =
+            import_gltf_with_cook_cache(&targets[0].1, &cook_root).expect("first cook");
+        assert!(!first_hit);
+        let (_, second_hit) =
+            import_gltf_with_cook_cache(&targets[0].1, &cook_root).expect("second cook");
+        assert!(second_hit);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn valid_triangle_glb() -> Vec<u8> {
+        let mut binary = Vec::new();
+        binary.extend([0_u16, 1, 2].into_iter().flat_map(u16::to_le_bytes));
+        binary.extend([0_u8; 2]);
+        for position in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            binary.extend(position.into_iter().flat_map(f32::to_le_bytes));
+        }
+        let json = br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":44}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":6},{"buffer":0,"byteOffset":8,"byteLength":36}],"accessors":[{"bufferView":0,"componentType":5123,"count":3,"type":"SCALAR"},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],"meshes":[{"primitives":[{"attributes":{"POSITION":1},"indices":0}]}]}"#;
+        let mut json = json.to_vec();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let total = 12 + 8 + json.len() + 8 + binary.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend(b"glTF");
+        glb.extend(2_u32.to_le_bytes());
+        glb.extend(u32::try_from(total).expect("glb size").to_le_bytes());
+        glb.extend(u32::try_from(json.len()).expect("json size").to_le_bytes());
+        glb.extend(*b"JSON");
+        glb.extend(json);
+        glb.extend(u32::try_from(binary.len()).expect("bin size").to_le_bytes());
+        glb.extend([b'B', b'I', b'N', 0]);
+        glb.extend(binary);
+        glb
     }
 }

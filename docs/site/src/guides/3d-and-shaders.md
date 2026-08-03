@@ -1,35 +1,45 @@
 # 3D: scenes, materials и shaders
 
-**Статус:** Experimental unlit/textured/Lambert/textured-PBR + render graph + shader configuration  
-**Платформы:** Windows
+> **Статус:** Experimental  
+> **Назначение:** карта выбора «какой material/shader path взять»
 
-`yuyib-render-3d` рисует solid unlit, base-colour textured unlit и colour
-Lambert indexed meshes через `RenderFrame`; `PbrMeshRenderer3d` добавляет
-factor-only Cook-Torrance preset, `TexturedPbrMeshRenderer3d` — glTF
-base/normal/metallic-roughness/emissive path, а `StandardRenderer3d` выбирает
-поддерживаемый path по model material. `yuyib-game-3d` extracts deterministic
-ECS scene/LOD/light snapshots. CPU-side mesh/material data и static glTF/GLB
-import доступны через [`yuyib::model`](model-assets.md) и
-[`yuyib::gltf`](gltf-import.md). Полный current path описан в
-[GPU mesh guide](3d-renderer.md).
+Yuyib не прячет один «магический Material». Есть несколько **явных** уровней.
+Выбирайте самый высокий, который закрывает задачу.
 
-`yuyib-shader` уже даёт `ShaderPrototype::VertexColor` для prototypes и
-`ShaderSource`/`ShaderProgram` для explicit WGSL configurations. Он намеренно
-не делает CPU-side fake compilation или reflection; backend отвечает за
-валидный pipeline и diagnostics. Custom material templates остаются planned.
-`RenderGraph` уже регистрирует declared phases/resources/dependencies и CPU
-timings. `Renderer::with_raw_gpu` даёт borrow-only доступ к
-`wgpu::Device`, `wgpu::Queue` и surface configuration, но не регистрирует
-pass в render graph.
+## Карта решений
 
-## Limits & Caveats
+| Задача | Берите | Guide |
+|---|---|---|
+| Playable glTF карта + PBR/IBL/shadows | `Game3dScene` + `GltfSceneLoad` | [Game3dScene](game-3d-scene.md), [tutorial glTF](../tutorials/load-gltf-scene.md) |
+| Standard glTF materials / shading enum | `Game3dShading`, `StandardMaterial3d` | [standard-material](standard-material-and-scenes.md) |
+| Простой lit mesh без полного PBR | Lambert path | [lit-materials](lit-materials.md) |
+| Только albedo texture | `TexturedMaterial3d` | [textured-materials](textured-materials.md) |
+| Procedural / custom mesh | `Model` / `MeshPrimitive` + upload | [model-assets](model-assets.md), [3d-renderer](3d-renderer.md) |
+| Post: exposure, bloom, FXAA, grade | `ColorPostProcess` | [hdr-post-processing](hdr-post-processing.md) |
+| Свой pass / WGSL | `RenderGraph`, `ShaderProgram` | [custom-render-passes](custom-render-passes.md) |
 
-Opaque material variants, depth testing, direct-light PBR, arbitrary core glTF
-texture subsets, tangent-space normal mapping и alpha mask реализованы. Mask
-discard пишет surviving depth; textured PBR `BLEND` имеет отдельную sorted
-non-depth-writing phase. IBL, shadows, factor-only blend и instancing ещё не
-реализованы. Lambert textured path имеет batching, остальные routes пока
-открывают больше passes. Fixed renderers не потребляют custom `ShaderProgram`: для
-произвольного WGSL разработчик пока строит собственный WGPU pipeline через
-low-level scoped API. `with_raw_gpu` не передаёт texture view current
-presentation frame; draw calls записываются только через `RenderFrame`.
+## Почему нет одного «EffectMaterial» preset API
+
+RFC 0003 описывает Tier 1 effect presets как цель. Сейчас usable path — 
+composition через `Game3dScene` / post-process config, а не скрытый node
+shader editor. ROADMAP помечает «Shader API not as planned» для high-level
+effect templates: не ждите Unreal-like material graph в foundation.
+
+## Materials vs import diagnostics
+
+glTF часто приходит с unbound / factor-only / missing UV materials.
+Исправление — **`ModelMaterialPolicy`** на load, не тихий renderer hack.
+Diagnostics остаются на `LoadedGltfScene::diagnostics()`.
+
+## Shaders
+
+Low-level: `ShaderSource` / `ShaderProgram` / `ShaderPrototype` в
+`yuyib::shader`. High-level scenes уже содержат нужные WGSL pipelines; custom
+pass добавляется в render graph **после** понимания phase order
+(opaque → transparent → post → UI).
+
+## См. также
+
+- [Architecture](../concepts/architecture.md)
+- [Limits](../reference/limits-and-compatibility.md)
+- [Custom render passes](custom-render-passes.md)

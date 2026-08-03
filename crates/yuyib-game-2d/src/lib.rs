@@ -35,6 +35,7 @@
 
 mod animator;
 mod composer;
+mod nav;
 mod scene;
 
 pub use animator::{
@@ -44,6 +45,7 @@ pub use animator::{
     step_sprite_animators_2d,
 };
 pub use composer::{TileMapComposer2d, TileMapComposerError2d, TileStamp2d};
+pub use nav::{TileNavError2d, TileNavGrid2d};
 pub use scene::{
     DrawBudget2d, Game2dScene, Game2dSceneConfig, Game2dSceneConfigError, Game2dSceneError,
     Game2dSceneStats, TextureCacheConfig2d, TextureQueueError2d,
@@ -622,23 +624,109 @@ impl TileViewport2d {
     }
 }
 
-/// One atlas-backed tile map. Tile coordinates increase right/down.
+/// Tiled-compatible tile flip flags (GID high bits H / V / D).
 ///
-/// Each `Some(index)` selects an atlas region; `None` is empty. All regions
-/// must use the same texture, but this component does not decode or upload it.
+/// Applied at extract time: diagonal becomes a 90° clockwise rotation plus
+/// remapped axis flips; horizontal/vertical become negative [`SpriteDraw`] size.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TileFlip2d {
+    /// Flip across the vertical axis (Tiled `FLIPPED_HORIZONTALLY`).
+    pub horizontal: bool,
+    /// Flip across the horizontal axis (Tiled `FLIPPED_VERTICALLY`).
+    pub vertical: bool,
+    /// Flip across the main diagonal (Tiled `FLIPPED_DIAGONALLY`).
+    pub diagonal: bool,
+}
+
+impl TileFlip2d {
+    /// No flips.
+    pub const NONE: Self = Self {
+        horizontal: false,
+        vertical: false,
+        diagonal: false,
+    };
+
+    /// Decodes the three high bits of a Tiled global tile id.
+    #[must_use]
+    pub const fn from_tiled_gid_flags(raw_gid: u32) -> Self {
+        const FLIPPED_HORIZONTALLY: u32 = 0x8000_0000;
+        const FLIPPED_VERTICALLY: u32 = 0x4000_0000;
+        const FLIPPED_DIAGONALLY: u32 = 0x2000_0000;
+        Self {
+            horizontal: raw_gid & FLIPPED_HORIZONTALLY != 0,
+            vertical: raw_gid & FLIPPED_VERTICALLY != 0,
+            diagonal: raw_gid & FLIPPED_DIAGONALLY != 0,
+        }
+    }
+
+    /// Returns whether any flip bit is set.
+    #[must_use]
+    pub const fn is_any(self) -> bool {
+        self.horizontal || self.vertical || self.diagonal
+    }
+
+    /// Converts flags into [`SpriteDraw`] size (signs = mirror) + clockwise rotation.
+    ///
+    /// Diagonal uses the common Tiled → sprite mapping: rotate 90° clockwise,
+    /// then remap H/V (`flip_x' = flip_y`, `flip_y' = !flip_x`).
+    #[must_use]
+    pub fn to_draw_size_rotation(self, tile_size: [f32; 2]) -> ([f32; 2], f32) {
+        let mut flip_x = self.horizontal;
+        let mut flip_y = self.vertical;
+        let mut rotation = 0.0_f32;
+        if self.diagonal {
+            rotation = std::f32::consts::FRAC_PI_2;
+            let old_x = flip_x;
+            flip_x = flip_y;
+            flip_y = !old_x;
+        }
+        (
+            [
+                if flip_x {
+                    -tile_size[0]
+                } else {
+                    tile_size[0]
+                },
+                if flip_y {
+                    -tile_size[1]
+                } else {
+                    tile_size[1]
+                },
+            ],
+            rotation,
+        )
+    }
+}
+
+/// One-atlas **or** multi-atlas tile map. Tile coordinates increase right/down.
+///
+/// Each `Some(index)` selects a region in [`Self::regions`]; regions may use
+/// different texture handles (Tiled multi-tileset). `None` is empty. Optional
+/// [`TileFlip2d`] flags are applied at extract time.
+///
+/// [`Self::parallax_factor`] scales camera motion for visual depth. Collision
+/// maps are separate and never use this factor.
 #[derive(Component, Clone, Debug, PartialEq)]
 pub struct TileMap2d {
     grid: [u32; 2],
     tile_size: [f32; 2],
     regions: Vec<TextureRegion>,
     tiles: Vec<Option<u32>>,
-    /// Top-left world position of tile `(0, 0)`.
+    flips: Vec<TileFlip2d>,
+    /// Top-left world position of tile `(0, 0)` (authored, pre-parallax).
     pub position: [f32; 2],
+    /// Camera-relative scroll factors per axis (Tiled `parallaxx` / `parallaxy`).
+    ///
+    /// `1.0` moves with the world; `0.0` is screen-locked; `0.5` is half speed.
+    pub parallax_factor: [f32; 2],
     /// Painter layer inherited by every tile.
     pub layer: i32,
     /// Whether extraction includes this map.
     pub visible: bool,
+    /// Shared whole-map animation (legacy); ignored when `region_animations` is set.
     animation: Option<AnimatedSprite2d>,
+    /// Per-authored-region looping animations (Tiled tile animations).
+    region_animations: Vec<TileRegionAnimation2d>,
 }
 impl TileMap2d {
     /// Creates a validated one-atlas tile map in row-major order.
@@ -669,10 +757,7 @@ impl TileMap2d {
                 actual: tiles.len(),
             });
         }
-        let texture = regions.first().ok_or(TileMapError::NoRegions)?.texture();
-        if regions.iter().any(|region| region.texture() != texture) {
-            return Err(TileMapError::MultipleTextures);
-        }
+        let _ = regions.first().ok_or(TileMapError::NoRegions)?;
         if tiles
             .iter()
             .flatten()
@@ -684,12 +769,37 @@ impl TileMap2d {
             grid,
             tile_size,
             regions,
+            flips: vec![TileFlip2d::NONE; tiles.len()],
             tiles,
             position: [0.0; 2],
+            parallax_factor: [1.0, 1.0],
             layer: 0,
             visible: true,
             animation: None,
+            region_animations: Vec::new(),
         })
+    }
+
+    /// Replaces per-cell flip flags (same length as the tile grid).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TileMapError::FlipCount`] when `flips.len()` ≠ tile count.
+    pub fn with_flips(mut self, flips: Vec<TileFlip2d>) -> Result<Self, TileMapError> {
+        if flips.len() != self.tiles.len() {
+            return Err(TileMapError::FlipCount {
+                expected: self.tiles.len(),
+                actual: flips.len(),
+            });
+        }
+        self.flips = flips;
+        Ok(self)
+    }
+
+    /// Per-cell flip flags in row-major order.
+    #[must_use]
+    pub fn flips(&self) -> &[TileFlip2d] {
+        &self.flips
     }
     /// Sets top-left world position.
     #[must_use]
@@ -697,6 +807,28 @@ impl TileMap2d {
         self.position = position;
         self
     }
+
+    /// Sets camera-relative parallax factors (typically in `[0, 1]`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TileMapError::InvalidParallax`] when a factor is non-finite.
+    pub fn with_parallax_factor(mut self, parallax_factor: [f32; 2]) -> Result<Self, TileMapError> {
+        if !parallax_factor.iter().all(|value| value.is_finite()) {
+            return Err(TileMapError::InvalidParallax);
+        }
+        self.parallax_factor = parallax_factor;
+        Ok(self)
+    }
+
+    /// Authored position shifted for the current camera origin (Tiled-compatible).
+    ///
+    /// `draw = position + camera_origin * (1 - parallax_factor)`.
+    #[must_use]
+    pub fn draw_origin_for_camera(&self, camera_origin: [f32; 2]) -> [f32; 2] {
+        parallax_draw_origin(self.position, camera_origin, self.parallax_factor)
+    }
+
     /// Sets painter layer.
     #[must_use]
     pub const fn with_layer(mut self, layer: i32) -> Self {
@@ -721,6 +853,8 @@ impl TileMap2d {
     }
     /// Attaches one shared timeline for every non-empty tile in this map.
     ///
+    /// Prefer [`Self::with_region_animations`] for Tiled per-tile animations.
+    ///
     /// # Errors
     ///
     /// Returns [`TileMapError::AnimationTextureMismatch`] for a frame outside the atlas texture.
@@ -736,28 +870,169 @@ impl TileMap2d {
         self.animation = Some(AnimatedSprite2d::new(animation));
         Ok(self)
     }
+
+    /// Attaches per-region looping tile animations (Tiled `animation` frames).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TileMapError::InvalidTileIndex`] when a frame/base region is out of range,
+    /// or [`TileMapError::EmptyTileAnimation`] for an empty frame list.
+    pub fn with_region_animations(
+        mut self,
+        animations: Vec<TileRegionAnimation2d>,
+    ) -> Result<Self, TileMapError> {
+        for animation in &animations {
+            if animation.frames.is_empty() {
+                return Err(TileMapError::EmptyTileAnimation);
+            }
+            if usize::try_from(animation.base_region).map_or(true, |i| i >= self.regions.len()) {
+                return Err(TileMapError::InvalidTileIndex);
+            }
+            for frame in &animation.frames {
+                if usize::try_from(frame.region_index).map_or(true, |i| i >= self.regions.len()) {
+                    return Err(TileMapError::InvalidTileIndex);
+                }
+            }
+        }
+        self.region_animations = animations;
+        Ok(self)
+    }
+
+    /// Region-keyed tile animations.
+    #[must_use]
+    pub fn region_animations(&self) -> &[TileRegionAnimation2d] {
+        &self.region_animations
+    }
+
+    fn resolved_region_index(&self, authored_index: usize) -> usize {
+        let Ok(key) = u32::try_from(authored_index) else {
+            return authored_index;
+        };
+        self.region_animations
+            .iter()
+            .find(|animation| animation.base_region == key)
+            .map_or(authored_index, TileRegionAnimation2d::current_region_index)
+    }
+
     #[allow(clippy::cast_precision_loss)] // Tile-grid dimensions are practical renderer coordinates below f32 precision limits.
-    fn draw_at(&self, column: u32, row: u32) -> Option<SpriteDraw> {
+    fn draw_at(&self, column: u32, row: u32, draw_origin: [f32; 2]) -> Option<SpriteDraw> {
         let offset =
             usize::try_from(u64::from(row) * u64::from(self.grid[0]) + u64::from(column)).ok()?;
         let index = usize::try_from(self.tiles.get(offset).copied().flatten()?).ok()?;
-        Some(SpriteDraw {
-            region: self
-                .animation
+        let flip = self.flips.get(offset).copied().unwrap_or(TileFlip2d::NONE);
+        let (size, rotation_radians) = flip.to_draw_size_rotation(self.tile_size);
+        let region = if !self.region_animations.is_empty() {
+            let resolved = self.resolved_region_index(index);
+            self.regions[resolved]
+        } else {
+            self.animation
                 .as_ref()
                 .map_or(self.regions[index], |animation| {
                     animation.state.frame(&animation.animation).region()
-                }),
+                })
+        };
+        Some(SpriteDraw {
+            region,
             position: [
-                self.position[0] + (column as f32 + 0.5) * self.tile_size[0],
-                self.position[1] + (row as f32 + 0.5) * self.tile_size[1],
+                draw_origin[0] + (column as f32 + 0.5) * self.tile_size[0],
+                draw_origin[1] + (row as f32 + 0.5) * self.tile_size[1],
             ],
-            size: self.tile_size,
-            rotation_radians: 0.0,
+            size,
+            rotation_radians,
             tint: [1.0; 4],
             layer: self.layer,
         })
     }
+}
+
+/// One frame of a Tiled-style tile animation (region index + dwell time).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TileAnimFrame2d {
+    /// Index into [`TileMap2d::regions`].
+    pub region_index: u32,
+    /// How long this frame is shown.
+    pub duration: Duration,
+}
+
+/// Looping animation keyed by the authored cell region index.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileRegionAnimation2d {
+    /// Region index stored in the tile grid (usually the first frame).
+    pub base_region: u32,
+    frames: Vec<TileAnimFrame2d>,
+    elapsed: Duration,
+}
+
+impl TileRegionAnimation2d {
+    /// Creates a looping animation. Durations must be non-zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TileMapError::EmptyTileAnimation`] or
+    /// [`TileMapError::ZeroTileAnimDuration`].
+    pub fn new(
+        base_region: u32,
+        frames: Vec<TileAnimFrame2d>,
+    ) -> Result<Self, TileMapError> {
+        if frames.is_empty() {
+            return Err(TileMapError::EmptyTileAnimation);
+        }
+        if frames.iter().any(|frame| frame.duration.is_zero()) {
+            return Err(TileMapError::ZeroTileAnimDuration);
+        }
+        Ok(Self {
+            base_region,
+            frames,
+            elapsed: Duration::ZERO,
+        })
+    }
+
+    /// Authored frames.
+    #[must_use]
+    pub fn frames(&self) -> &[TileAnimFrame2d] {
+        &self.frames
+    }
+
+    /// Advances the cycle by `delta` (wraps).
+    pub fn advance(&mut self, delta: Duration) {
+        let total = self
+            .frames
+            .iter()
+            .fold(Duration::ZERO, |acc, frame| acc.saturating_add(frame.duration));
+        if total.is_zero() {
+            return;
+        }
+        self.elapsed = self.elapsed.saturating_add(delta);
+        while self.elapsed >= total {
+            self.elapsed -= total;
+        }
+    }
+
+    /// Region index for the current elapsed time.
+    #[must_use]
+    pub fn current_region_index(&self) -> usize {
+        let mut cursor = self.elapsed;
+        for frame in &self.frames {
+            if cursor < frame.duration {
+                return usize::try_from(frame.region_index).unwrap_or(0);
+            }
+            cursor = cursor.saturating_sub(frame.duration);
+        }
+        usize::try_from(self.frames[0].region_index).unwrap_or(0)
+    }
+}
+
+/// Applies Tiled-compatible parallax: `authored + camera * (1 - factor)`.
+#[must_use]
+pub fn parallax_draw_origin(
+    authored_position: [f32; 2],
+    camera_origin: [f32; 2],
+    parallax_factor: [f32; 2],
+) -> [f32; 2] {
+    [
+        authored_position[0] + camera_origin[0] * (1.0 - parallax_factor[0]),
+        authored_position[1] + camera_origin[1] * (1.0 - parallax_factor[1]),
+    ]
 }
 
 /// Tile-map authoring or viewport validation failure.
@@ -779,13 +1054,29 @@ pub enum TileMapError {
     /// No atlas regions supplied.
     NoRegions,
     /// Atlas regions use different texture handles.
+    ///
+    /// Retained for composer / callers that still enforce a single atlas.
+    /// [`TileMap2d::new`] itself allows multi-texture regions.
     MultipleTextures,
     /// A tile referred outside atlas regions.
     InvalidTileIndex,
+    /// Flip flag count differs from grid area.
+    FlipCount {
+        /// Expected cells.
+        expected: usize,
+        /// Supplied flips.
+        actual: usize,
+    },
     /// Viewport origin/size was invalid.
     InvalidViewport,
+    /// Parallax factor was non-finite.
+    InvalidParallax,
     /// Animated frame belongs to another texture than the map atlas.
     AnimationTextureMismatch,
+    /// Tile region animation has no frames.
+    EmptyTileAnimation,
+    /// A tile animation frame duration was zero.
+    ZeroTileAnimDuration,
 }
 impl std::fmt::Display for TileMapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -902,23 +1193,24 @@ impl std::error::Error for TileChunkExtractError {}
     clippy::cast_sign_loss
 )] // Viewport values are clamped to non-negative map dimensions before integer indexing.
 fn visible_tile_range(map: &TileMap2d, viewport: TileViewport2d) -> Option<([u32; 2], [u32; 2])> {
+    let draw_origin = map.draw_origin_for_camera(viewport.origin);
     let viewport_end = [
         viewport.origin[0] + viewport.size[0],
         viewport.origin[1] + viewport.size[1],
     ];
     let first = [
-        ((viewport.origin[0] - map.position[0]) / map.tile_size[0])
+        ((viewport.origin[0] - draw_origin[0]) / map.tile_size[0])
             .floor()
             .max(0.0) as u32,
-        ((viewport.origin[1] - map.position[1]) / map.tile_size[1])
+        ((viewport.origin[1] - draw_origin[1]) / map.tile_size[1])
             .floor()
             .max(0.0) as u32,
     ];
     let end_exclusive = [
-        ((viewport_end[0] - map.position[0]) / map.tile_size[0])
+        ((viewport_end[0] - draw_origin[0]) / map.tile_size[0])
             .ceil()
             .clamp(0.0, map.grid[0] as f32) as u32,
-        ((viewport_end[1] - map.position[1]) / map.tile_size[1])
+        ((viewport_end[1] - draw_origin[1]) / map.tile_size[1])
             .ceil()
             .clamp(0.0, map.grid[1] as f32) as u32,
     ];
@@ -950,6 +1242,7 @@ pub fn extract_tiles_chunked_2d(
         if !map.visible {
             continue;
         }
+        let draw_origin = map.draw_origin_for_camera(viewport.origin);
         let Some((first, last)) = visible_tile_range(map, viewport) else {
             continue;
         };
@@ -963,7 +1256,7 @@ pub fn extract_tiles_chunked_2d(
                 let column_end = last[0].min((chunk_column + 1).saturating_mul(config.size[0]) - 1);
                 for row in row_start..=row_end {
                     for column in column_start..=column_end {
-                        let Some(draw) = map.draw_at(column, row) else {
+                        let Some(draw) = map.draw_at(column, row, draw_origin) else {
                             continue;
                         };
                         if ordered.len() == config.max_draws {
@@ -996,10 +1289,11 @@ pub fn extract_tiles_2d(world: &mut World, viewport: TileViewport2d) -> Extracte
         if !map.visible {
             continue;
         }
+        let draw_origin = map.draw_origin_for_camera(viewport.origin);
         for row in 0..map.grid[1] {
             for column in 0..map.grid[0] {
-                let left = map.position[0] + column as f32 * map.tile_size[0];
-                let top = map.position[1] + row as f32 * map.tile_size[1];
+                let left = draw_origin[0] + column as f32 * map.tile_size[0];
+                let top = draw_origin[1] + row as f32 * map.tile_size[1];
                 if left + map.tile_size[0] <= viewport.origin[0]
                     || left >= viewport.origin[0] + viewport.size[0]
                     || top + map.tile_size[1] <= viewport.origin[1]
@@ -1007,7 +1301,7 @@ pub fn extract_tiles_2d(world: &mut World, viewport: TileViewport2d) -> Extracte
                 {
                     continue;
                 }
-                if let Some(draw) = map.draw_at(column, row) {
+                if let Some(draw) = map.draw_at(column, row, draw_origin) {
                     ordered.push((draw.layer, entity.to_bits(), row, column, draw));
                 }
             }
@@ -1021,8 +1315,9 @@ pub fn extract_tiles_2d(world: &mut World, viewport: TileViewport2d) -> Extracte
 
 /// Advances shared animated tile-map timelines by caller-supplied delta.
 ///
-/// State is one timeline per map, not one allocation per visible tile. Call it
-/// before [`extract_tiles_2d`]; viewport culling then determines emitted draws.
+/// Steps both legacy whole-map [`AnimatedSprite2d`] timelines and Tiled
+/// [`TileRegionAnimation2d`] entries. Call before extract so culling sees
+/// current regions.
 pub fn step_tile_map_animations_2d(world: &mut World, delta: Duration) {
     let mut query = world.query::<&mut TileMap2d>();
     for mut map in query.iter_mut(world) {
@@ -1031,6 +1326,9 @@ pub fn step_tile_map_animations_2d(world: &mut World, delta: Duration) {
             if animation.playing {
                 let _ = animation.state.advance(&source, delta);
             }
+        }
+        for animation in &mut map.region_animations {
+            animation.advance(delta);
         }
     }
 }
@@ -1980,6 +2278,112 @@ mod tests {
                 Err(VisibleSpriteExtractError::InvalidSpriteGeometry { entity })
             );
         }
+    }
+
+    #[test]
+    fn tile_flip_maps_to_draw_size_and_rotation() {
+        let none = TileFlip2d::NONE.to_draw_size_rotation([10.0, 20.0]);
+        assert_eq!(none, ([10.0, 20.0], 0.0));
+
+        let horizontal = TileFlip2d {
+            horizontal: true,
+            ..TileFlip2d::NONE
+        }
+        .to_draw_size_rotation([10.0, 20.0]);
+        assert_eq!(horizontal, ([-10.0, 20.0], 0.0));
+
+        let vertical = TileFlip2d {
+            vertical: true,
+            ..TileFlip2d::NONE
+        }
+        .to_draw_size_rotation([10.0, 20.0]);
+        assert_eq!(vertical, ([10.0, -20.0], 0.0));
+
+        let diagonal = TileFlip2d {
+            diagonal: true,
+            ..TileFlip2d::NONE
+        }
+        .to_draw_size_rotation([10.0, 20.0]);
+        assert_eq!(diagonal.0, [10.0, -20.0]);
+        assert!((diagonal.1 - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parallax_factor_shifts_draw_without_mutating_authored_position() {
+        let mut textures = Assets::new();
+        let atlas = region(&mut textures);
+        let map = TileMap2d::new([1, 1], [10.0, 10.0], vec![atlas], vec![Some(0)])
+            .expect("map")
+            .with_position([0.0, 0.0])
+            .with_parallax_factor([0.5, 1.0])
+            .expect("parallax");
+        assert_eq!(map.position, [0.0, 0.0]);
+        assert_eq!(
+            map.draw_origin_for_camera([40.0, 20.0]),
+            [20.0, 0.0],
+            "x: 0 + 40*(1-0.5)=20; y: factor 1 keeps authored"
+        );
+        let mut world = World::new();
+        world.spawn(map);
+        // Viewport origin drives parallax; place it so the shifted tile stays visible.
+        let extracted = extract_tiles_2d(
+            &mut world,
+            TileViewport2d::new([15.0, 0.0], [30.0, 20.0]).expect("viewport"),
+        );
+        assert_eq!(extracted.len(), 1);
+        // draw_origin.x = 15*(1-0.5)=7.5 → tile centre x = 12.5
+        assert!((extracted.draws()[0].position[0] - 12.5).abs() < 1e-4);
+        assert!((extracted.draws()[0].position[1] - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn region_tile_animation_advances_draw_region() {
+        let mut textures = Assets::new();
+        let size = TextureSize::new(16, 8).expect("size");
+        let handle = textures.insert(Texture::new(size));
+        let r0 = TextureRegion::new(handle, size, PixelPoint { x: 0, y: 0 }, TextureSize::new(8, 8).unwrap())
+            .unwrap();
+        let r1 = TextureRegion::new(handle, size, PixelPoint { x: 8, y: 0 }, TextureSize::new(8, 8).unwrap())
+            .unwrap();
+        let anim = TileRegionAnimation2d::new(
+            0,
+            vec![
+                TileAnimFrame2d {
+                    region_index: 0,
+                    duration: Duration::from_millis(100),
+                },
+                TileAnimFrame2d {
+                    region_index: 1,
+                    duration: Duration::from_millis(100),
+                },
+            ],
+        )
+        .expect("anim");
+        let map = TileMap2d::new([1, 1], [8.0, 8.0], vec![r0, r1], vec![Some(0)])
+            .expect("map")
+            .with_region_animations(vec![anim])
+            .expect("attach");
+        let mut world = World::new();
+        world.spawn(map);
+        let before = extract_tiles_2d(
+            &mut world,
+            TileViewport2d::new([0.0, 0.0], [16.0, 16.0]).expect("vp"),
+        );
+        assert_eq!(before.draws()[0].region.origin().x, 0);
+        step_tile_map_animations_2d(&mut world, Duration::from_millis(100));
+        let after = extract_tiles_2d(
+            &mut world,
+            TileViewport2d::new([0.0, 0.0], [16.0, 16.0]).expect("vp"),
+        );
+        assert_eq!(after.draws()[0].region.origin().x, 8);
+    }
+
+    #[test]
+    fn parallax_factor_one_matches_legacy_draw() {
+        assert_eq!(
+            parallax_draw_origin([8.0, 16.0], [100.0, 50.0], [1.0, 1.0]),
+            [8.0, 16.0]
+        );
     }
 
     #[test]

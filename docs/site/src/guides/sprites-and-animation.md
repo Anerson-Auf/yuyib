@@ -1,52 +1,85 @@
 # 2D: sprites и animation
 
 > **Статус:** Experimental  
-> **Crate / module:** `yuyib::two_d`, `yuyib::image`, `yuyib::render_2d`  
-> **Платформы:** Windows для GPU path
+> **Модули:** `yuyib::two_d`, `yuyib::game_2d`, `yuyib::animation`
 
-2D stack разделён на три слоя: `two_d` описывает metadata/frames, `image`
-декодирует approved image formats с budgets, а `render_2d` загружает RGBA8 data
-в GPU и рисует instanced sprites. Разделение позволяет подготовить animation
-до того, как texture станет GPU-resident.
+## Цель страницы
 
-## Sprite sheet
+Собрать **выбор API** для 2D картинки: от одного quad до state machine.
+Пошаговый beginner path — [tutorial](../tutorials/first-2d-playable.md).
 
-```rust
-use std::time::Duration;
-use yuyib::{assets::Assets, two_d::{PlaybackMode, SpriteSheet, Texture, TextureSize}};
+## Уровни API (снизу вверх)
 
-let size = TextureSize::new(128, 64)?;
-let cell = TextureSize::new(32, 32)?;
-let mut textures = Assets::new();
-let texture = textures.insert(Texture::new(size));
-let sheet = SpriteSheet::from_grid(texture, size, cell)?;
-let animation = sheet.animation(Duration::from_millis(100), PlaybackMode::Loop)?;
-let mut state = animation.state();
-state.advance(&animation, Duration::from_millis(100));
-# Ok::<(), Box<dyn std::error::Error>>(())
+| Уровень | Тип | Когда |
+|---|---|---|
+| Metadata | `Texture`, `TextureRegion`, `SpriteSheet` | Offline atlas / import result |
+| ECS draw | `Sprite2d` | Любой видимый quad в world |
+| Simple anim | `AnimatedSprite2d` + `step_sprite_animations_2d` | Одна timeline / clip |
+| HL animator | `SpriteAnimator2d` + `AnimationSet` / state machine | `play("walk")`, facing, once→idle |
+| Scene facade | `Game2dScene` | Upload + cull + batch + stats |
+| Playable | `PlayableLoop2d` / `PlatformerPlayable2d` | Готовый input/camera/step/draw |
+
+Не прыгайте сразу в `SpriteRenderer` / `RenderGraph`, пока HL не упёрся в limit.
+
+## `Sprite2d` — базовый component
+
+```rust,ignore
+world.spawn(
+    Sprite2d::new(region)
+        .with_position([x, y])  // Y вниз
+        .with_size([w, h])      // отрицательная ось = mirror
+        .with_layer(0),
+);
 ```
 
-Для отдельных файлов создайте один полный `TextureRegion` для каждой texture и
-передайте regions в `SpriteAnimation::from_regions`. У frame может быть
-individual duration через `AnimationFrame`.
+| Поле / метод | Зачем |
+|---|---|
+| `region` | Откуда брать тексели (atlas slot) |
+| `position` / `size` / `rotation` | World transform 2D |
+| `layer` | Painter order (ascending); tie-break = entity id |
 
-## Rendering
+Extraction (`extract_sprites` / visible variant) сортирует и режет batches по
+**adjacent** same-texture runs — texture может дать несколько draw calls,
+чтобы не ломать transparent order.
 
-`SpriteDraw` описывает region, transform, tint и `layer`; `Camera2d` создаёт
-orthographic projection. `SpriteRenderer` рассчитан на instanced rendering и
-stable painter ordering: sprites одного layer сохраняют input order.
+## Animation: какой путь выбрать
+
+### A. `AnimatedSprite2d`
+
+Один clip, frames = `TextureRegion`. Host вызывает
+`step_sprite_animations_2d(world, delta)`.  
+Guide: [ECS animation](ecs-sprite-animation.md).
+
+### B. `SpriteAnimator2d` + `yuyib-animation`
+
+`AnimationSet` / `AnimationStateMachine`, `play("walk")`, velocity→facing
+helpers (`apply_velocity_facing_2d`, cardinal clips).
+
+```powershell
+cargo run -p yuyib --example sprite_animator_2d_smoke
+cargo run -p yuyib --example two_d_animator_playable
+```
+
+Почему отдельный crate `yuyib-animation`? State machine переиспользуется
+вне sprite-only сценариев; `game_2d` остаётся ECS/render-facing.
+
+## Atlas
+
+- Offline `.ysprite` → [`offline-sprite-atlas`](offline-sprite-atlas.md)
+- Runtime sheet helpers → [`ecs-sprite-atlas`](ecs-sprite-atlas.md)
+
+Importer пишет metadata; GPU upload всё равно через `Game2dScene::queue_texture`
+или raw `TextureCache`.
 
 ## Limits & Caveats
 
-- `SpriteSheet::from_grid` принимает только complete regular grid. Padding,
-  margins и irregular atlas требуют explicit `TextureRegion`.
-- Много уникальных textures снижает batching. Текущая renderer contract — one
-  texture per batch; shipping content стоит pack'ить в atlas.
-- Runtime atlas packing, transform animation и 2D lights ещё Planned. ECS
-  frame/finish events доступны через `AnimatedSprite2d`; bounded CPU viewport
-  culling обычных `Sprite2d`, tilemaps, chunk CPU culling и tile collision
-  snapshots описаны в отдельных
-  [2D ECS animation](ecs-sprite-animation.md) и
-  [viewport](sprite-viewport-culling.md) / [tilemap guides](tilemaps.md).
-- Pixel art требует explicit filtering/color-space policy; current API не
-  обещает universal pixel-perfect result на любом DPI/scale.
+- Нет 2D lights / normal maps в foundation (см. RFC 0006).
+- Нет blend trees / skeletal 2D.
+- Culling ordinary sprites: [sprite-viewport-culling](sprite-viewport-culling.md);
+  tiles — [tilemaps](tilemaps.md).
+
+## См. также
+
+- [Game2dScene](game-2d-scene.md)
+- [2D concepts](../concepts/two-d.md)
+- [2D interaction](interaction-2d.md)

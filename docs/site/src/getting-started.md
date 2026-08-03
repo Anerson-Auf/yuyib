@@ -3,30 +3,28 @@
 **Статус:** Experimental  
 **Платформы:** Windows
 
-Текущий минимальный путь создаёт native window, инициализирует WGPU surface и
-отрисовывает clear pass. Готовый runnable example находится в
-[`crates/yuyib/examples/clear_window.rs`](../../../crates/yuyib/examples/clear_window.rs).
+Этот файл — **короткий старт**. Если вы хотите понять *почему* вызывается каждая
+функция, сразу откройте [учебный путь](tutorials/learning-path.md).
 
-## Запуск примера
+## Что поставить
 
-Из корня workspace выполните:
+1. Rust toolchain (edition 2024 workspace).
+2. Windows + GPU driver для WGPU.
+3. Клон репозитория Yuyib; dependency пока обычно `path` / workspace member.
+
+Минимальные features: `app` для окна; `game` для ECS; `two-d` / `three-d` для
+соответствующих сцен. Карта features: [Cargo features](reference/features.md).
+
+## 30 секунд: пустое окно
 
 ```powershell
 cargo run -p yuyib --example clear_window
 ```
 
-Остальные готовые vertical slices собраны в
-[каталоге запускаемых примеров](reference/examples.md). Если нужный import
-недоступен, сначала проверьте [Cargo feature map](reference/features.md).
-
-Окно называется `Yuyib — first GPU surface`. Пример использует continuous
-render loop и самостоятельно запрашивает корректное завершение после 600
-frame callbacks. Закрытие окна через системную кнопку также завершает process.
+Окно `Yuyib — first GPU surface`, continuous loop, exit после ~600 кадров или
+по системной кнопке закрытия.
 
 ## Минимальное приложение
-
-Для локального проекта добавьте `yuyib` как dependency (пока workspace/path
-dependency), затем создайте entry point:
 
 ```rust
 use yuyib::{
@@ -45,17 +43,41 @@ fn main() -> Result<(), yuyib::app::ApplicationError> {
 }
 ```
 
-`Application::new()` создаёт resizable window размером 1280×720, использует
-`RenderLoop::OnDemand` и тёмный clear color. Подробнее о callbacks, scheduling
-и failure modes — в [руководстве Native Application](guides/application.md).
+| Вызов | Зачем |
+|---|---|
+| `Application::new()` | Builder с defaults (1280×720, OnDemand, тёмный clear) |
+| `.window(...)` | Title / размер / `WindowMode` |
+| `.render_loop(Continuous)` | Игре нужны кадры без ожидания input |
+| `.run()` | Blocking native event loop; `Result` при surface/UI ошибках |
 
-Для игры с ECS-миром используйте `Game::new()` — он оставляет тот же window и
-GPU lifecycle, но даёт `World` в `on_start` и `on_frame`. Минимальный путь и
-границы с низкоуровневым renderer-ом описаны в
-[руководстве игры](guides/game-lifecycle.md).
+Пошаговый разбор: [Tutorial — первое окно](tutorials/first-window.md).  
+Полный surface (UI, WebView, callbacks): [Native Application](guides/application.md).
+
+## Минимальная игра
+
+```rust,ignore
+Game::new()
+    .window(WindowConfig { title: "Моя игра".into(), ..Default::default() })
+    .add_plugin(MyPlugin)
+    .run()?;
+```
+
+`Game` = тот же window/GPU host + один ECS `World` + schedules
+`Startup` / `FixedUpdate` / `Update`.  
+Tutorial: [Первая игра](tutorials/first-game.md).
+
+## Куда дальше по цели
+
+| Цель | Открыть |
+|---|---|
+| Учиться с нуля по шагам | [Учебный путь](tutorials/learning-path.md) |
+| Загрузить 3D карту без freeze | [Tutorial glTF](tutorials/load-gltf-scene.md) |
+| 2D sprite / tilemap | [Tutorial 2D](tutorials/first-2d-playable.md) |
+| Найти API по задаче | [Что вы хотите сделать?](wiki/use-case-index.md) |
+| Запустить готовый example | [Каталог примеров](reference/examples.md) |
 
 ## Limits & Caveats
 
-Public API пока Experimental. Несовместимые изменения будут отмечаться в
-changelog и [API stability](reference/api-stability.md). Актуальные дефекты —
-[KNOWN_ISSUES](../../../KNOWN_ISSUES.md).
+Public API — Experimental. Актуальные дефекты:
+[KNOWN_ISSUES](../../../KNOWN_ISSUES.md). Стабильность:
+[API stability](reference/api-stability.md).

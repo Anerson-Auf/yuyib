@@ -35,10 +35,22 @@ pub mod interaction_3d;
 pub mod quest;
 /// Shared input-agnostic focus and hold-to-interact state machine for 2D/3D.
 pub mod world_interaction;
+/// Presentation hints (cursor / label / highlight) for a focused interaction.
+pub mod interaction_prompt;
+/// Renderer-neutral dialogue graphs, story flags, and choice sessions.
+pub mod dialogue;
 
 pub use world_interaction::{
     WorldInteractionActivation, WorldInteractionConfigError, WorldInteractionEvent,
     WorldInteractionEvents, WorldInteractionState, WorldInteractionTarget,
+};
+pub use interaction_prompt::{
+    InteractionCursorHint, InteractionPrompt2d, InteractionPromptPresentation,
+};
+pub use dialogue::{
+    DialogueChoice, DialogueChoiceId, DialogueCondition, DialogueDefinitionError, DialogueEffect,
+    DialogueEvent, DialogueGraph, DialogueId, DialogueNode, DialogueNodeId, DialoguePresentation,
+    DialoguePresentedChoice, DialogueSession, DialogueSessionError, StoryFlagId, StoryFlags,
 };
 
 pub use quest::{
