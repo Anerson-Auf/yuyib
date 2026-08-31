@@ -42,5 +42,5 @@ pub use foundation::{
     BridgeRouterError, EndpointDispatchError, EndpointName, EndpointNameError, LocalAsset,
     LocalAssetProtocol, LocalCsp, LocalProtocolResponse, LocalProtocolStatus, MessageId,
     MimePolicy, MimePolicyError, PageEvent, PageEventError, PageSessionId, PageSessionIdError,
-    TypedEndpoint,
+    TypedEndpoint, WebSocketOrigin, WebSocketOriginError,
 };

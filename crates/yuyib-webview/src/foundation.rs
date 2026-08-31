@@ -466,6 +466,16 @@ impl LocalCsp {
         self
     }
 
+    /// Allows WebSocket connections to one explicit secure origin.
+    ///
+    /// This changes only the CSP connection allow-list. It does not enable
+    /// browser navigation, filesystem access, or arbitrary network access.
+    #[must_use]
+    pub fn with_websocket_origin(mut self, url: &WebSocketOrigin) -> Self {
+        self.connect_origins.insert(url.origin());
+        self
+    }
+
     /// Allows same-origin `blob:` workers (Monaco and similar editor bundles).
     ///
     /// Without this, a page meta CSP that permits `blob:` is still intersected
@@ -508,6 +518,62 @@ impl LocalCsp {
         value
     }
 }
+
+/// An explicitly approved secure WebSocket origin for a local page CSP.
+///
+/// The path is retained for client configuration, while [`LocalCsp`] permits
+/// only its normalized `wss://host[:port]` origin in `connect-src`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebSocketOrigin(Url);
+
+impl WebSocketOrigin {
+    /// Parses one absolute WSS URL without embedded credentials.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, WebSocketOriginError> {
+        let url = Url::parse(value.as_ref()).map_err(|_| WebSocketOriginError::Invalid)?;
+        if url.scheme() != "wss" {
+            return Err(WebSocketOriginError::NotWss);
+        }
+        if url.host_str().is_none() {
+            return Err(WebSocketOriginError::MissingHost);
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(WebSocketOriginError::EmbeddedCredentials);
+        }
+        Ok(Self(url))
+    }
+
+    fn origin(&self) -> String {
+        self.0.origin().ascii_serialization()
+    }
+}
+
+/// A rejected secure WebSocket endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebSocketOriginError {
+    /// The URL was not absolute or otherwise could not be parsed.
+    Invalid,
+    /// The URL did not use WSS.
+    NotWss,
+    /// The URL did not include a host.
+    MissingHost,
+    /// The URL embedded a username or password.
+    EmbeddedCredentials,
+}
+
+impl fmt::Display for WebSocketOriginError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid => formatter.write_str("WebSocket endpoint is invalid"),
+            Self::NotWss => formatter.write_str("WebSocket endpoint must use WSS"),
+            Self::MissingHost => formatter.write_str("WebSocket endpoint must include a host"),
+            Self::EmbeddedCredentials => {
+                formatter.write_str("WebSocket endpoint must not include credentials")
+            }
+        }
+    }
+}
+
+impl Error for WebSocketOriginError {}
 
 /// Stable opaque identifier for one page lifetime.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1668,6 +1734,17 @@ mod tests {
                 .header_value()
                 .contains("'self' https://api.example.test;")
         );
+        let websocket = WebSocketOrigin::parse("wss://game.example.test/ws").expect("endpoint");
+        assert!(
+            LocalCsp::strict()
+                .with_websocket_origin(&websocket)
+                .header_value()
+                .contains("'self' wss://game.example.test;")
+        );
+        assert!(matches!(
+            WebSocketOrigin::parse("ws://game.example.test/ws"),
+            Err(WebSocketOriginError::NotWss)
+        ));
         let monaco = LocalCsp::strict()
             .with_blob_workers()
             .with_inline_styles()
