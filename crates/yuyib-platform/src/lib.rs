@@ -15,6 +15,8 @@ use winit::{
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes},
 };
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
 
 /// Desired mouse-cursor behaviour for an application window.
 ///
@@ -420,6 +422,58 @@ impl Window {
         };
         child.raise();
         Ok(child)
+    }
+
+    /// Creates a transparent, frameless top-level window owned by `owner`.
+    ///
+    /// Unlike a `WS_CHILD` surface, this is composited by DWM with the owned
+    /// window below it. It is intended for a windowed `WebView2` HUD over a
+    /// native WGPU game surface: transparent WebView pixels cannot reveal a
+    /// sibling child HWND reliably, while an owned transparent top-level
+    /// overlay can. Windows also keeps the overlay above its owner, hides it
+    /// when the owner is minimized, and destroys it with the owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChildWindowError`] when the requested size is empty, the
+    /// owner handle cannot be borrowed, or Windows rejects creation.
+    #[cfg(target_os = "windows")]
+    #[allow(unsafe_code)]
+    pub fn create_owned_overlay(
+        event_loop: &ActiveEventLoop,
+        owner: &Self,
+        position: PhysicalPosition<i32>,
+        size: PhysicalSize<u32>,
+    ) -> Result<Self, ChildWindowError> {
+        if size.width == 0 || size.height == 0 {
+            return Err(ChildWindowError::Empty);
+        }
+        let owner_handle = owner
+            .inner
+            .window_handle()
+            .map_err(|error| ChildWindowError::ParentHandle(error.to_string()))?
+            .as_raw();
+        let RawWindowHandle::Win32(owner) = owner_handle else {
+            return Err(ChildWindowError::ParentHandle(
+                "owner does not expose a Win32 HWND".to_owned(),
+            ));
+        };
+        let attributes = WinitWindow::default_attributes()
+            .with_title("")
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_transparent(true)
+            .with_visible(true)
+            .with_skip_taskbar(true)
+            .with_position(position)
+            .with_inner_size(size)
+            .with_owner_window(owner.hwnd.get() as _);
+        let inner = event_loop
+            .create_window(attributes)
+            .map_err(ChildWindowError::Create)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 
     /// Moves and resizes this child inside its parent client area.
