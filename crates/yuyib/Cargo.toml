@@ -35,7 +35,7 @@ profile-3d = ["three-d"]
 ## Enabled with `two-d`; this alias keeps smoke examples explicit.
 profile-2d = ["two-d"]
 gameplay = ["dep:yuyib-gameplay", "ecs", "physics"]
-net = ["dep:yuyib-net"]
+net = ["dep:yuyib-net", "yuyib-net/ecs"]
 audio = ["dep:yuyib-audio"]
 
 platform = ["dep:yuyib-platform"]
@@ -143,6 +143,8 @@ yuyib-source1-assets = { path = "../yuyib-source1-assets", version = "0.1.0", op
 [dev-dependencies]
 bevy_ecs.workspace = true
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 
 [[example]]
 name = "application_webview"
@@ -383,6 +385,11 @@ required-features = ["two-d"]
 name = "two_d_tiled_playable"
 path = "examples/two_d_tiled_playable.rs"
 required-features = ["app", "two-d"]
+
+[[example]]
+name = "networking_lobby"
+path = "examples/networking_lobby.rs"
+required-features = ["net"]
 
 [lints]
 workspace = true

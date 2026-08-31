@@ -14,6 +14,23 @@
 
 #![forbid(unsafe_code)]
 
+/// High-level client, server, configuration, and JSON routing layers.
+pub mod high_level;
+/// Bevy ECS resources and message polling systems.
+#[cfg(feature = "ecs")]
+pub mod ecs;
+
+pub use high_level::{
+    ClientConfig, ClientEvent, ClientId, ClientState, MessageRouter, NetClient, NetServer,
+    ServerConfig, ServerEvent,
+};
+
+#[cfg(feature = "ecs")]
+pub use ecs::{
+    EcsClientEvent, EcsServerEvent, NetworkClient, NetworkServer, poll_client_events_system,
+    poll_server_events_system,
+};
+
 use std::{
     error::Error,
     fmt,
@@ -818,6 +835,7 @@ impl TcpServer {
     /// next accept operation.
     pub async fn accept(&self) -> Result<AcceptedConnection, AcceptError> {
         let (stream, peer_addr) = self.listener.accept().await.map_err(AcceptError::Io)?;
+        let _ = stream.set_nodelay(true);
         Ok(AcceptedConnection {
             connection: TcpConnection {
                 stream,
@@ -899,6 +917,7 @@ pub async fn connect(
     let stream = TcpStream::connect(address)
         .await
         .map_err(|source| ConnectError { address, source })?;
+    let _ = stream.set_nodelay(true);
     Ok(TcpConnection { stream, codec })
 }
 
