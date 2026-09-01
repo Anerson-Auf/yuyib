@@ -95,6 +95,24 @@ impl Default for ServerConfig {
     }
 }
 
+fn heartbeat_miss_limit(heartbeat_timeout: Duration, heartbeat_interval: Duration) -> u64 {
+    if heartbeat_timeout.is_zero() {
+        return u64::MAX;
+    }
+
+    let interval = if heartbeat_interval.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        heartbeat_interval
+    };
+
+    let limit = heartbeat_timeout
+        .as_nanos()
+        .div_ceil(interval.as_nanos())
+        .max(1);
+    u64::try_from(limit).unwrap_or(u64::MAX)
+}
+
 /// Thread-safe client facade communicating with a background connection task.
 pub struct NetClient {
     outbound_tx: mpsc::Sender<WireFrame>,
@@ -189,6 +207,7 @@ async fn client_worker_loop(
                 let mut ping_interval = tokio::time::interval(config.heartbeat_interval);
                 ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 let mut missed_pongs = 0;
+                let heartbeat_limit = heartbeat_miss_limit(config.heartbeat_timeout, config.heartbeat_interval);
 
                 loop {
                     tokio::select! {
@@ -225,7 +244,7 @@ async fn client_worker_loop(
                             }
                         }
                         _ = ping_interval.tick() => {
-                            if missed_pongs >= 2 {
+                            if heartbeat_limit != u64::MAX && missed_pongs >= heartbeat_limit {
                                 let _ = events_tx.send(ClientEvent::Error("Heartbeat timeout".to_owned())).await;
                                 break;
                             }
@@ -264,6 +283,11 @@ enum ServerCommand {
     Broadcast(WireFrame),
     BroadcastExcept(WireFrame, ClientId),
     Disconnect(ClientId),
+}
+
+enum ClientCommand {
+    Outbound(WireFrame),
+    Disconnect,
 }
 
 /// Thread-safe server facade communicating with an accept loop and client session tasks.
@@ -385,7 +409,7 @@ async fn server_worker_loop(
     mut commands_rx: mpsc::Receiver<ServerCommand>,
     events_tx: mpsc::Sender<ServerEvent>,
 ) {
-    let mut clients: HashMap<ClientId, mpsc::Sender<WireFrame>> = HashMap::new();
+    let mut clients: HashMap<ClientId, mpsc::Sender<ClientCommand>> = HashMap::new();
     let mut next_client_id = 1;
 
     let (client_events_tx, mut client_events_rx) = mpsc::channel::<(ClientId, ClientTaskEvent)>(1024);
@@ -434,23 +458,27 @@ async fn server_worker_loop(
                     match cmd {
                         ServerCommand::Send(client_id, frame) => {
                             if let Some(tx) = clients.get(&client_id) {
-                                let _ = tx.send(frame).await;
+                                let _ = tx.send(ClientCommand::Outbound(frame)).await;
                             }
                         }
                         ServerCommand::Broadcast(frame) => {
                             for tx in clients.values() {
-                                let _ = tx.send(frame.clone()).await;
+                                let _ = tx
+                                    .send(ClientCommand::Outbound(frame.clone()))
+                                    .await;
                             }
                         }
                         ServerCommand::BroadcastExcept(frame, except) => {
                             for (&id, tx) in &clients {
                                 if id != except {
-                                    let _ = tx.send(frame.clone()).await;
+                                    let _ = tx.send(ClientCommand::Outbound(frame.clone())).await;
                                 }
                             }
                         }
                         ServerCommand::Disconnect(client_id) => {
-                            clients.remove(&client_id);
+                            if let Some(tx) = clients.get(&client_id) {
+                                let _ = tx.send(ClientCommand::Disconnect).await;
+                            }
                         }
                     }
                 } else {
@@ -466,12 +494,13 @@ async fn client_session_task(
     mut stream: tokio::net::TcpStream,
     codec: FrameCodec,
     config: ServerConfig,
-    mut outbound_rx: mpsc::Receiver<WireFrame>,
+    mut outbound_rx: mpsc::Receiver<ClientCommand>,
     events_tx: mpsc::Sender<(ClientId, ClientTaskEvent)>,
 ) {
     let mut ping_interval = tokio::time::interval(config.heartbeat_interval);
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut missed_pongs = 0;
+    let heartbeat_limit = heartbeat_miss_limit(config.heartbeat_timeout, config.heartbeat_interval);
 
     let ping_type = MessageType::new("sys.ping").unwrap();
     let pong_type = MessageType::new("sys.pong").unwrap();
@@ -500,16 +529,23 @@ async fn client_session_task(
                 }
             }
             outbound = outbound_rx.recv() => {
-                if let Some(frame) = outbound {
-                    if codec.write_frame(&mut stream, &frame).await.is_err() {
-                        break;
+                if let Some(command) = outbound {
+                    match command {
+                        ClientCommand::Outbound(frame) => {
+                            if codec.write_frame(&mut stream, &frame).await.is_err() {
+                                break;
+                            }
+                        }
+                        ClientCommand::Disconnect => {
+                            break;
+                        }
                     }
                 } else {
                     break;
                 }
             }
             _ = ping_interval.tick() => {
-                if missed_pongs >= 2 {
+                if heartbeat_limit != u64::MAX && missed_pongs >= heartbeat_limit {
                     break;
                 }
                 missed_pongs += 1;
