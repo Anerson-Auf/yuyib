@@ -19,7 +19,7 @@ use bytemuck::{Pod, Zeroable};
 use lyon_path::{Path, math::point};
 use lyon_tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use wgpu::util::DeviceExt;
-use yuyib_render::{RenderFrame, wgpu};
+use yuyib_render::{RenderFrame, RenderViewport, wgpu};
 
 use crate::Camera2d;
 
@@ -50,6 +50,30 @@ impl VectorVertex2d {
 pub struct VectorMesh2d {
     vertices: Vec<VectorVertex2d>,
     indices: Vec<u32>,
+    bounds: VectorAabb2d,
+}
+
+/// Axis-aligned bounds in vector mesh-local world coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VectorAabb2d {
+    /// Inclusive minimum X/Y corner.
+    pub min: [f32; 2],
+    /// Inclusive maximum X/Y corner.
+    pub max: [f32; 2],
+}
+
+impl VectorAabb2d {
+    fn from_vertices(vertices: &[VectorVertex2d]) -> Self {
+        let mut min = vertices[0].position;
+        let mut max = min;
+        for vertex in &vertices[1..] {
+            min[0] = min[0].min(vertex.position[0]);
+            min[1] = min[1].min(vertex.position[1]);
+            max[0] = max[0].max(vertex.position[0]);
+            max[1] = max[1].max(vertex.position[1]);
+        }
+        Self { min, max }
+    }
 }
 
 impl VectorMesh2d {
@@ -95,7 +119,12 @@ impl VectorMesh2d {
                 });
             }
         }
-        Ok(Self { vertices, indices })
+        let bounds = VectorAabb2d::from_vertices(&vertices);
+        Ok(Self {
+            vertices,
+            indices,
+            bounds,
+        })
     }
 
     /// Returns the immutable vertex data for asset tools and diagnostics.
@@ -108,6 +137,12 @@ impl VectorMesh2d {
     #[must_use]
     pub fn indices(&self) -> &[u32] {
         &self.indices
+    }
+
+    /// Returns mesh-local bounds used for conservative camera culling.
+    #[must_use]
+    pub const fn bounds(&self) -> VectorAabb2d {
+        self.bounds
     }
 
     /// Returns the number of indexed triangles.
@@ -506,6 +541,77 @@ pub struct GpuVectorMesh2d {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    bounds: VectorAabb2d,
+}
+
+/// One rectangular clip in physical presentation pixels.
+///
+/// The rectangle is intersected with the active [`RenderViewport`] immediately
+/// before recording. A zero-sized or fully outside clip simply skips that draw;
+/// it never expands a nested viewport or produces an invalid WGPU scissor.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct VectorClipRect2d {
+    /// Physical horizontal origin, allowed to be negative before intersection.
+    pub x: i32,
+    /// Physical vertical origin, allowed to be negative before intersection.
+    pub y: i32,
+    /// Physical width in pixels.
+    pub width: u32,
+    /// Physical height in pixels.
+    pub height: u32,
+}
+
+impl VectorClipRect2d {
+    /// Creates a physical-pixel clip rectangle.
+    #[must_use]
+    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn intersect(self, viewport: RenderViewport) -> Option<ResolvedVectorClip> {
+        let left = i64::from(self.x).max(i64::from(viewport.x()));
+        let top = i64::from(self.y).max(i64::from(viewport.y()));
+        let right = i64::from(self.x)
+            .saturating_add(i64::from(self.width))
+            .min(i64::from(viewport.x()) + i64::from(viewport.width()));
+        let bottom = i64::from(self.y)
+            .saturating_add(i64::from(self.height))
+            .min(i64::from(viewport.y()) + i64::from(viewport.height()));
+        let width = u32::try_from(right - left).ok()?;
+        let height = u32::try_from(bottom - top).ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        Some(ResolvedVectorClip {
+            x: u32::try_from(left).ok()?,
+            y: u32::try_from(top).ok()?,
+            width,
+            height,
+        })
+    }
+}
+
+/// Colour-composition rule for one vector draw.
+///
+/// Pipeline selection is explicit because blend modes cannot be switched as a
+/// dynamic WGPU draw-state. Adjacent draws only batch when mesh, blend and clip
+/// state match, preserving painter order.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum VectorBlendMode2d {
+    /// Ordinary straight-alpha source-over blending.
+    #[default]
+    Alpha,
+    /// Source-over blending for premultiplied vertex colours.
+    PremultipliedAlpha,
+    /// Adds straight-alpha source colour to the destination.
+    Additive,
+    /// Multiplies destination colour by source colour.
+    Multiply,
 }
 
 impl GpuVectorMesh2d {
@@ -542,6 +648,7 @@ impl GpuVectorMesh2d {
                     usage: wgpu::BufferUsages::INDEX,
                 }),
             index_count,
+            bounds: mesh.bounds(),
         })
     }
 
@@ -549,6 +656,12 @@ impl GpuVectorMesh2d {
     #[must_use]
     pub const fn index_count(&self) -> u32 {
         self.index_count
+    }
+
+    /// Returns the immutable mesh-local bounds used during draw extraction.
+    #[must_use]
+    pub const fn bounds(&self) -> VectorAabb2d {
+        self.bounds
     }
 }
 
@@ -565,6 +678,10 @@ pub struct VectorDraw2d {
     pub tint: [f32; 4],
     /// Stable painter order. Higher layers render later.
     pub layer: i32,
+    /// Colour-composition pipeline selected for this draw.
+    pub blend: VectorBlendMode2d,
+    /// Optional physical-pixel scissor clip.
+    pub clip: Option<VectorClipRect2d>,
 }
 
 impl VectorDraw2d {
@@ -577,6 +694,8 @@ impl VectorDraw2d {
             rotation_radians: 0.0,
             tint: [1.0; 4],
             layer: 0,
+            blend: VectorBlendMode2d::Alpha,
+            clip: None,
         }
     }
 
@@ -614,6 +733,20 @@ impl VectorDraw2d {
         self.layer = layer;
         self
     }
+
+    /// Sets the colour-composition pipeline.
+    #[must_use]
+    pub const fn with_blend(mut self, blend: VectorBlendMode2d) -> Self {
+        self.blend = blend;
+        self
+    }
+
+    /// Sets an optional physical-pixel scissor clip.
+    #[must_use]
+    pub const fn with_clip(mut self, clip: Option<VectorClipRect2d>) -> Self {
+        self.clip = clip;
+        self
+    }
 }
 
 impl Default for VectorDraw2d {
@@ -631,6 +764,8 @@ pub struct VectorDrawStats2d {
     pub draw_calls: u32,
     /// Number of indexed triangles submitted after instancing.
     pub triangles: u64,
+    /// Instances rejected by conservative camera culling before GPU upload.
+    pub culled_instances: u32,
 }
 
 /// Explicit per-frame work limit for retained vector rendering.
@@ -681,9 +816,149 @@ impl VectorRenderBudget2d {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResolvedVectorClip {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+struct VectorDrawRange<'mesh> {
+    mesh: &'mesh GpuVectorMesh2d,
+    start: u32,
+    count: u32,
+    blend: VectorBlendMode2d,
+    clip: Option<ResolvedVectorClip>,
+}
+
+struct VectorPipelines2d {
+    alpha: wgpu::RenderPipeline,
+    premultiplied_alpha: wgpu::RenderPipeline,
+    additive: wgpu::RenderPipeline,
+    multiply: wgpu::RenderPipeline,
+}
+
+impl VectorPipelines2d {
+    fn create(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        Self {
+            alpha: create_vector_pipeline(
+                device,
+                layout,
+                shader,
+                format,
+                "yuyib retained vector alpha pipeline",
+                wgpu::BlendState::ALPHA_BLENDING,
+            ),
+            premultiplied_alpha: create_vector_pipeline(
+                device,
+                layout,
+                shader,
+                format,
+                "yuyib retained vector premultiplied-alpha pipeline",
+                wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent::OVER,
+                },
+            ),
+            additive: create_vector_pipeline(
+                device,
+                layout,
+                shader,
+                format,
+                "yuyib retained vector additive pipeline",
+                wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+            ),
+            multiply: create_vector_pipeline(
+                device,
+                layout,
+                shader,
+                format,
+                "yuyib retained vector multiply pipeline",
+                wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Dst,
+                        dst_factor: wgpu::BlendFactor::Zero,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent::OVER,
+                },
+            ),
+        }
+    }
+
+    const fn get(&self, mode: VectorBlendMode2d) -> &wgpu::RenderPipeline {
+        match mode {
+            VectorBlendMode2d::Alpha => &self.alpha,
+            VectorBlendMode2d::PremultipliedAlpha => &self.premultiplied_alpha,
+            VectorBlendMode2d::Additive => &self.additive,
+            VectorBlendMode2d::Multiply => &self.multiply,
+        }
+    }
+}
+
+fn create_vector_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    label: &'static str,
+    blend: wgpu::BlendState,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Some(VECTOR_VERTEX_LAYOUT), Some(VECTOR_INSTANCE_LAYOUT)],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// GPU renderer for ordered retained vector mesh instances.
 pub struct VectorRenderer2d {
-    pipeline: wgpu::RenderPipeline,
+    pipelines: VectorPipelines2d,
     camera_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
     instance_buffer: Option<wgpu::Buffer>,
@@ -747,6 +1022,32 @@ impl VectorRenderer2d {
         if ordered.is_empty() {
             return Ok(VectorDrawStats2d::default());
         }
+        let camera_viewport = camera
+            .viewport(frame.draw_size())
+            .map_err(VectorSceneError2d::InvalidCamera)?;
+        let viewport = frame.viewport();
+        let mut culled_instances = 0_u32;
+        let ordered: Vec<_> = ordered
+            .into_iter()
+            .filter_map(|(mesh, draw)| {
+                if !is_draw_visible(mesh.bounds(), draw, camera_viewport) {
+                    culled_instances = culled_instances.saturating_add(1);
+                    return None;
+                }
+                match draw.clip {
+                    Some(clip) => clip
+                        .intersect(viewport)
+                        .map(|clip| (mesh, draw, Some(clip))),
+                    None => Some((mesh, draw, None)),
+                }
+            })
+            .collect();
+        if ordered.is_empty() {
+            return Ok(VectorDrawStats2d {
+                culled_instances,
+                ..VectorDrawStats2d::default()
+            });
+        }
         let total =
             u32::try_from(ordered.len()).map_err(|_| VectorSceneError2d::TooManyInstances {
                 actual: ordered.len(),
@@ -765,7 +1066,7 @@ impl VectorRenderer2d {
         self.ensure_instance_capacity(frame.device(), total);
         let packed: Vec<GpuVectorInstance> = ordered
             .iter()
-            .map(|(_, draw)| GpuVectorInstance::from_draw(*draw))
+            .map(|(_, draw, _)| GpuVectorInstance::from_draw(*draw))
             .collect();
         let instance_buffer = self
             .instance_buffer
@@ -775,15 +1076,23 @@ impl VectorRenderer2d {
             .queue()
             .write_buffer(instance_buffer, 0, bytemuck::cast_slice(&packed));
 
-        let mut ranges: Vec<(&GpuVectorMesh2d, u32, u32)> = Vec::new();
-        for (offset, (mesh, _)) in ordered.iter().enumerate() {
+        let mut ranges: Vec<VectorDrawRange<'_>> = Vec::new();
+        for (offset, (mesh, draw, clip)) in ordered.iter().enumerate() {
             let offset = u32::try_from(offset).expect("total was checked as u32");
-            if let Some((last_mesh, _, count)) = ranges.last_mut()
-                && std::ptr::eq(*last_mesh, *mesh)
+            if let Some(last) = ranges.last_mut()
+                && std::ptr::eq(last.mesh, *mesh)
+                && last.blend == draw.blend
+                && last.clip == *clip
             {
-                *count += 1;
+                last.count += 1;
             } else {
-                ranges.push((*mesh, offset, 1));
+                ranges.push(VectorDrawRange {
+                    mesh,
+                    start: offset,
+                    count: 1,
+                    blend: draw.blend,
+                    clip: *clip,
+                });
             }
         }
         let draw_calls = u32::try_from(ranges.len()).unwrap_or(u32::MAX);
@@ -797,22 +1106,37 @@ impl VectorRenderer2d {
         }
         let triangles = ranges
             .iter()
-            .map(|(mesh, _, count)| u64::from(mesh.index_count / 3) * u64::from(*count))
+            .map(|range| u64::from(range.mesh.index_count / 3) * u64::from(range.count))
             .sum();
         frame.with_surface_pass(wgpu::LoadOp::Load, |pass| {
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            for (mesh, start, count) in &ranges {
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, *start..*start + *count);
+            for range in &ranges {
+                pass.set_pipeline(self.pipelines.get(range.blend));
+                if let Some(clip) = range.clip {
+                    pass.set_scissor_rect(clip.x, clip.y, clip.width, clip.height);
+                } else {
+                    pass.set_scissor_rect(
+                        viewport.x(),
+                        viewport.y(),
+                        viewport.width(),
+                        viewport.height(),
+                    );
+                }
+                pass.set_vertex_buffer(0, range.mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(range.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(
+                    0..range.mesh.index_count,
+                    0,
+                    range.start..range.start + range.count,
+                );
             }
         });
         Ok(VectorDrawStats2d {
             instances: total,
             draw_calls,
             triangles,
+            culled_instances,
         })
     }
 
@@ -855,37 +1179,8 @@ impl VectorRenderer2d {
             bind_group_layouts: &[Some(&camera_bind_group_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("yuyib retained vector pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(VECTOR_VERTEX_LAYOUT), Some(VECTOR_INSTANCE_LAYOUT)],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
         Self {
-            pipeline,
+            pipelines: VectorPipelines2d::create(device, &pipeline_layout, &shader, format),
             camera_bind_group,
             camera_buffer,
             instance_buffer: None,
@@ -1211,6 +1506,45 @@ fn validate_draw(draw: VectorDraw2d) -> Result<(), VectorSceneError2d> {
     Ok(())
 }
 
+fn is_draw_visible(
+    bounds: VectorAabb2d,
+    draw: VectorDraw2d,
+    camera_viewport: ([f32; 2], [f32; 2]),
+) -> bool {
+    let local_center = [
+        (bounds.min[0] + bounds.max[0]) * 0.5,
+        (bounds.min[1] + bounds.max[1]) * 0.5,
+    ];
+    let local_half = [
+        (bounds.max[0] - bounds.min[0]) * 0.5,
+        (bounds.max[1] - bounds.min[1]) * 0.5,
+    ];
+    let cosine = draw.rotation_radians.cos();
+    let sine = draw.rotation_radians.sin();
+    let scaled_center = [
+        local_center[0] * draw.scale[0],
+        local_center[1] * draw.scale[1],
+    ];
+    let center = [
+        draw.position[0] + scaled_center[0] * cosine - scaled_center[1] * sine,
+        draw.position[1] + scaled_center[0] * sine + scaled_center[1] * cosine,
+    ];
+    let scaled_half = [
+        local_half[0] * draw.scale[0].abs(),
+        local_half[1] * draw.scale[1].abs(),
+    ];
+    let half = [
+        cosine.abs() * scaled_half[0] + sine.abs() * scaled_half[1],
+        sine.abs() * scaled_half[0] + cosine.abs() * scaled_half[1],
+    ];
+    let right = camera_viewport.0[0] + camera_viewport.1[0];
+    let bottom = camera_viewport.0[1] + camera_viewport.1[1];
+    center[0] + half[0] > camera_viewport.0[0]
+        && center[0] - half[0] < right
+        && center[1] + half[1] > camera_viewport.0[1]
+        && center[1] - half[1] < bottom
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct GpuVectorInstance {
@@ -1334,6 +1668,53 @@ mod tests {
         let error = validate_draw(VectorDraw2d::new().with_rotation(f32::NAN))
             .expect_err("NaN is never sent to the GPU");
         assert_eq!(error, VectorSceneError2d::NonFiniteDraw);
+    }
+
+    #[test]
+    fn physical_clip_is_intersected_with_the_active_viewport() {
+        let viewport = RenderViewport::new(20, 10, 100, 80).expect("valid viewport");
+        let clip = VectorClipRect2d::new(-5, 60, 60, 80)
+            .intersect(viewport)
+            .expect("clip overlaps viewport");
+        assert_eq!(clip.x, 20);
+        assert_eq!(clip.y, 60);
+        assert_eq!(clip.width, 35);
+        assert_eq!(clip.height, 30);
+        assert!(
+            VectorClipRect2d::new(200, 200, 5, 5)
+                .intersect(viewport)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn vector_draw_carries_explicit_blend_and_clip_state() {
+        let draw = VectorDraw2d::new()
+            .with_blend(VectorBlendMode2d::Additive)
+            .with_clip(Some(VectorClipRect2d::new(1, 2, 3, 4)));
+        assert_eq!(draw.blend, VectorBlendMode2d::Additive);
+        assert_eq!(draw.clip, Some(VectorClipRect2d::new(1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn conservative_culling_keeps_rotated_overlap_and_rejects_offscreen_draws() {
+        let bounds = VectorAabb2d {
+            min: [-1.0, -1.0],
+            max: [1.0, 1.0],
+        };
+        let viewport = ([0.0, 0.0], [10.0, 10.0]);
+        assert!(is_draw_visible(
+            bounds,
+            VectorDraw2d::new()
+                .with_position([-0.5, 5.0])
+                .with_rotation(std::f32::consts::FRAC_PI_4),
+            viewport,
+        ));
+        assert!(!is_draw_visible(
+            bounds,
+            VectorDraw2d::new().with_position([20.0, 5.0]),
+            viewport,
+        ));
     }
 
     #[test]

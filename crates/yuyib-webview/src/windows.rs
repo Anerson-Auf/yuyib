@@ -538,7 +538,7 @@ fn protocol_response(response: &LocalProtocolResponse) -> Response<Cow<'static, 
 
 fn bridge_bootstrap(session: &str) -> String {
     format!(
-        "Object.defineProperty(window, 'yuyib', {{ value: Object.freeze({{ pageSession: '{session}', post(message) {{ window.ipc.postMessage(JSON.stringify({{ ...message, session: '{session}' }})); }} }}), configurable: false }});"
+        "Object.defineProperty(window, 'yuyib', {{ value: Object.freeze({{ pageSession: '{session}', post(message) {{ window.ipc.postMessage(JSON.stringify({{ ...message, session: '{session}' }})); }}, postBinary(message, payload) {{ const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload); let binary = ''; for (let offset = 0; offset < bytes.length; offset += 0x8000) {{ binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)); }} window.ipc.postMessage(JSON.stringify({{ ...message, session: '{session}', payload: {{ encoding: 'base64', bytes: btoa(binary) }} }})); }} }}), configurable: false }});"
     )
 }
 
@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn outbound_event_requires_current_session_and_json_only_bootstrap() {
+    fn outbound_event_requires_current_session_and_binary_safe_bootstrap() {
         let session =
             crate::PageSessionId::parse("1234567890abcdef1234567890abcdef").expect("session");
         let stale =
@@ -801,5 +801,9 @@ mod tests {
         let script = host_event_script(&event, limits).expect("fixed script");
         assert!(script.contains(&format!("JSON.parse({literal})")));
         assert!(script.starts_with("window.dispatchEvent(new CustomEvent('yuyib:event'"));
+        let bootstrap = bridge_bootstrap(&session.to_hex());
+        assert!(bootstrap.contains("postBinary(message, payload)"));
+        assert!(bootstrap.contains("btoa(binary)"));
+        assert!(bootstrap.contains("0x8000"));
     }
 }

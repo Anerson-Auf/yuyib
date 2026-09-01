@@ -38,9 +38,9 @@ pub use windows::{
 #[cfg(all(target_os = "windows", feature = "webview2"))]
 pub use foundation::{
     AssetBundle, AssetBundleError, AssetLimits, AssetMime, AssetPath, AssetPathError,
-    BridgeEndpoint, BridgeEnvelope, BridgeError, BridgeLimits, BridgeLimitsError, BridgeRouter,
-    BridgeRouterError, EndpointDispatchError, EndpointName, EndpointNameError, LocalAsset,
-    LocalAssetProtocol, LocalCsp, LocalProtocolResponse, LocalProtocolStatus, MessageId,
-    MimePolicy, MimePolicyError, PageEvent, PageEventError, PageSessionId, PageSessionIdError,
-    TypedEndpoint, WebSocketOrigin, WebSocketOriginError,
+    BinaryPayload, BridgeEndpoint, BridgeEnvelope, BridgeError, BridgeLimits, BridgeLimitsError,
+    BridgeRouter, BridgeRouterError, EndpointDispatchError, EndpointName, EndpointNameError,
+    LocalAsset, LocalAssetProtocol, LocalCsp, LocalProtocolResponse, LocalProtocolStatus,
+    MessageId, MimePolicy, MimePolicyError, PageEvent, PageEventError, PageSessionId,
+    PageSessionIdError, TypedEndpoint, WebSocketOrigin, WebSocketOriginError,
 };

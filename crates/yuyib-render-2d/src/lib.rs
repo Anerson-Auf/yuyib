@@ -60,10 +60,10 @@ use yuyib_render::{RenderFrame, Renderer, wgpu};
 pub mod vector;
 
 pub use vector::{
-    GpuVectorMesh2d, RetainedVectorScene2d, VectorDraw2d, VectorDrawStats2d, VectorMesh2d,
-    VectorFill2d, VectorGradientStop2d, VectorMeshError2d, VectorMeshId2d, VectorPath2d,
-    VectorPathCommand2d, VectorPathError2d, VectorRenderBudget2d, VectorRenderer2d,
-    VectorSceneError2d, VectorVertex2d,
+    GpuVectorMesh2d, RetainedVectorScene2d, VectorAabb2d, VectorBlendMode2d, VectorClipRect2d,
+    VectorDraw2d, VectorDrawStats2d, VectorFill2d, VectorGradientStop2d, VectorMesh2d,
+    VectorMeshError2d, VectorMeshId2d, VectorPath2d, VectorPathCommand2d, VectorPathError2d,
+    VectorRenderBudget2d, VectorRenderer2d, VectorSceneError2d, VectorVertex2d,
 };
 
 /// An orthographic 2D camera with its origin at the centre of the presentation surface.

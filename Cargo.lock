@@ -6233,6 +6233,7 @@ version = "0.1.0"
 name = "yuyib-webview"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "url",
