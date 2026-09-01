@@ -13,7 +13,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{error::Error, fmt, mem::size_of};
+use std::{collections::BTreeMap, error::Error, fmt, mem::size_of};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -268,6 +268,264 @@ impl UiDrawList {
     }
 }
 
+/// Context passed to a custom paint callback for one [`Widget::custom`] node.
+///
+/// The callback is invoked after the node's ordinary retained background but
+/// before its children, matching the useful "paint the panel, then paint its
+/// contents" ordering. It is deliberately renderer-neutral: applications can
+/// construct sliders, graphs and bespoke chrome from rectangles without
+/// taking over Yuyib's WGPU frame lifecycle.
+#[derive(Clone, Copy, Debug)]
+pub struct UiCustomPaintContext<'a> {
+    widget: &'a Widget,
+    bounds: yuyib_ui::Rect,
+    clip: Option<UiClipRect>,
+    tokens: UiTokens,
+    input: &'a UiInputState,
+}
+
+impl<'a> UiCustomPaintContext<'a> {
+    /// Returns the retained custom widget.
+    #[must_use]
+    pub const fn widget(self) -> &'a Widget {
+        self.widget
+    }
+
+    /// Returns the current layout bounds in logical pixels.
+    #[must_use]
+    pub const fn bounds(self) -> yuyib_ui::Rect {
+        self.bounds
+    }
+
+    /// Returns the effective pass/scroll clip for this element.
+    #[must_use]
+    pub const fn clip(self) -> Option<UiClipRect> {
+        self.clip
+    }
+
+    /// Returns resolved UI colour and spacing tokens.
+    #[must_use]
+    pub const fn tokens(self) -> UiTokens {
+        self.tokens
+    }
+
+    /// Returns retained hover, press, focus and scroll state for this frame.
+    #[must_use]
+    pub const fn input(self) -> &'a UiInputState {
+        self.input
+    }
+
+    /// Returns whether this custom element is currently hovered.
+    #[must_use]
+    pub fn is_hovered(self) -> bool {
+        self.input.hovered() == Some(self.widget.id())
+    }
+
+    /// Returns whether this custom element currently owns a primary press.
+    #[must_use]
+    pub fn is_pressed(self) -> bool {
+        self.input.pressed() == Some(self.widget.id())
+    }
+
+    /// Returns whether this custom element owns keyboard focus.
+    #[must_use]
+    pub fn is_focused(self) -> bool {
+        self.input.focused() == Some(self.widget.id())
+    }
+}
+
+/// Bounded rectangle canvas exposed to one custom paint callback.
+///
+/// Every rectangle automatically inherits the custom element's current clip
+/// and is later subject to the same CPU clipping and WGPU scissor limits as
+/// built-in UI chrome. It cannot record GPU commands directly: a paint
+/// callback therefore cannot invalidate an active frame or bypass UI budgets.
+pub struct UiPaintCanvas {
+    widget: WidgetId,
+    default_bounds: yuyib_ui::Rect,
+    clip: Option<UiClipRect>,
+    capacity: usize,
+    rectangles: Vec<UiRectangle>,
+    overflowed: bool,
+}
+
+impl UiPaintCanvas {
+    fn new(
+        widget: WidgetId,
+        default_bounds: yuyib_ui::Rect,
+        clip: Option<UiClipRect>,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            widget,
+            default_bounds,
+            clip,
+            capacity,
+            rectangles: Vec::new(),
+            overflowed: false,
+        }
+    }
+
+    /// Fills the complete custom-element bounds.
+    pub fn fill(&mut self, color: Color) {
+        self.rectangle(self.default_bounds, color);
+    }
+
+    /// Appends one logical-pixel filled rectangle in this element's paint layer.
+    pub fn rectangle(&mut self, bounds: yuyib_ui::Rect, color: Color) {
+        if self.rectangles.len() >= self.capacity {
+            self.overflowed = true;
+            return;
+        }
+        self.rectangles.push(UiRectangle {
+            widget: self.widget,
+            bounds,
+            color,
+            clip: self.clip,
+        });
+    }
+
+    /// Appends an inside-aligned rectangular frame.
+    ///
+    /// A zero thickness or empty bounds produces no rectangles. The method
+    /// uses four non-overlapping fills, preserving ordinary alpha blending.
+    pub fn border(&mut self, bounds: yuyib_ui::Rect, color: Color, thickness: u32) {
+        let width = thickness.min(bounds.size.width);
+        let height = thickness.min(bounds.size.height);
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.rectangle(
+            yuyib_ui::Rect {
+                origin: bounds.origin,
+                size: yuyib_ui::Size::new(bounds.size.width, height),
+            },
+            color,
+        );
+        if bounds.size.height > height {
+            self.rectangle(
+                yuyib_ui::Rect {
+                    origin: yuyib_ui::Point::new(
+                        bounds.origin.x,
+                        bounds
+                            .origin
+                            .y
+                            .saturating_add(to_i32(bounds.size.height.saturating_sub(height))),
+                    ),
+                    size: yuyib_ui::Size::new(bounds.size.width, height),
+                },
+                color,
+            );
+        }
+        if bounds.size.width > width && bounds.size.height > height.saturating_mul(2) {
+            let middle_height = bounds.size.height.saturating_sub(height.saturating_mul(2));
+            self.rectangle(
+                yuyib_ui::Rect {
+                    origin: yuyib_ui::Point::new(
+                        bounds.origin.x,
+                        bounds.origin.y.saturating_add(to_i32(height)),
+                    ),
+                    size: yuyib_ui::Size::new(width, middle_height),
+                },
+                color,
+            );
+            self.rectangle(
+                yuyib_ui::Rect {
+                    origin: yuyib_ui::Point::new(
+                        bounds
+                            .origin
+                            .x
+                            .saturating_add(to_i32(bounds.size.width.saturating_sub(width))),
+                        bounds.origin.y.saturating_add(to_i32(height)),
+                    ),
+                    size: yuyib_ui::Size::new(width, middle_height),
+                },
+                color,
+            );
+        }
+    }
+
+    fn finish(self, limits: UiRenderLimits) -> Result<Vec<UiRectangle>, UiRenderError> {
+        if self.overflowed {
+            return Err(UiRenderError::TooManyRectangles {
+                actual: limits.max_rectangles.saturating_add(1),
+                limit: limits.max_rectangles,
+            });
+        }
+        Ok(self.rectangles)
+    }
+}
+
+/// Paint implementation for one application-defined retained widget.
+pub trait UiCustomPainter {
+    /// Appends bounded rectangle primitives for the current frame.
+    fn paint(&mut self, context: UiCustomPaintContext<'_>, canvas: &mut UiPaintCanvas);
+}
+
+impl<F> UiCustomPainter for F
+where
+    F: for<'a> FnMut(UiCustomPaintContext<'a>, &mut UiPaintCanvas),
+{
+    fn paint(&mut self, context: UiCustomPaintContext<'_>, canvas: &mut UiPaintCanvas) {
+        self(context, canvas);
+    }
+}
+
+/// Application-owned paint callbacks keyed by stable [`WidgetId`].
+///
+/// Keep this registry outside [`yuyib_ui::UiTree`], just as Rust callbacks are
+/// kept outside serialisable UI data. A callback is only invoked for a live
+/// [`Widget::custom`] with the matching id; replacing a tree safely leaves a
+/// stale callback inert until a widget with that id exists again.
+#[derive(Default)]
+pub struct UiCustomPaintRegistry {
+    painters: BTreeMap<WidgetId, Box<dyn UiCustomPainter>>,
+}
+
+impl UiCustomPaintRegistry {
+    /// Registers or replaces the custom paint callback for `widget`.
+    pub fn on_paint(
+        &mut self,
+        widget: WidgetId,
+        painter: impl for<'a> FnMut(UiCustomPaintContext<'a>, &mut UiPaintCanvas) + 'static,
+    ) -> &mut Self {
+        self.painters.insert(widget, Box::new(painter));
+        self
+    }
+
+    /// Registers a reusable [`UiCustomPainter`] implementation for `widget`.
+    pub fn register(
+        &mut self,
+        widget: WidgetId,
+        painter: impl UiCustomPainter + 'static,
+    ) -> &mut Self {
+        self.painters.insert(widget, Box::new(painter));
+        self
+    }
+
+    fn paint_widget(
+        &mut self,
+        context: UiCustomPaintContext<'_>,
+        capacity: usize,
+        limits: UiRenderLimits,
+    ) -> Result<Vec<UiRectangle>, UiRenderError> {
+        if !context.widget().is_custom() {
+            return Ok(Vec::new());
+        }
+        let Some(painter) = self.painters.get_mut(&context.widget().id()) else {
+            return Ok(Vec::new());
+        };
+        let mut canvas = UiPaintCanvas::new(
+            context.widget().id(),
+            context.bounds(),
+            context.clip(),
+            capacity,
+        );
+        painter.paint(context, &mut canvas);
+        canvas.finish(limits)
+    }
+}
+
 /// Limits retained UI rectangle and image-quad upload work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiRenderLimits {
@@ -462,6 +720,37 @@ pub fn extract_draw_list_with_input(
     extract_draw_list_with_input_clipped(root, layout, tokens, input, visuals, None, limits)
 }
 
+/// Extracts built-in UI chrome and application-defined custom paint callbacks.
+///
+/// Custom painters execute in retained-tree order after their custom widget's
+/// ordinary background and before its children. They receive the same input
+/// state, scroll clipping and rectangle budget as the built-in UI pass.
+///
+/// # Errors
+///
+/// Returns a layout error or a bounded rectangle-limit error. Paint callbacks
+/// cannot emit GPU work directly.
+pub fn extract_draw_list_with_input_and_custom_paint(
+    root: &Widget,
+    layout: &UiLayout,
+    tokens: UiTokens,
+    input: &UiInputState,
+    visuals: UiVisualStyle,
+    custom_paint: &mut UiCustomPaintRegistry,
+    limits: UiRenderLimits,
+) -> Result<UiDrawList, UiRenderError> {
+    extract_draw_list_with_input_and_custom_paint_clipped(
+        root,
+        layout,
+        tokens,
+        input,
+        visuals,
+        custom_paint,
+        None,
+        limits,
+    )
+}
+
 /// Extracts [`WidgetKind::Image`] widgets into paint-order destination quads.
 ///
 /// The list is separate from colour [`UiDrawList`] so hosts can bind textures
@@ -522,6 +811,58 @@ pub fn extract_draw_list_with_input_clipped(
     clip: Option<UiClipRect>,
     limits: UiRenderLimits,
 ) -> Result<UiDrawList, UiRenderError> {
+    extract_draw_list_with_input_and_optional_custom_paint(
+        root, layout, tokens, input, visuals, None, clip, limits,
+    )
+}
+
+/// Like [`extract_draw_list_with_input_and_custom_paint`], with an additional
+/// pass clip for hosts that compose several UI overlays.
+///
+/// # Errors
+///
+/// Returns a layout error or a bounded rectangle-limit error. Paint callbacks
+/// cannot emit GPU work directly.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The lower-level clipped API keeps input, visuals, registry and clip explicit"
+)]
+pub fn extract_draw_list_with_input_and_custom_paint_clipped(
+    root: &Widget,
+    layout: &UiLayout,
+    tokens: UiTokens,
+    input: &UiInputState,
+    visuals: UiVisualStyle,
+    custom_paint: &mut UiCustomPaintRegistry,
+    clip: Option<UiClipRect>,
+    limits: UiRenderLimits,
+) -> Result<UiDrawList, UiRenderError> {
+    extract_draw_list_with_input_and_optional_custom_paint(
+        root,
+        layout,
+        tokens,
+        input,
+        visuals,
+        Some(custom_paint),
+        clip,
+        limits,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The shared extractor intentionally mirrors public input and clipping parameters"
+)]
+fn extract_draw_list_with_input_and_optional_custom_paint(
+    root: &Widget,
+    layout: &UiLayout,
+    tokens: UiTokens,
+    input: &UiInputState,
+    visuals: UiVisualStyle,
+    custom_paint: Option<&mut UiCustomPaintRegistry>,
+    clip: Option<UiClipRect>,
+    limits: UiRenderLimits,
+) -> Result<UiDrawList, UiRenderError> {
     let mut rectangles = Vec::new();
     {
         let mut context = ExtractionContext {
@@ -532,6 +873,7 @@ pub fn extract_draw_list_with_input_clipped(
             focused: input.focused(),
             limits,
             clip,
+            custom_paint,
             rectangles: &mut rectangles,
             focused_bounds: None,
         };
@@ -781,6 +1123,7 @@ struct ExtractionContext<'a> {
     focused: Option<WidgetId>,
     limits: UiRenderLimits,
     clip: Option<UiClipRect>,
+    custom_paint: Option<&'a mut UiCustomPaintRegistry>,
     rectangles: &'a mut Vec<UiRectangle>,
     focused_bounds: Option<yuyib_ui::Rect>,
 }
@@ -823,6 +1166,26 @@ fn extract_widget(
                 context.limits,
                 context.rectangles,
             )?;
+        }
+    }
+    if let Some(custom_paint) = context.custom_paint.as_deref_mut() {
+        let capacity = context
+            .limits
+            .max_rectangles
+            .saturating_sub(context.rectangles.len());
+        let rectangles = custom_paint.paint_widget(
+            UiCustomPaintContext {
+                widget,
+                bounds,
+                clip,
+                tokens: context.tokens,
+                input: context.input,
+            },
+            capacity,
+            context.limits,
+        )?;
+        for rectangle in rectangles {
+            push_rectangle(rectangle, context.limits, context.rectangles)?;
         }
     }
     for child in widget.children() {
@@ -1319,6 +1682,91 @@ mod tests {
     }
 
     #[test]
+    fn custom_paint_runs_inside_custom_widget_paint_order() {
+        let custom = id("custom-slider");
+        let tree = UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(
+                Widget::custom(custom, LayoutKind::Absolute).with_constraints(
+                    yuyib_ui::LayoutConstraints::auto()
+                        .with_width(yuyib_ui::Dimension::Points(80))
+                        .with_height(yuyib_ui::Dimension::Points(20)),
+                ),
+            )
+            .child(Widget::button(id("after"), "After"))
+            .build()
+            .expect("tree");
+        let layout = yuyib_ui::layout(&tree, Size::new(100, 100)).expect("layout");
+        let mut painters = UiCustomPaintRegistry::default();
+        painters.on_paint(custom, move |context, canvas| {
+            assert_eq!(context.widget().id(), custom);
+            assert_eq!(context.bounds().size, Size::new(80, 20));
+            canvas.fill(Color::rgb(10, 20, 30));
+            canvas.rectangle(
+                yuyib_ui::Rect {
+                    origin: yuyib_ui::Point::new(10, 5),
+                    size: Size::new(20, 10),
+                },
+                Color::rgb(40, 50, 60),
+            );
+        });
+
+        let list = extract_draw_list_with_input_and_custom_paint(
+            tree.root(),
+            &layout,
+            UiTokens::default(),
+            &UiInputState::default(),
+            UiVisualStyle::none(),
+            &mut painters,
+            UiRenderLimits::default(),
+        )
+        .expect("draw list");
+
+        assert_eq!(
+            list.rectangles()
+                .iter()
+                .map(|rectangle| rectangle.widget)
+                .collect::<Vec<_>>(),
+            vec![custom, custom, id("after")]
+        );
+        assert_eq!(list.rectangles()[0].color, Color::rgb(10, 20, 30));
+        assert_eq!(list.rectangles()[1].color, Color::rgb(40, 50, 60));
+    }
+
+    #[test]
+    fn custom_paint_respects_the_shared_rectangle_budget() {
+        let custom = id("custom");
+        let tree = UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(Widget::custom(custom, LayoutKind::Absolute))
+            .build()
+            .expect("tree");
+        let layout = yuyib_ui::layout(&tree, Size::new(100, 100)).expect("layout");
+        let mut painters = UiCustomPaintRegistry::default();
+        painters.on_paint(custom, |_context, canvas| {
+            canvas.fill(Color::rgb(1, 2, 3));
+            canvas.fill(Color::rgb(4, 5, 6));
+        });
+
+        assert!(matches!(
+            extract_draw_list_with_input_and_custom_paint(
+                tree.root(),
+                &layout,
+                UiTokens::default(),
+                &UiInputState::default(),
+                UiVisualStyle::none(),
+                &mut painters,
+                UiRenderLimits {
+                    max_rectangles: 1,
+                    max_images: 100_000,
+                },
+            ),
+            Err(UiRenderError::TooManyRectangles {
+                actual: 2,
+                limit: 1
+            })
+        ));
+    }
+
+    #[test]
     fn extraction_rejects_bounded_rectangle_overflow() {
         let tree = UiBuilder::new(id("root"), LayoutKind::Column)
             .child(Widget::button(id("one"), "One"))
@@ -1623,7 +2071,9 @@ mod tests {
             UiRenderLimits::default(),
         )
         .expect("draw list");
-        let thumb_color = UiVisualStyle::default().scroll_thumb().expect("default thumb");
+        let thumb_color = UiVisualStyle::default()
+            .scroll_thumb()
+            .expect("default thumb");
         let thumb = list
             .rectangles()
             .iter()
@@ -1744,9 +2194,13 @@ mod tests {
             origin: yuyib_ui::Point::new(0, 0),
             size: Size::new(12, 12),
         });
-        let clipped =
-            extract_image_draw_list_clipped(tree.root(), &layout, Some(clip), UiRenderLimits::default())
-                .expect("clipped images");
+        let clipped = extract_image_draw_list_clipped(
+            tree.root(),
+            &layout,
+            Some(clip),
+            UiRenderLimits::default(),
+        )
+        .expect("clipped images");
         assert_eq!(clipped.quads().len(), 1);
         assert_eq!(clipped.quads()[0].widget, id("a"));
         assert_eq!(clipped.quads()[0].bounds.size, Size::new(12, 12));
@@ -1770,7 +2224,10 @@ mod tests {
                     max_images: 1,
                 },
             ),
-            Err(UiRenderError::TooManyImages { actual: 2, limit: 1 })
+            Err(UiRenderError::TooManyImages {
+                actual: 2,
+                limit: 1
+            })
         ));
     }
 }

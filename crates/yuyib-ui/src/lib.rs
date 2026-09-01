@@ -417,6 +417,13 @@ impl fmt::Display for UiImageId {
 pub enum WidgetKind {
     /// Structural container.
     Container(LayoutKind),
+    /// Application-defined structural and interactive element.
+    ///
+    /// This is the native-UI equivalent of an editable panel: Yuyib owns its
+    /// retained layout and hit testing while the application may attach a
+    /// [`UiBehaviorRegistry`] and a renderer-side custom paint callback. The
+    /// layout kind controls its children exactly as for [`Self::Container`].
+    Custom(LayoutKind),
     /// Bounded vertical viewport with exactly one column content child.
     ScrollView,
     /// Thin divider between layout areas.
@@ -439,8 +446,12 @@ impl WidgetKind {
     fn interactive(&self) -> bool {
         matches!(
             self,
-            Self::Button(_) | Self::Checkbox(_, _) | Self::Toggle(_, _)
+            Self::Button(_) | Self::Checkbox(_, _) | Self::Toggle(_, _) | Self::Custom(_)
         )
+    }
+
+    const fn is_custom(&self) -> bool {
+        matches!(self, Self::Custom(_))
     }
 }
 
@@ -462,6 +473,24 @@ impl Widget {
         Self {
             id,
             kind: WidgetKind::Container(kind),
+            enabled: true,
+            constraints: LayoutConstraints::default(),
+            style: WidgetStyle::default(),
+            children: Vec::new(),
+        }
+    }
+
+    /// Creates an empty application-defined element.
+    ///
+    /// It is focusable and pointer-interactive by default. Attach paint with
+    /// `yuyib_ui_render::UiCustomPaintRegistry` and receive detailed pointer
+    /// transitions with [`UiBehaviorRegistry`]. Use [`Self::with_children`]
+    /// to compose regular widgets inside the element.
+    #[must_use]
+    pub fn custom(id: WidgetId, kind: LayoutKind) -> Self {
+        Self {
+            id,
+            kind: WidgetKind::Custom(kind),
             enabled: true,
             constraints: LayoutConstraints::default(),
             style: WidgetStyle::default(),
@@ -640,6 +669,7 @@ impl Widget {
         match &self.kind {
             WidgetKind::Image(id) => Some(*id),
             WidgetKind::Container(_)
+            | WidgetKind::Custom(_)
             | WidgetKind::ScrollView
             | WidgetKind::Separator
             | WidgetKind::Spacer
@@ -663,6 +693,7 @@ impl Widget {
             | WidgetKind::Checkbox(text, _)
             | WidgetKind::Toggle(text, _) => Some(text),
             WidgetKind::Container(_)
+            | WidgetKind::Custom(_)
             | WidgetKind::ScrollView
             | WidgetKind::Separator
             | WidgetKind::Spacer
@@ -676,6 +707,7 @@ impl Widget {
         match &self.kind {
             WidgetKind::Checkbox(_, checked) | WidgetKind::Toggle(_, checked) => Some(*checked),
             WidgetKind::Container(_)
+            | WidgetKind::Custom(_)
             | WidgetKind::ScrollView
             | WidgetKind::Separator
             | WidgetKind::Spacer
@@ -701,6 +733,12 @@ impl Widget {
     #[must_use]
     pub const fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Returns whether this is an application-defined custom element.
+    #[must_use]
+    pub const fn is_custom(&self) -> bool {
+        self.kind.is_custom()
     }
 
     /// Returns children.
@@ -762,6 +800,13 @@ impl UiBuilder {
     #[must_use]
     pub const fn with_limits(mut self, limits: UiLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Applies style to the root container.
+    #[must_use]
+    pub const fn with_style(mut self, style: WidgetStyle) -> Self {
+        self.root.style = style;
         self
     }
 
@@ -1138,6 +1183,222 @@ impl UiInputState {
     }
 }
 
+/// Pointer transition delivered to an application-defined [`Widget::custom`]
+/// element.
+///
+/// Coordinates remain in the logical-pixel space used to lay out the UI.
+/// `local_position` is deliberately not clamped, so a dragged control can
+/// distinguish a pointer that has left its bounds from one at its edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiCustomPointerEvent {
+    widget: WidgetId,
+    kind: UiCustomPointerEventKind,
+    position: Point,
+    local_position: Point,
+    bounds: Rect,
+}
+
+impl UiCustomPointerEvent {
+    /// Returns the custom element receiving the event.
+    #[must_use]
+    pub const fn widget(self) -> WidgetId {
+        self.widget
+    }
+
+    /// Returns the pointer transition kind.
+    #[must_use]
+    pub const fn kind(self) -> UiCustomPointerEventKind {
+        self.kind
+    }
+
+    /// Returns the UI-global logical pointer position.
+    #[must_use]
+    pub const fn position(self) -> Point {
+        self.position
+    }
+
+    /// Returns the pointer position relative to [`Self::bounds`].
+    #[must_use]
+    pub const fn local_position(self) -> Point {
+        self.local_position
+    }
+
+    /// Returns the current layout bounds of the receiving element.
+    #[must_use]
+    pub const fn bounds(self) -> Rect {
+        self.bounds
+    }
+}
+
+/// Kind of pointer transition delivered to an application-defined element.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiCustomPointerEventKind {
+    /// Pointer entered the element's hit bounds.
+    Enter,
+    /// Pointer left the element's hit bounds.
+    Leave,
+    /// Pointer moved while hovered or while the element owns an active press.
+    Move,
+    /// Primary pointer button was pressed inside the element.
+    Press,
+    /// Primary pointer button was released after an element press.
+    Release,
+    /// Primary pointer button was released inside the same element.
+    Click,
+}
+
+/// Detailed custom-element interaction transition.
+///
+/// It is emitted in addition to the stable coarse [`UiAction`] variants used
+/// by built-in widgets. A pressed custom element continues to receive `Move`
+/// and `Release` transitions outside its bounds, which is the pointer-capture
+/// behaviour needed for sliders, splitters and bespoke scrollbars.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiCustomEvent {
+    /// Pointer event with layout-relative coordinates.
+    Pointer(UiCustomPointerEvent),
+    /// Enter or Space activated a focused custom element.
+    Activated(WidgetId),
+}
+
+impl UiCustomEvent {
+    /// Returns the custom element receiving the event.
+    #[must_use]
+    pub const fn widget(self) -> WidgetId {
+        match self {
+            Self::Pointer(event) => event.widget(),
+            Self::Activated(widget) => widget,
+        }
+    }
+}
+
+/// Callback registry for [`Widget::custom`] interactions.
+///
+/// The registry intentionally lives outside [`UiTree`]: trees remain cloneable
+/// retained data while callbacks may capture application state. Register a
+/// handler before moving it into `ApplicationUi::with_behaviors`, or call
+/// [`Self::dispatch`] yourself when using the low-level input API.
+#[derive(Default)]
+pub struct UiBehaviorRegistry {
+    handlers: BTreeMap<WidgetId, Vec<UiCustomEventHandler>>,
+}
+
+type UiCustomEventHandler = Box<dyn FnMut(UiCustomEvent)>;
+
+impl UiBehaviorRegistry {
+    /// Registers one callback for detailed events of `widget`.
+    ///
+    /// Multiple callbacks retain registration order. The callback only runs
+    /// for [`UiAction::Custom`] transitions addressed to that widget.
+    pub fn on_event(
+        &mut self,
+        widget: WidgetId,
+        handler: impl FnMut(UiCustomEvent) + 'static,
+    ) -> &mut Self {
+        self.handlers
+            .entry(widget)
+            .or_default()
+            .push(Box::new(handler));
+        self
+    }
+
+    /// Registers one callback for a particular custom pointer transition.
+    ///
+    /// This is the shared implementation behind [`Self::on_hover`],
+    /// [`Self::on_press`], [`Self::on_pointer_move`], [`Self::on_release`]
+    /// and [`Self::on_click`]. Use [`Self::on_event`] when one control needs
+    /// to coordinate several transitions itself.
+    pub fn on_pointer_event(
+        &mut self,
+        widget: WidgetId,
+        kind: UiCustomPointerEventKind,
+        mut handler: impl FnMut(UiCustomPointerEvent) + 'static,
+    ) -> &mut Self {
+        self.on_event(widget, move |event| {
+            if let UiCustomEvent::Pointer(pointer) = event
+                && pointer.kind() == kind
+            {
+                handler(pointer);
+            }
+        })
+    }
+
+    /// Runs when the pointer enters `widget`.
+    pub fn on_hover(
+        &mut self,
+        widget: WidgetId,
+        handler: impl FnMut(UiCustomPointerEvent) + 'static,
+    ) -> &mut Self {
+        self.on_pointer_event(widget, UiCustomPointerEventKind::Enter, handler)
+    }
+
+    /// Runs on pointer movement over `widget` and while it owns a press.
+    pub fn on_pointer_move(
+        &mut self,
+        widget: WidgetId,
+        handler: impl FnMut(UiCustomPointerEvent) + 'static,
+    ) -> &mut Self {
+        self.on_pointer_event(widget, UiCustomPointerEventKind::Move, handler)
+    }
+
+    /// Runs when the primary pointer button is pressed inside `widget`.
+    pub fn on_press(
+        &mut self,
+        widget: WidgetId,
+        handler: impl FnMut(UiCustomPointerEvent) + 'static,
+    ) -> &mut Self {
+        self.on_pointer_event(widget, UiCustomPointerEventKind::Press, handler)
+    }
+
+    /// Runs when the primary pointer button is released after a `widget` press.
+    pub fn on_release(
+        &mut self,
+        widget: WidgetId,
+        handler: impl FnMut(UiCustomPointerEvent) + 'static,
+    ) -> &mut Self {
+        self.on_pointer_event(widget, UiCustomPointerEventKind::Release, handler)
+    }
+
+    /// Runs when the primary pointer is released inside the same `widget`.
+    pub fn on_click(
+        &mut self,
+        widget: WidgetId,
+        handler: impl FnMut(UiCustomPointerEvent) + 'static,
+    ) -> &mut Self {
+        self.on_pointer_event(widget, UiCustomPointerEventKind::Click, handler)
+    }
+
+    /// Runs after keyboard activation through Enter or Space.
+    pub fn on_activate(
+        &mut self,
+        widget: WidgetId,
+        mut handler: impl FnMut(WidgetId) + 'static,
+    ) -> &mut Self {
+        self.on_event(widget, move |event| {
+            if let UiCustomEvent::Activated(id) = event {
+                handler(id);
+            }
+        })
+    }
+
+    /// Dispatches detailed custom transitions in a UI response.
+    ///
+    /// Built-in actions are deliberately ignored: use the ordinary
+    /// `ApplicationUi::with_winit_input` response callback for them.
+    pub fn dispatch(&mut self, response: &UiResponse) {
+        for action in response.actions() {
+            let UiAction::Custom(event) = *action else {
+                continue;
+            };
+            if let Some(handlers) = self.handlers.get_mut(&event.widget()) {
+                for handler in handlers {
+                    handler(event);
+                }
+            }
+        }
+    }
+}
+
 /// Semantic interaction transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiAction {
@@ -1156,6 +1417,8 @@ pub enum UiAction {
     /// A viewport accepted wheel or scrollbar-thumb input and changed its
     /// retained offset.
     Scrolled(WidgetId),
+    /// Detailed event from an application-defined [`Widget::custom`] element.
+    Custom(UiCustomEvent),
 }
 
 /// Input response.
@@ -1190,6 +1453,10 @@ impl UiResponse {
 /// # Errors
 ///
 /// Returns an error if layout does not represent every widget in tree.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Pointer hit testing and capture transitions stay together to preserve their ordering invariant"
+)]
 pub fn handle_input(
     tree: &UiTree,
     layout: &UiLayout,
@@ -1249,28 +1516,86 @@ pub fn handle_input(
             && layout.clip(*id).is_none_or(|clip| clip.contains(point))
     });
     let mut actions = Vec::new();
-    if target != state.hovered {
+    let previous_hovered = state.hovered;
+    if target != previous_hovered {
         state.hovered = target;
+        if let Some(id) = previous_hovered {
+            push_custom_pointer_action(
+                tree,
+                layout,
+                &mut actions,
+                id,
+                UiCustomPointerEventKind::Leave,
+                point,
+            );
+        }
         if let Some(id) = target {
             actions.push(UiAction::Hovered(id));
+            push_custom_pointer_action(
+                tree,
+                layout,
+                &mut actions,
+                id,
+                UiCustomPointerEventKind::Enter,
+                point,
+            );
         }
     }
     match input {
-        PointerInput::Move(_) => {}
+        PointerInput::Move(_) => {
+            let recipient = state.pressed.or(target);
+            if let Some(id) = recipient {
+                push_custom_pointer_action(
+                    tree,
+                    layout,
+                    &mut actions,
+                    id,
+                    UiCustomPointerEventKind::Move,
+                    point,
+                );
+            }
+        }
         PointerInput::PrimaryDown(_) => {
             state.pressed = target;
             if let Some(id) = target {
                 actions.push(UiAction::Pressed(id));
+                push_custom_pointer_action(
+                    tree,
+                    layout,
+                    &mut actions,
+                    id,
+                    UiCustomPointerEventKind::Press,
+                    point,
+                );
             }
         }
         PointerInput::PrimaryUp(_) => {
-            if state.pressed == target
+            let pressed = state.pressed;
+            if let Some(id) = pressed {
+                push_custom_pointer_action(
+                    tree,
+                    layout,
+                    &mut actions,
+                    id,
+                    UiCustomPointerEventKind::Release,
+                    point,
+                );
+            }
+            if pressed == target
                 && let Some(id) = target
             {
                 actions.push(UiAction::Clicked(id));
                 if let Some(checked) = toggled_state_for_id(tree.root(), id) {
                     actions.push(UiAction::Toggled(id, checked));
                 }
+                push_custom_pointer_action(
+                    tree,
+                    layout,
+                    &mut actions,
+                    id,
+                    UiCustomPointerEventKind::Click,
+                    point,
+                );
             }
             state.pressed = None;
         }
@@ -1629,6 +1954,37 @@ fn toggled_state_for_id(widget: &Widget, id: WidgetId) -> Option<bool> {
         .find_map(|child| toggled_state_for_id(child, id))
 }
 
+fn push_custom_pointer_action(
+    tree: &UiTree,
+    layout: &UiLayout,
+    actions: &mut Vec<UiAction>,
+    id: WidgetId,
+    kind: UiCustomPointerEventKind,
+    point: Point,
+) {
+    let Some(widget) = widget_by_id(tree.root(), id) else {
+        return;
+    };
+    if !widget.is_custom() {
+        return;
+    }
+    let Some(bounds) = layout.bounds(id) else {
+        return;
+    };
+    actions.push(UiAction::Custom(UiCustomEvent::Pointer(
+        UiCustomPointerEvent {
+            widget: id,
+            kind,
+            position: point,
+            local_position: Point::new(
+                point.x.saturating_sub(bounds.origin.x),
+                point.y.saturating_sub(bounds.origin.y),
+            ),
+            bounds,
+        },
+    )));
+}
+
 /// Handles one platform-normalised keyboard command.
 ///
 /// Focus traversal follows [`UiLayout::focus_order`] and wraps in either
@@ -1686,6 +2042,9 @@ pub fn handle_keyboard_input(
                 actions.push(UiAction::Activated(id));
                 if let Some(checked) = toggled_state_for_id(tree.root(), id) {
                     actions.push(UiAction::Toggled(id, checked));
+                }
+                if widget_by_id(tree.root(), id).is_some_and(Widget::is_custom) {
+                    actions.push(UiAction::Custom(UiCustomEvent::Activated(id)));
                 }
             }
         }
@@ -1770,7 +2129,7 @@ fn validate_widget(
     }
     if !matches!(
         widget.kind,
-        WidgetKind::Container(_) | WidgetKind::ScrollView
+        WidgetKind::Container(_) | WidgetKind::Custom(_) | WidgetKind::ScrollView
     ) && !widget.children.is_empty()
     {
         return Err(UiError::NonContainerHasChildren(widget.id));
@@ -1798,7 +2157,7 @@ fn layout_widget(widget: &Widget, rect: Rect, output: &mut UiLayout) -> Result<(
         output.interactive.insert(widget.id);
     }
     let kind = match widget.kind {
-        WidgetKind::Container(kind) => kind,
+        WidgetKind::Container(kind) | WidgetKind::Custom(kind) => kind,
         WidgetKind::ScrollView => LayoutKind::Column,
         _ => return Ok(()),
     };
@@ -1960,7 +2319,7 @@ fn layout_widget_with_measurer<M: UiMeasurer>(
         output.interactive.insert(widget.id);
     }
     let kind = match widget.kind {
-        WidgetKind::Container(kind) => kind,
+        WidgetKind::Container(kind) | WidgetKind::Custom(kind) => kind,
         WidgetKind::ScrollView => LayoutKind::Column,
         _ => return Ok(()),
     };
@@ -2200,6 +2559,16 @@ fn scroll_view_by_id(widget: &Widget, id: WidgetId) -> Option<&Widget> {
         .find_map(|child| scroll_view_by_id(child, id))
 }
 
+fn widget_by_id(widget: &Widget, id: WidgetId) -> Option<&Widget> {
+    if widget.id == id {
+        return Some(widget);
+    }
+    widget
+        .children
+        .iter()
+        .find_map(|child| widget_by_id(child, id))
+}
+
 fn to_i32(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
@@ -2397,6 +2766,117 @@ mod tests {
         .expect("up");
         assert_eq!(up.actions(), &[UiAction::Clicked(id("front"))]);
         assert_eq!(state.focused(), None);
+    }
+
+    #[test]
+    fn custom_element_captures_drag_and_reports_local_pointer_coordinates() {
+        let slider = id("slider");
+        let tree = UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(
+                Widget::custom(slider, LayoutKind::Absolute).with_constraints(
+                    LayoutConstraints::auto()
+                        .with_width(Dimension::Points(100))
+                        .with_height(Dimension::Points(24)),
+                ),
+            )
+            .build()
+            .expect("custom tree");
+        let layout = layout(&tree, Size::new(120, 80)).expect("layout");
+        let mut state = UiInputState::default();
+
+        let down = handle_input(
+            &tree,
+            &layout,
+            &mut state,
+            PointerInput::PrimaryDown(Point::new(20, 8)),
+        )
+        .expect("custom down");
+        assert!(
+            down.actions()
+                .contains(&UiAction::Custom(UiCustomEvent::Pointer(
+                    UiCustomPointerEvent {
+                        widget: slider,
+                        kind: UiCustomPointerEventKind::Press,
+                        position: Point::new(20, 8),
+                        local_position: Point::new(20, 8),
+                        bounds: Rect {
+                            origin: Point::new(0, 0),
+                            size: Size::new(100, 24),
+                        },
+                    },
+                )))
+        );
+
+        let moved = handle_input(
+            &tree,
+            &layout,
+            &mut state,
+            PointerInput::Move(Point::new(140, 8)),
+        )
+        .expect("captured move");
+        assert!(
+            moved
+                .actions()
+                .contains(&UiAction::Custom(UiCustomEvent::Pointer(
+                    UiCustomPointerEvent {
+                        widget: slider,
+                        kind: UiCustomPointerEventKind::Move,
+                        position: Point::new(140, 8),
+                        local_position: Point::new(140, 8),
+                        bounds: Rect {
+                            origin: Point::new(0, 0),
+                            size: Size::new(100, 24),
+                        },
+                    },
+                )))
+        );
+
+        let up = handle_input(
+            &tree,
+            &layout,
+            &mut state,
+            PointerInput::PrimaryUp(Point::new(140, 8)),
+        )
+        .expect("captured release");
+        assert!(
+            up.actions()
+                .contains(&UiAction::Custom(UiCustomEvent::Pointer(
+                    UiCustomPointerEvent {
+                        widget: slider,
+                        kind: UiCustomPointerEventKind::Release,
+                        position: Point::new(140, 8),
+                        local_position: Point::new(140, 8),
+                        bounds: Rect {
+                            origin: Point::new(0, 0),
+                            size: Size::new(100, 24),
+                        },
+                    },
+                )))
+        );
+    }
+
+    #[test]
+    fn behavior_registry_only_dispatches_custom_events_to_matching_widget() {
+        use std::{cell::Cell, rc::Rc};
+
+        let expected = id("custom");
+        let received = Rc::new(Cell::new(0_u32));
+        let mut registry = UiBehaviorRegistry::default();
+        let observed = Rc::clone(&received);
+        registry.on_activate(expected, move |widget| {
+            if widget == expected {
+                observed.set(observed.get().saturating_add(1));
+            }
+        });
+        registry.dispatch(&UiResponse {
+            target: Some(expected),
+            actions: vec![
+                UiAction::Hovered(expected),
+                UiAction::Custom(UiCustomEvent::Activated(expected)),
+                UiAction::Custom(UiCustomEvent::Activated(id("other"))),
+            ],
+        });
+        assert_eq!(received.get(), 1);
     }
 
     #[test]
