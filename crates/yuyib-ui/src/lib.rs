@@ -419,17 +419,28 @@ pub enum WidgetKind {
     Container(LayoutKind),
     /// Bounded vertical viewport with exactly one column content child.
     ScrollView,
+    /// Thin divider between layout areas.
+    Separator,
+    /// Spacer for fixed logical gaps that participates only in layout.
+    Spacer,
     /// Non-interactive text semantic.
     Label(String),
     /// Pressable semantic action.
     Button(String),
+    /// Boolean control that typically flips state and emits [`UiAction::Toggled`].
+    Checkbox(String, bool),
+    /// Boolean control that typically flips state and emits [`UiAction::Toggled`].
+    Toggle(String, bool),
     /// Non-interactive image/icon keyed by [`UiImageId`].
     Image(UiImageId),
 }
 
 impl WidgetKind {
     fn interactive(&self) -> bool {
-        matches!(self, Self::Button(_))
+        matches!(
+            self,
+            Self::Button(_) | Self::Checkbox(_, _) | Self::Toggle(_, _)
+        )
     }
 }
 
@@ -490,6 +501,64 @@ impl Widget {
         }
     }
 
+    /// Creates a non-interactive thin separator.
+    #[must_use]
+    pub fn separator(id: WidgetId) -> Self {
+        Self {
+            id,
+            kind: WidgetKind::Separator,
+            enabled: true,
+            constraints: LayoutConstraints::default(),
+            style: WidgetStyle::default()
+                .with_background(ColorToken::SurfaceMuted)
+                .with_min_size(Size::new(0, 2)),
+            children: Vec::new(),
+        }
+    }
+
+    /// Creates a layout spacer.
+    #[must_use]
+    pub fn spacer(id: WidgetId) -> Self {
+        Self {
+            id,
+            kind: WidgetKind::Spacer,
+            enabled: true,
+            constraints: LayoutConstraints::default(),
+            style: WidgetStyle::default().with_min_size(Size::new(8, 8)),
+            children: Vec::new(),
+        }
+    }
+
+    /// Creates a checkbox control with explicit checked state.
+    #[must_use]
+    pub fn checkbox(id: WidgetId, text: impl Into<String>, checked: bool) -> Self {
+        Self {
+            id,
+            kind: WidgetKind::Checkbox(text.into(), checked),
+            enabled: true,
+            constraints: LayoutConstraints::default(),
+            style: WidgetStyle::default()
+                .with_foreground(ColorToken::Text)
+                .with_min_size(Size::new(0, 26)),
+            children: Vec::new(),
+        }
+    }
+
+    /// Creates a toggle control with explicit checked state.
+    #[must_use]
+    pub fn toggle(id: WidgetId, text: impl Into<String>, checked: bool) -> Self {
+        Self {
+            id,
+            kind: WidgetKind::Toggle(text.into(), checked),
+            enabled: true,
+            constraints: LayoutConstraints::default(),
+            style: WidgetStyle::default()
+                .with_foreground(ColorToken::Text)
+                .with_min_size(Size::new(0, 26)),
+            children: Vec::new(),
+        }
+    }
+
     /// Creates a non-interactive image/icon slot.
     ///
     /// Intrinsic size defaults to 24×24; override with
@@ -530,8 +599,9 @@ impl Widget {
     /// Sets whether this widget may receive user interaction.
     ///
     /// Disabled buttons remain in layout and paint order but are excluded from
-    /// pointer hit-testing and keyboard focus traversal. Containers and labels
-    /// are non-interactive regardless of this flag.
+    /// pointer hit-testing and keyboard focus traversal. Containers, labels,
+    /// media, separators and spacers are non-interactive regardless of this
+    /// flag.
     #[must_use]
     pub const fn with_enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
@@ -571,8 +641,12 @@ impl Widget {
             WidgetKind::Image(id) => Some(*id),
             WidgetKind::Container(_)
             | WidgetKind::ScrollView
+            | WidgetKind::Separator
+            | WidgetKind::Spacer
             | WidgetKind::Label(_)
-            | WidgetKind::Button(_) => None,
+            | WidgetKind::Button(_)
+            | WidgetKind::Checkbox(_, _)
+            | WidgetKind::Toggle(_, _) => None,
         }
     }
 
@@ -584,8 +658,30 @@ impl Widget {
     #[must_use]
     pub fn text(&self) -> Option<&str> {
         match &self.kind {
-            WidgetKind::Label(text) | WidgetKind::Button(text) => Some(text),
-            WidgetKind::Container(_) | WidgetKind::ScrollView | WidgetKind::Image(_) => None,
+            WidgetKind::Label(text)
+            | WidgetKind::Button(text)
+            | WidgetKind::Checkbox(text, _)
+            | WidgetKind::Toggle(text, _) => Some(text),
+            WidgetKind::Container(_)
+            | WidgetKind::ScrollView
+            | WidgetKind::Separator
+            | WidgetKind::Spacer
+            | WidgetKind::Image(_) => None,
+        }
+    }
+
+    /// Returns `true` when this widget is checked.
+    #[must_use]
+    pub const fn is_checked(&self) -> Option<bool> {
+        match &self.kind {
+            WidgetKind::Checkbox(_, checked) | WidgetKind::Toggle(_, checked) => Some(*checked),
+            WidgetKind::Container(_)
+            | WidgetKind::ScrollView
+            | WidgetKind::Separator
+            | WidgetKind::Spacer
+            | WidgetKind::Label(_)
+            | WidgetKind::Button(_)
+            | WidgetKind::Image(_) => None,
         }
     }
 
@@ -730,6 +826,26 @@ impl ChildrenBuilder {
     pub fn button(&mut self, id: WidgetId, text: impl Into<String>) -> &mut Self {
         self.child(Widget::button(id, text))
     }
+
+    /// Adds checkbox child.
+    pub fn checkbox(&mut self, id: WidgetId, text: impl Into<String>, checked: bool) -> &mut Self {
+        self.child(Widget::checkbox(id, text, checked))
+    }
+
+    /// Adds toggle child.
+    pub fn toggle(&mut self, id: WidgetId, text: impl Into<String>, checked: bool) -> &mut Self {
+        self.child(Widget::toggle(id, text, checked))
+    }
+
+    /// Adds separator child.
+    pub fn separator(&mut self, id: WidgetId) -> &mut Self {
+        self.child(Widget::separator(id))
+    }
+
+    /// Adds spacer child.
+    pub fn spacer(&mut self, id: WidgetId) -> &mut Self {
+        self.child(Widget::spacer(id))
+    }
 }
 
 /// Deterministic layout output.
@@ -760,7 +876,7 @@ impl UiLayout {
         &self.paint_order
     }
 
-    /// Iterates enabled buttons in deterministic keyboard-focus order.
+    /// Iterates enabled interactive widgets in deterministic keyboard-focus order.
     ///
     /// The order is a depth-first preorder traversal of the validated retained
     /// tree, matching [`Self::paint_order`]. Widget identifiers are unique by
@@ -805,7 +921,8 @@ pub fn layout_with_input_state(
 
 /// Supplies intrinsic content size for semantic widgets during layout.
 ///
-/// The layout engine calls this only for labels and buttons that have at least
+/// The layout engine calls this only for widgets that expose text
+/// and have at least
 /// one [`Dimension::Auto`] axis. `available` is the inner size of the direct
 /// parent. A measurer may be called more than once while flow space is
 /// calculated, so it should be deterministic and normally cache expensive
@@ -922,13 +1039,13 @@ pub enum PointerInput {
 /// process text composition, IME, keyboard layout, or accessibility APIs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyboardInput {
-    /// Moves focus to the next enabled button, wrapping after the last one.
+    /// Moves focus to the next enabled interactive widget, wrapping after the last one.
     Tab,
-    /// Moves focus to the previous enabled button, wrapping before the first one.
+    /// Moves focus to the previous enabled interactive widget, wrapping before the first one.
     ShiftTab,
-    /// Activates the focused enabled button.
+    /// Activates the focused enabled interactive widget.
     Enter,
-    /// Activates the focused enabled button.
+    /// Activates the focused enabled interactive widget.
     Space,
 }
 
@@ -999,7 +1116,7 @@ impl UiInputState {
         self.pressed
     }
 
-    /// Returns the keyboard-focused enabled button, if any.
+    /// Returns the keyboard-focused enabled interactive widget, if any.
     #[must_use]
     pub const fn focused(&self) -> Option<WidgetId> {
         self.focused
@@ -1030,9 +1147,11 @@ pub enum UiAction {
     Pressed(WidgetId),
     /// Pointer released on the same button.
     Clicked(WidgetId),
-    /// Keyboard focus moved to an enabled button.
+    /// Checkbox/Toggle was activated and its checked value was toggled.
+    Toggled(WidgetId, bool),
+    /// Keyboard focus moved to an enabled interactive widget.
     Focused(WidgetId),
-    /// Focused button was activated with Enter or Space.
+    /// Focused interactive widget was activated with Enter or Space.
     Activated(WidgetId),
     /// A viewport accepted wheel or scrollbar-thumb input and changed its
     /// retained offset.
@@ -1060,10 +1179,11 @@ impl UiResponse {
     }
 }
 
-/// Hit-tests a pointer sample and emits semantic button / scrollbar events.
+/// Hit-tests a pointer sample and emits semantic interactive / scrollbar events.
 ///
 /// Scrollbar thumb drag has pointer capture: while a drag is active, Move and
-/// PrimaryUp update that viewport and do not hit-test buttons. PrimaryDown on
+/// PrimaryUp update that viewport and do not hit-test interactive widgets.
+/// PrimaryDown on
 /// the thumb starts a drag; PrimaryDown on the track jumps the thumb under the
 /// pointer and starts a drag. Wheel scrolling remains [`handle_scroll_input`].
 ///
@@ -1148,6 +1268,9 @@ pub fn handle_input(
                 && let Some(id) = target
             {
                 actions.push(UiAction::Clicked(id));
+                if let Some(checked) = toggled_state_for_id(tree.root(), id) {
+                    actions.push(UiAction::Toggled(id, checked));
+                }
             }
             state.pressed = None;
         }
@@ -1272,9 +1395,7 @@ fn hit_scrollbar(
             continue;
         };
         if !metrics.viewport.contains(point)
-            || layout
-                .clip(id)
-                .is_some_and(|clip| !clip.contains(point))
+            || layout.clip(id).is_some_and(|clip| !clip.contains(point))
         {
             continue;
         }
@@ -1345,9 +1466,7 @@ fn scroll_view_metrics(
     let Some(widget) = scroll_view_by_id(tree.root(), id) else {
         return Ok(None);
     };
-    let viewport = layout
-        .bounds(id)
-        .ok_or(UiError::UnknownLayoutWidget(id))?;
+    let viewport = layout.bounds(id).ok_or(UiError::UnknownLayoutWidget(id))?;
     let content = widget
         .children
         .first()
@@ -1497,13 +1616,27 @@ fn set_scroll_offset(
     })
 }
 
+fn toggled_state_for_id(widget: &Widget, id: WidgetId) -> Option<bool> {
+    if widget.id == id {
+        return match &widget.kind {
+            WidgetKind::Checkbox(_, checked) | WidgetKind::Toggle(_, checked) => Some(!checked),
+            _ => None,
+        };
+    }
+    widget
+        .children
+        .iter()
+        .find_map(|child| toggled_state_for_id(child, id))
+}
+
 /// Handles one platform-normalised keyboard command.
 ///
 /// Focus traversal follows [`UiLayout::focus_order`] and wraps in either
 /// direction. A stale focus ID, for example after a host replaces its UI tree
 /// while retaining [`UiInputState`], behaves like no focus: Tab selects the
-/// first enabled button and Shift+Tab selects the last. Enter and Space only
-/// activate a currently enabled focused button.
+/// first enabled interactive widget and Shift+Tab selects the last. Enter and
+/// Space activate a currently focused interactive widget; checkbox/toggle
+/// controls additionally emit [`UiAction::Toggled`].
 ///
 /// Pointer input remains independent: [`handle_input`] does not change
 /// keyboard focus or emit keyboard actions, preserving its existing semantics.
@@ -1551,6 +1684,9 @@ pub fn handle_keyboard_input(
         KeyboardInput::Enter | KeyboardInput::Space => {
             if let Some(id) = target {
                 actions.push(UiAction::Activated(id));
+                if let Some(checked) = toggled_state_for_id(tree.root(), id) {
+                    actions.push(UiAction::Toggled(id, checked));
+                }
             }
         }
     }
@@ -2085,6 +2221,18 @@ mod tests {
             .expect("keyboard test tree")
     }
 
+    fn controls_tree() -> UiTree {
+        UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(Widget::checkbox(id("check"), "Checkbox", false).with_constraints(fill_width()))
+            .child(Widget::toggle(id("toggle"), "Toggle", true).with_constraints(fill_width()))
+            .build()
+            .expect("controls test tree")
+    }
+
+    const fn fill_width() -> LayoutConstraints {
+        LayoutConstraints::auto().with_width(Dimension::Fill)
+    }
+
     struct FixedMeasurer {
         size: Size,
     }
@@ -2410,13 +2558,8 @@ mod tests {
             .expect("layout");
         let mut state = UiInputState::default();
         let viewport = layout.bounds(id("scroll")).expect("viewport");
-        let thumb = vertical_scroll_thumb_bounds(
-            viewport,
-            120,
-            0,
-            SCROLL_THUMB_THICKNESS,
-        )
-        .expect("thumb");
+        let thumb =
+            vertical_scroll_thumb_bounds(viewport, 120, 0, SCROLL_THUMB_THICKNESS).expect("thumb");
         let grab = Point::new(thumb.origin.x + 1, thumb.origin.y + 2);
 
         let down = handle_input(&tree, &layout, &mut state, PointerInput::PrimaryDown(grab))
@@ -2518,10 +2661,93 @@ mod tests {
                     .with_children(vec![Widget::label(id("nested"), "no")]),
             )
             .build();
+        assert!(matches!(result, Err(UiError::NonContainerHasChildren(_))));
+    }
+
+    #[test]
+    fn checkbox_toggle_have_text_and_checked_state_helpers() {
+        let check = Widget::checkbox(id("check"), "Enable sound", false);
+        let toggle = Widget::toggle(id("toggle"), "V-Sync", true);
+        assert_eq!(check.text(), Some("Enable sound"));
+        assert_eq!(check.is_checked(), Some(false));
+        assert_eq!(toggle.text(), Some("V-Sync"));
+        assert_eq!(toggle.is_checked(), Some(true));
+    }
+
+    #[test]
+    fn controls_and_layout_elements_reject_children() {
+        let result = UiBuilder::new(id("root"), LayoutKind::Column)
+            .child(
+                Widget::separator(id("sep")).with_children(vec![Widget::label(id("nested"), "no")]),
+            )
+            .build();
+        assert!(matches!(result, Err(UiError::NonContainerHasChildren(_))));
+
+        let spacer_result = UiBuilder::new(id("root2"), LayoutKind::Column)
+            .child(Widget::spacer(id("gap")).with_children(vec![Widget::label(id("nested"), "no")]))
+            .build();
         assert!(matches!(
-            result,
+            spacer_result,
             Err(UiError::NonContainerHasChildren(_))
         ));
+    }
+
+    #[test]
+    fn checkbox_click_emits_toggled_action() {
+        let tree = controls_tree();
+        let layout = layout(&tree, Size::new(120, 80)).expect("controls layout");
+        let mut state = UiInputState::default();
+
+        let down = handle_input(
+            &tree,
+            &layout,
+            &mut state,
+            PointerInput::PrimaryDown(Point::new(4, 13)),
+        )
+        .expect("check down");
+        assert_eq!(
+            down.actions(),
+            &[
+                UiAction::Hovered(id("check")),
+                UiAction::Pressed(id("check")),
+            ]
+        );
+
+        let up = handle_input(
+            &tree,
+            &layout,
+            &mut state,
+            PointerInput::PrimaryUp(Point::new(4, 10)),
+        )
+        .expect("check up");
+        assert_eq!(
+            up.actions(),
+            &[
+                UiAction::Clicked(id("check")),
+                UiAction::Toggled(id("check"), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn keyboard_activates_toggled_controls_with_updated_value_action() {
+        let tree = controls_tree();
+        let layout = layout(&tree, Size::new(160, 80)).expect("controls layout");
+        let mut state = UiInputState::default();
+
+        let focused = handle_keyboard_input(&tree, &layout, &mut state, KeyboardInput::Tab)
+            .expect("focus check");
+        assert_eq!(focused.actions(), &[UiAction::Focused(id("check"))]);
+
+        let toggled = handle_keyboard_input(&tree, &layout, &mut state, KeyboardInput::Space)
+            .expect("toggle via keyboard");
+        assert_eq!(
+            toggled.actions(),
+            &[
+                UiAction::Activated(id("check")),
+                UiAction::Toggled(id("check"), true)
+            ]
+        );
     }
 
     #[test]

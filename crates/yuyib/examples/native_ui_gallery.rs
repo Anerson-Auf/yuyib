@@ -175,49 +175,100 @@ fn gallery_tree() -> Result<yuyib::ui::UiTree, yuyib::ui::UiError> {
     let overlay_content = DialogueOverlayContent::line("Halt. State your business.")
         .with_speaker("Gate Guard")
         .with_choices(vec![
-            ("dlg-choice:bribe".to_owned(), "Maybe this coin will help?".to_owned()),
-            ("dlg-choice:leave".to_owned(), "I'll come back later.".to_owned()),
+            (
+                "dlg-choice:bribe".to_owned(),
+                "Maybe this coin will help?".to_owned(),
+            ),
+            (
+                "dlg-choice:leave".to_owned(),
+                "I'll come back later.".to_owned(),
+            ),
         ]);
     let _overlay = dialogue_overlay_tree(&overlay_content)?;
 
-    let dialogue_demo =
-        Widget::container(WidgetId::from_key("gallery-dialogue"), LayoutKind::Column)
+    let dialogue_demo = Widget::container(
+        WidgetId::from_key("gallery-dialogue"),
+        LayoutKind::Column,
+    )
+    .with_constraints(fill_both())
+    .with_style(panel)
+    .with_children(vec![
+        Widget::label(WidgetId::from_key("dialogue-title"), "Диалог / выборы (HL)")
+            .with_style(caption_style(note)),
+        Widget::label(
+            WidgetId::from_key("dialogue-help"),
+            "Domain: DialogueSession + StoryFlags. UI: dialogue_overlay_tree + replace_tree.",
+        )
+        .with_style(WidgetStyle::default().with_foreground(ColorToken::Text)),
+        Widget::label(WidgetId::from_key("dlg-speaker"), "Gate Guard").with_style(
+            WidgetStyle::default()
+                .with_foreground(ColorToken::Custom(Color::rgb(250, 204, 21)))
+                .with_padding(Insets::all(4)),
+        ),
+        Widget::label(WidgetId::from_key("dlg-body"), "Halt. State your business.").with_style(
+            WidgetStyle::default()
+                .with_foreground(ColorToken::Text)
+                .with_padding(Insets::all(4)),
+        ),
+        Widget::button(
+            WidgetId::from_key("dlg-choice:bribe"),
+            "Maybe this coin will help?",
+        )
+        .with_constraints(fill_width()),
+        Widget::button(
+            WidgetId::from_key("dlg-choice:leave"),
+            "I'll come back later.",
+        )
+        .with_constraints(fill_width()),
+        Widget::label(
+            WidgetId::from_key("dialogue-caption"),
+            "Клик по выбору → терминал (UiAction). Session/флаги — example dialogue_choice_flow.",
+        )
+        .with_style(WidgetStyle::default().with_foreground(ColorToken::Text)),
+    ]);
+
+    let controls_demo =
+        Widget::container(WidgetId::from_key("gallery-controls"), LayoutKind::Column)
             .with_constraints(fill_both())
             .with_style(panel)
             .with_children(vec![
                 Widget::label(
-                    WidgetId::from_key("dialogue-title"),
-                    "Диалог / выборы (HL)",
+                    WidgetId::from_key("controls-title"),
+                    "Checkbox / Toggle / Separator / Spacer",
                 )
                 .with_style(caption_style(note)),
                 Widget::label(
-                    WidgetId::from_key("dialogue-help"),
-                    "Domain: DialogueSession + StoryFlags. UI: dialogue_overlay_tree + replace_tree.",
+                    WidgetId::from_key("controls-help"),
+                    "Новые 2D-виджеты: checkbox/toggle эмиттят UiAction::Toggled.",
                 )
-                .with_style(WidgetStyle::default().with_foreground(ColorToken::Text)),
-                Widget::label(WidgetId::from_key("dlg-speaker"), "Gate Guard").with_style(
+                .with_style(caption_style(WidgetStyle::default())),
+                Widget::checkbox(WidgetId::from_key("ui-check-sfx"), "Включить звуки", true)
+                    .with_style(
+                        WidgetStyle::default()
+                            .with_foreground(ColorToken::Text)
+                            .with_background(ColorToken::Surface)
+                            .with_padding(Insets::all(8)),
+                    )
+                    .with_constraints(fill_width()),
+                Widget::toggle(WidgetId::from_key("ui-toggle-vsync"), "VSync", false)
+                    .with_style(
+                        WidgetStyle::default()
+                            .with_foreground(ColorToken::Text)
+                            .with_background(ColorToken::Surface)
+                            .with_padding(Insets::all(8)),
+                    )
+                    .with_constraints(fill_width()),
+                Widget::separator(WidgetId::from_key("ui-sep")),
+                Widget::spacer(WidgetId::from_key("ui-spacer")).with_style(
                     WidgetStyle::default()
-                        .with_foreground(ColorToken::Custom(Color::rgb(250, 204, 21)))
-                        .with_padding(Insets::all(4)),
+                        .with_background(ColorToken::Surface)
+                        .with_min_size(Size::new(0, 12)),
                 ),
                 Widget::label(
-                    WidgetId::from_key("dlg-body"),
-                    "Halt. State your business.",
+                    WidgetId::from_key("controls-caption"),
+                    "Separator и Spacer — полезны в статической компоновке.",
                 )
-                .with_style(
-                    WidgetStyle::default()
-                        .with_foreground(ColorToken::Text)
-                        .with_padding(Insets::all(4)),
-                ),
-                Widget::button(WidgetId::from_key("dlg-choice:bribe"), "Maybe this coin will help?")
-                    .with_constraints(fill_width()),
-                Widget::button(WidgetId::from_key("dlg-choice:leave"), "I'll come back later.")
-                    .with_constraints(fill_width()),
-                Widget::label(
-                    WidgetId::from_key("dialogue-caption"),
-                    "Клик по выбору → терминал (UiAction). Session/флаги — example dialogue_choice_flow.",
-                )
-                .with_style(WidgetStyle::default().with_foreground(ColorToken::Text)),
+                .with_style(caption_style(WidgetStyle::default())),
             ]);
 
     UiBuilder::new(WidgetId::from_key("gallery-root"), LayoutKind::Column)
@@ -241,10 +292,10 @@ fn gallery_tree() -> Result<yuyib::ui::UiTree, yuyib::ui::UiError> {
                     Widget::container(WidgetId::from_key("gallery-content"), LayoutKind::Row)
                         .with_constraints(fill_both())
                         .with_style(WidgetStyle::default().with_gap(14))
-                        .with_children(vec![buttons, layout_demo, dialogue_demo]),
+                        .with_children(vec![buttons, layout_demo, dialogue_demo, controls_demo]),
                     Widget::label(
                         WidgetId::from_key("gallery-footer"),
-                        "Сейчас: Container/Label/Button/Image/ScrollView; dialogue_overlay_tree; Session в gameplay (example dialogue_choice_flow).",
+                        "Сейчас: Container/Label/Button/Image/ScrollView + Checkbox/Toggle/Separator/Spacer; dialogue_overlay_tree; Session в gameplay (example dialogue_choice_flow).",
                     )
                     .with_style(caption_style(note)),
                 ]),
