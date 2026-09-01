@@ -185,6 +185,11 @@ pub mod prelude {
         step_kinematic_sprite_controller_2d, step_sprite_animations_2d, step_sprite_animators_2d,
         step_tile_map_animations_2d, Cardinal2d, CardinalClipPolicy2d,
     };
+    #[cfg(feature = "two-d")]
+    pub use crate::render_2d::{
+        GpuVectorMesh2d, RetainedVectorScene2d, VectorDraw2d, VectorDrawStats2d, VectorMesh2d,
+        VectorMeshError2d, VectorMeshId2d, VectorRenderer2d, VectorSceneError2d, VectorVertex2d,
+    };
     #[cfg(feature = "three-d")]
     pub use crate::game_3d::{
         CollisionFlags3d, DirectionalLight3d, LocalMatrixTransform3d, LocalTransform3d, LodGroup3d,
