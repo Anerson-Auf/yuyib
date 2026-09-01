@@ -37,6 +37,7 @@ mod animator;
 mod composer;
 mod nav;
 mod scene;
+mod vector;
 
 pub use animator::{
     Cardinal2d, CardinalClipPolicy2d, SpriteAnimator2d, SpriteAnimatorError2d, SpriteFacing2d,
@@ -49,6 +50,10 @@ pub use nav::{TileNavError2d, TileNavGrid2d};
 pub use scene::{
     DrawBudget2d, Game2dScene, Game2dSceneConfig, Game2dSceneConfigError, Game2dSceneError,
     Game2dSceneStats, TextureCacheConfig2d, TextureQueueError2d,
+};
+pub use vector::{
+    Decal2d, ExtractedVectorShapes2d, Layer2d, Particle2d, ParticleEmitter2d, VectorShape2d,
+    extract_vector_shapes_2d, step_vector_particles_2d,
 };
 pub use yuyib_animation::{
     AnimationError, AnimationSet, AnimationStateDef, AnimationStateMachine, PlayOutcome,

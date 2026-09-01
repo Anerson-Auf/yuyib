@@ -11,6 +11,8 @@
 use std::{collections::HashMap, error::Error, fmt, mem::size_of};
 
 use bytemuck::{Pod, Zeroable};
+use lyon_path::{Path, math::point};
+use lyon_tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use wgpu::util::DeviceExt;
 use yuyib_render::{RenderFrame, wgpu};
 
@@ -162,6 +164,284 @@ impl fmt::Display for VectorMeshError2d {
 }
 
 impl Error for VectorMeshError2d {}
+
+/// A validated stop in a CPU-evaluated linear gradient.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VectorGradientStop2d {
+    /// Normalised offset in the inclusive `0..=1` range.
+    pub offset: f32,
+    /// RGBA colour at this offset.
+    pub color: [f32; 4],
+}
+
+impl VectorGradientStop2d {
+    /// Creates one finite gradient stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorPathError2d::InvalidGradientStop`] for a non-finite or
+    /// out-of-range offset, or a non-finite colour channel.
+    pub fn new(offset: f32, color: [f32; 4]) -> Result<Self, VectorPathError2d> {
+        if !offset.is_finite()
+            || !(0.0..=1.0).contains(&offset)
+            || !color.iter().all(|v| v.is_finite())
+        {
+            return Err(VectorPathError2d::InvalidGradientStop);
+        }
+        Ok(Self { offset, color })
+    }
+}
+
+/// Fill paint baked into mesh vertex colours during tessellation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VectorFill2d {
+    /// A single RGBA colour for every generated vertex.
+    Solid([f32; 4]),
+    /// A linear gradient evaluated in mesh-local coordinates.
+    LinearGradient {
+        /// Gradient start point.
+        from: [f32; 2],
+        /// Gradient end point; it must differ from `from`.
+        to: [f32; 2],
+        /// Sorted stops used for interpolation.
+        stops: Vec<VectorGradientStop2d>,
+    },
+}
+
+impl VectorFill2d {
+    /// Creates a finite solid fill.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorPathError2d::NonFiniteColor`] when a channel is NaN or infinite.
+    pub fn solid(color: [f32; 4]) -> Result<Self, VectorPathError2d> {
+        if !color.iter().all(|value| value.is_finite()) {
+            return Err(VectorPathError2d::NonFiniteColor);
+        }
+        Ok(Self::Solid(color))
+    }
+
+    /// Creates a sorted, finite linear gradient.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorPathError2d`] when endpoints are invalid/equal or fewer
+    /// than two valid stops are supplied.
+    pub fn linear_gradient(
+        from: [f32; 2],
+        to: [f32; 2],
+        stops: impl Into<Vec<VectorGradientStop2d>>,
+    ) -> Result<Self, VectorPathError2d> {
+        if !from.iter().chain(to.iter()).all(|value| value.is_finite()) {
+            return Err(VectorPathError2d::NonFinitePoint);
+        }
+        if from == to {
+            return Err(VectorPathError2d::DegenerateGradient);
+        }
+        let mut stops = stops.into();
+        if stops.len() < 2 {
+            return Err(VectorPathError2d::TooFewGradientStops);
+        }
+        stops.sort_by(|left, right| left.offset.total_cmp(&right.offset));
+        Ok(Self::LinearGradient { from, to, stops })
+    }
+
+    fn color_at(&self, position: [f32; 2]) -> [f32; 4] {
+        match self {
+            Self::Solid(color) => *color,
+            Self::LinearGradient { from, to, stops } => {
+                let direction = [to[0] - from[0], to[1] - from[1]];
+                let length_squared = direction[0] * direction[0] + direction[1] * direction[1];
+                let offset = (((position[0] - from[0]) * direction[0]
+                    + (position[1] - from[1]) * direction[1])
+                    / length_squared)
+                    .clamp(0.0, 1.0);
+                if offset <= stops[0].offset {
+                    return stops[0].color;
+                }
+                for pair in stops.windows(2) {
+                    let [left, right] = pair else { continue };
+                    if offset <= right.offset {
+                        let blend = ((offset - left.offset)
+                            / (right.offset - left.offset).max(f32::EPSILON))
+                        .clamp(0.0, 1.0);
+                        return std::array::from_fn(|index| {
+                            left.color[index] + (right.color[index] - left.color[index]) * blend
+                        });
+                    }
+                }
+                stops.last().expect("validated gradient has stops").color
+            }
+        }
+    }
+}
+
+/// A backend-neutral Bézier path that may be tessellated once into [`VectorMesh2d`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VectorPath2d {
+    commands: Vec<VectorPathCommand2d>,
+}
+
+/// One command in a [`VectorPath2d`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VectorPathCommand2d {
+    /// Starts a new subpath.
+    MoveTo([f32; 2]),
+    /// Appends a straight segment.
+    LineTo([f32; 2]),
+    /// Appends a quadratic Bézier segment.
+    QuadraticTo {
+        /// Quadratic Bézier control point.
+        control: [f32; 2],
+        /// Segment endpoint.
+        to: [f32; 2],
+    },
+    /// Appends a cubic Bézier segment.
+    CubicTo {
+        /// First cubic Bézier control point.
+        control1: [f32; 2],
+        /// Second cubic Bézier control point.
+        control2: [f32; 2],
+        /// Segment endpoint.
+        to: [f32; 2],
+    },
+    /// Closes the current subpath.
+    Close,
+}
+
+impl VectorPath2d {
+    /// Creates an empty path.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            commands: Vec::new(),
+        }
+    }
+
+    /// Appends one validated command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorPathError2d::NonFinitePoint`] if any command point is
+    /// NaN or infinite.
+    pub fn push(&mut self, command: VectorPathCommand2d) -> Result<(), VectorPathError2d> {
+        let finite = match &command {
+            VectorPathCommand2d::MoveTo(point) | VectorPathCommand2d::LineTo(point) => {
+                point.iter().all(|value| value.is_finite())
+            }
+            VectorPathCommand2d::QuadraticTo { control, to } => control
+                .iter()
+                .chain(to.iter())
+                .all(|value| value.is_finite()),
+            VectorPathCommand2d::CubicTo {
+                control1,
+                control2,
+                to,
+            } => control1
+                .iter()
+                .chain(control2.iter())
+                .chain(to.iter())
+                .all(|value| value.is_finite()),
+            VectorPathCommand2d::Close => true,
+        };
+        if !finite {
+            return Err(VectorPathError2d::NonFinitePoint);
+        }
+        self.commands.push(command);
+        Ok(())
+    }
+
+    /// Returns the recorded path commands.
+    #[must_use]
+    pub fn commands(&self) -> &[VectorPathCommand2d] {
+        &self.commands
+    }
+
+    /// Tessellates the path into immutable GPU-ready triangles.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorPathError2d`] when the path is empty or cannot become a
+    /// valid filled triangle mesh.
+    pub fn tessellate_fill(&self, fill: &VectorFill2d) -> Result<VectorMesh2d, VectorPathError2d> {
+        if self.commands.is_empty() {
+            return Err(VectorPathError2d::EmptyPath);
+        }
+        let mut builder = Path::builder();
+        for command in &self.commands {
+            match command {
+                VectorPathCommand2d::MoveTo(to) => {
+                    builder.begin(point(to[0], to[1]));
+                }
+                VectorPathCommand2d::LineTo(to) => {
+                    builder.line_to(point(to[0], to[1]));
+                }
+                VectorPathCommand2d::QuadraticTo { control, to } => {
+                    builder.quadratic_bezier_to(point(control[0], control[1]), point(to[0], to[1]));
+                }
+                VectorPathCommand2d::CubicTo {
+                    control1,
+                    control2,
+                    to,
+                } => {
+                    builder.cubic_bezier_to(
+                        point(control1[0], control1[1]),
+                        point(control2[0], control2[1]),
+                        point(to[0], to[1]),
+                    );
+                }
+                VectorPathCommand2d::Close => {
+                    builder.close();
+                }
+            }
+        }
+        let path = builder.build();
+        let mut buffers: VertexBuffers<VectorVertex2d, u32> = VertexBuffers::new();
+        FillTessellator::new()
+            .tessellate_path(
+                &path,
+                &FillOptions::default(),
+                &mut BuffersBuilder::new(&mut buffers, |vertex: FillVertex<'_>| {
+                    let position = vertex.position();
+                    VectorVertex2d::new(
+                        [position.x, position.y],
+                        fill.color_at([position.x, position.y]),
+                    )
+                }),
+            )
+            .map_err(|_| VectorPathError2d::TessellationFailed)?;
+        VectorMesh2d::new(buffers.vertices, buffers.indices).map_err(VectorPathError2d::Mesh)
+    }
+}
+
+/// Failed path/gradient authoring or tessellation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VectorPathError2d {
+    /// A command point was NaN or infinite.
+    NonFinitePoint,
+    /// A solid-fill channel was NaN or infinite.
+    NonFiniteColor,
+    /// A gradient stop was non-finite or outside `0..=1`.
+    InvalidGradientStop,
+    /// A linear gradient needs at least two stops.
+    TooFewGradientStops,
+    /// Gradient endpoints must be distinct.
+    DegenerateGradient,
+    /// Tessellation requires at least one path command.
+    EmptyPath,
+    /// The tessellator rejected the authored path.
+    TessellationFailed,
+    /// The tessellator produced invalid mesh data.
+    Mesh(VectorMeshError2d),
+}
+
+impl fmt::Display for VectorPathError2d {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid vector path: {self:?}")
+    }
+}
+
+impl Error for VectorPathError2d {}
 
 /// An immutable vector mesh uploaded to GPU memory.
 pub struct GpuVectorMesh2d {
@@ -791,5 +1071,39 @@ mod tests {
         let error = validate_draw(VectorDraw2d::new().with_rotation(f32::NAN))
             .expect_err("NaN is never sent to the GPU");
         assert_eq!(error, VectorSceneError2d::NonFiniteDraw);
+    }
+
+    #[test]
+    fn path_tessellation_bakes_a_linear_gradient() {
+        let mut path = VectorPath2d::new();
+        path.push(VectorPathCommand2d::MoveTo([0.0, 0.0]))
+            .expect("finite point");
+        path.push(VectorPathCommand2d::QuadraticTo {
+            control: [0.5, 1.0],
+            to: [1.0, 0.0],
+        })
+        .expect("finite curve");
+        path.push(VectorPathCommand2d::LineTo([0.0, 0.0]))
+            .expect("finite point");
+        path.push(VectorPathCommand2d::Close)
+            .expect("close is always finite");
+        let fill = VectorFill2d::linear_gradient(
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [
+                VectorGradientStop2d::new(0.0, [1.0, 0.0, 0.0, 1.0]).expect("valid stop"),
+                VectorGradientStop2d::new(1.0, [0.0, 0.0, 1.0, 1.0]).expect("valid stop"),
+            ],
+        )
+        .expect("valid gradient");
+        let mesh = path
+            .tessellate_fill(&fill)
+            .expect("closed curve is fillable");
+        assert!(mesh.triangle_count() > 0);
+        assert!(
+            mesh.vertices()
+                .iter()
+                .any(|vertex| vertex.color[0] != vertex.color[2])
+        );
     }
 }
