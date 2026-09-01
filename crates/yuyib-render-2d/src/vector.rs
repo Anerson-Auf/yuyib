@@ -8,7 +8,12 @@
 //! character parts, static world chunks, decals, and other geometry whose
 //! topology changes much less often than its transform.
 
-use std::{collections::HashMap, error::Error, fmt, mem::size_of};
+use std::{
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    fmt,
+    mem::size_of,
+};
 
 use bytemuck::{Pod, Zeroable};
 use lyon_path::{Path, math::point};
@@ -206,6 +211,15 @@ pub enum VectorFill2d {
         /// Sorted stops used for interpolation.
         stops: Vec<VectorGradientStop2d>,
     },
+    /// A radial gradient evaluated from `center` to `radius` in mesh-local space.
+    RadialGradient {
+        /// Centre of the gradient.
+        center: [f32; 2],
+        /// Radius at which the last stop is reached.
+        radius: f32,
+        /// Sorted stops used for interpolation.
+        stops: Vec<VectorGradientStop2d>,
+    },
 }
 
 impl VectorFill2d {
@@ -246,6 +260,35 @@ impl VectorFill2d {
         Ok(Self::LinearGradient { from, to, stops })
     }
 
+    /// Creates a sorted, finite radial gradient.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorPathError2d`] when the centre/radius is invalid or fewer
+    /// than two valid stops are supplied.
+    pub fn radial_gradient(
+        center: [f32; 2],
+        radius: f32,
+        stops: impl Into<Vec<VectorGradientStop2d>>,
+    ) -> Result<Self, VectorPathError2d> {
+        if !center.iter().all(|value| value.is_finite()) {
+            return Err(VectorPathError2d::NonFinitePoint);
+        }
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err(VectorPathError2d::InvalidGradientRadius);
+        }
+        let mut stops = stops.into();
+        if stops.len() < 2 {
+            return Err(VectorPathError2d::TooFewGradientStops);
+        }
+        stops.sort_by(|left, right| left.offset.total_cmp(&right.offset));
+        Ok(Self::RadialGradient {
+            center,
+            radius,
+            stops,
+        })
+    }
+
     fn color_at(&self, position: [f32; 2]) -> [f32; 4] {
         match self {
             Self::Solid(color) => *color,
@@ -256,23 +299,36 @@ impl VectorFill2d {
                     + (position[1] - from[1]) * direction[1])
                     / length_squared)
                     .clamp(0.0, 1.0);
-                if offset <= stops[0].offset {
-                    return stops[0].color;
-                }
-                for pair in stops.windows(2) {
-                    let [left, right] = pair else { continue };
-                    if offset <= right.offset {
-                        let blend = ((offset - left.offset)
-                            / (right.offset - left.offset).max(f32::EPSILON))
-                        .clamp(0.0, 1.0);
-                        return std::array::from_fn(|index| {
-                            left.color[index] + (right.color[index] - left.color[index]) * blend
-                        });
-                    }
-                }
-                stops.last().expect("validated gradient has stops").color
+                Self::interpolate_stops(stops, offset)
+            }
+            Self::RadialGradient {
+                center,
+                radius,
+                stops,
+            } => {
+                let dx = position[0] - center[0];
+                let dy = position[1] - center[1];
+                Self::interpolate_stops(stops, (dx.mul_add(dx, dy * dy)).sqrt() / radius)
             }
         }
+    }
+
+    fn interpolate_stops(stops: &[VectorGradientStop2d], offset: f32) -> [f32; 4] {
+        if offset <= stops[0].offset {
+            return stops[0].color;
+        }
+        for pair in stops.windows(2) {
+            let [left, right] = pair else { continue };
+            if offset <= right.offset {
+                let blend = ((offset - left.offset)
+                    / (right.offset - left.offset).max(f32::EPSILON))
+                .clamp(0.0, 1.0);
+                return std::array::from_fn(|index| {
+                    left.color[index] + (right.color[index] - left.color[index]) * blend
+                });
+            }
+        }
+        stops.last().expect("validated gradient has stops").color
     }
 }
 
@@ -427,6 +483,8 @@ pub enum VectorPathError2d {
     TooFewGradientStops,
     /// Gradient endpoints must be distinct.
     DegenerateGradient,
+    /// A radial gradient radius must be finite and greater than zero.
+    InvalidGradientRadius,
     /// Tessellation requires at least one path command.
     EmptyPath,
     /// The tessellator rejected the authored path.
@@ -571,6 +629,56 @@ pub struct VectorDrawStats2d {
     pub instances: u32,
     /// Number of indexed GPU calls required to preserve painter order.
     pub draw_calls: u32,
+    /// Number of indexed triangles submitted after instancing.
+    pub triangles: u64,
+}
+
+/// Explicit per-frame work limit for retained vector rendering.
+///
+/// A budget makes pathological content visible at the integration boundary
+/// instead of silently allocating an unbounded instance buffer. `None` keeps
+/// the corresponding dimension unlimited.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VectorRenderBudget2d {
+    max_instances: Option<u32>,
+    max_draw_calls: Option<u32>,
+}
+
+impl VectorRenderBudget2d {
+    /// Creates a budget with no artificial limits.
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self {
+            max_instances: None,
+            max_draw_calls: None,
+        }
+    }
+
+    /// Limits the number of submitted instances in a frame.
+    #[must_use]
+    pub const fn with_max_instances(mut self, max_instances: u32) -> Self {
+        self.max_instances = Some(max_instances);
+        self
+    }
+
+    /// Limits mesh-switch draw calls in a frame.
+    #[must_use]
+    pub const fn with_max_draw_calls(mut self, max_draw_calls: u32) -> Self {
+        self.max_draw_calls = Some(max_draw_calls);
+        self
+    }
+
+    /// Returns the optional instance limit.
+    #[must_use]
+    pub const fn max_instances(self) -> Option<u32> {
+        self.max_instances
+    }
+
+    /// Returns the optional draw-call limit.
+    #[must_use]
+    pub const fn max_draw_calls(self) -> Option<u32> {
+        self.max_draw_calls
+    }
 }
 
 /// GPU renderer for ordered retained vector mesh instances.
@@ -610,6 +718,27 @@ impl VectorRenderer2d {
         camera: Camera2d,
         draws: impl IntoIterator<Item = (&'mesh GpuVectorMesh2d, VectorDraw2d)>,
     ) -> Result<VectorDrawStats2d, VectorSceneError2d> {
+        self.draw_ordered_with_budget(frame, camera, draws, VectorRenderBudget2d::unlimited())
+    }
+
+    /// Draws retained meshes while enforcing a caller-provided work budget.
+    ///
+    /// This is useful for an engine-owned render stage that needs predictable
+    /// frame time in the presence of user-authored or streamed content.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorSceneError2d::InstanceBudgetExceeded`] or
+    /// [`VectorSceneError2d::DrawCallBudgetExceeded`] before a surface pass is
+    /// opened when the supplied stream exceeds `budget`.
+    #[allow(clippy::too_many_lines)]
+    pub fn draw_ordered_with_budget<'mesh>(
+        &mut self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera2d,
+        draws: impl IntoIterator<Item = (&'mesh GpuVectorMesh2d, VectorDraw2d)>,
+        budget: VectorRenderBudget2d,
+    ) -> Result<VectorDrawStats2d, VectorSceneError2d> {
         let mut ordered: Vec<(&GpuVectorMesh2d, VectorDraw2d)> = draws.into_iter().collect();
         for (_, draw) in &ordered {
             validate_draw(*draw)?;
@@ -622,6 +751,11 @@ impl VectorRenderer2d {
             u32::try_from(ordered.len()).map_err(|_| VectorSceneError2d::TooManyInstances {
                 actual: ordered.len(),
             })?;
+        if let Some(maximum) = budget.max_instances
+            && total > maximum
+        {
+            return Err(VectorSceneError2d::InstanceBudgetExceeded { total, maximum });
+        }
         let projection = camera
             .projection(frame.draw_size())
             .map_err(VectorSceneError2d::InvalidCamera)?;
@@ -652,6 +786,19 @@ impl VectorRenderer2d {
                 ranges.push((*mesh, offset, 1));
             }
         }
+        let draw_calls = u32::try_from(ranges.len()).unwrap_or(u32::MAX);
+        if let Some(maximum) = budget.max_draw_calls
+            && draw_calls > maximum
+        {
+            return Err(VectorSceneError2d::DrawCallBudgetExceeded {
+                total: draw_calls,
+                maximum,
+            });
+        }
+        let triangles = ranges
+            .iter()
+            .map(|(mesh, _, count)| u64::from(mesh.index_count / 3) * u64::from(*count))
+            .sum();
         frame.with_surface_pass(wgpu::LoadOp::Load, |pass| {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -664,7 +811,8 @@ impl VectorRenderer2d {
         });
         Ok(VectorDrawStats2d {
             instances: total,
-            draw_calls: u32::try_from(ranges.len()).unwrap_or(u32::MAX),
+            draw_calls,
+            triangles,
         })
     }
 
@@ -773,7 +921,9 @@ pub struct VectorMeshId2d(u32);
 pub struct RetainedVectorScene2d {
     renderer: Option<VectorRenderer2d>,
     meshes: HashMap<VectorMeshId2d, RetainedMesh>,
+    static_layers: BTreeMap<i32, Vec<(VectorMeshId2d, VectorDraw2d)>>,
     draws: Vec<(VectorMeshId2d, VectorDraw2d)>,
+    budget: VectorRenderBudget2d,
     next_mesh_id: u32,
 }
 
@@ -783,6 +933,20 @@ struct RetainedMesh {
 }
 
 impl RetainedVectorScene2d {
+    /// Configures the maximum dynamic and static work accepted per frame.
+    ///
+    /// Existing content remains registered; rendering returns a clear error
+    /// until the budget is raised or the submitted scene becomes smaller.
+    pub fn set_render_budget(&mut self, budget: VectorRenderBudget2d) {
+        self.budget = budget;
+    }
+
+    /// Returns the currently configured render budget.
+    #[must_use]
+    pub const fn render_budget(&self) -> VectorRenderBudget2d {
+        self.budget
+    }
+
     /// Registers immutable mesh topology and returns its stable scene handle.
     ///
     /// # Errors
@@ -849,6 +1013,50 @@ impl RetainedVectorScene2d {
         Ok(())
     }
 
+    /// Replaces an immutable painter layer without touching dynamic draws.
+    ///
+    /// This is designed for map chunks, background dressing and other content
+    /// whose membership changes at load/unload time rather than every frame.
+    /// Every supplied draw is assigned `layer`, which prevents accidental
+    /// cross-layer ordering bugs. Mesh topology remains resident and is still
+    /// uploaded only once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the previous layer when a mesh handle
+    /// is unknown or a draw transform is invalid.
+    pub fn set_static_layer_draws(
+        &mut self,
+        layer: i32,
+        draws: impl IntoIterator<Item = (VectorMeshId2d, VectorDraw2d)>,
+    ) -> Result<(), VectorSceneError2d> {
+        let mut draws: Vec<_> = draws.into_iter().collect();
+        for (id, draw) in &mut draws {
+            if !self.meshes.contains_key(id) {
+                return Err(VectorSceneError2d::UnknownMesh { id: *id });
+            }
+            draw.layer = layer;
+            validate_draw(*draw)?;
+        }
+        if draws.is_empty() {
+            self.static_layers.remove(&layer);
+        } else {
+            self.static_layers.insert(layer, draws);
+        }
+        Ok(())
+    }
+
+    /// Drops one retained static layer and returns whether it existed.
+    pub fn remove_static_layer(&mut self, layer: i32) -> bool {
+        self.static_layers.remove(&layer).is_some()
+    }
+
+    /// Returns the number of registered static painter layers.
+    #[must_use]
+    pub fn static_layer_count(&self) -> usize {
+        self.static_layers.len()
+    }
+
     /// Renders all current instances while lazily uploading new/replaced meshes.
     ///
     /// # Errors
@@ -872,19 +1080,39 @@ impl RetainedVectorScene2d {
                 retained.gpu = Some(GpuVectorMesh2d::upload_for_frame(frame, &retained.cpu)?);
             }
         }
-        let mut ordered = Vec::with_capacity(self.draws.len());
-        for &(id, draw) in &self.draws {
-            let mesh = self
-                .meshes
+        let Self {
+            renderer,
+            meshes,
+            static_layers,
+            draws,
+            budget,
+            ..
+        } = self;
+        let static_draw_count: usize = static_layers.values().map(Vec::len).sum();
+        let mut ordered = Vec::with_capacity(static_draw_count + draws.len());
+        for layer_draws in static_layers.values() {
+            Self::append_gpu_draws(meshes, layer_draws, &mut ordered)?;
+        }
+        Self::append_gpu_draws(meshes, draws, &mut ordered)?;
+        renderer
+            .as_mut()
+            .expect("renderer is initialized above")
+            .draw_ordered_with_budget(frame, camera, ordered, *budget)
+    }
+
+    fn append_gpu_draws<'mesh>(
+        meshes: &'mesh HashMap<VectorMeshId2d, RetainedMesh>,
+        draws: &[(VectorMeshId2d, VectorDraw2d)],
+        target: &mut Vec<(&'mesh GpuVectorMesh2d, VectorDraw2d)>,
+    ) -> Result<(), VectorSceneError2d> {
+        for &(id, draw) in draws {
+            let mesh = meshes
                 .get(&id)
                 .and_then(|retained| retained.gpu.as_ref())
                 .ok_or(VectorSceneError2d::UnknownMesh { id })?;
-            ordered.push((mesh, draw));
+            target.push((mesh, draw));
         }
-        self.renderer
-            .as_mut()
-            .expect("renderer is initialized above")
-            .draw_ordered(frame, camera, ordered)
+        Ok(())
     }
 }
 
@@ -912,6 +1140,20 @@ pub enum VectorSceneError2d {
         /// Observed number of instances.
         actual: usize,
     },
+    /// The submitted scene exceeded the configured per-frame instance budget.
+    InstanceBudgetExceeded {
+        /// Number of instances submitted.
+        total: u32,
+        /// Configured maximum number of instances.
+        maximum: u32,
+    },
+    /// The submitted scene exceeded the configured mesh-switch draw-call budget.
+    DrawCallBudgetExceeded {
+        /// Number of draw calls required to preserve painter order.
+        total: u32,
+        /// Configured maximum number of draw calls.
+        maximum: u32,
+    },
     /// The shared 2D camera cannot create a finite projection.
     InvalidCamera(crate::SpriteRenderError),
 }
@@ -936,6 +1178,14 @@ impl fmt::Display for VectorSceneError2d {
             Self::TooManyInstances { actual } => write!(
                 formatter,
                 "vector scene has {actual} instances; maximum is u32::MAX"
+            ),
+            Self::InstanceBudgetExceeded { total, maximum } => write!(
+                formatter,
+                "vector scene submitted {total} instances; budget is {maximum}"
+            ),
+            Self::DrawCallBudgetExceeded { total, maximum } => write!(
+                formatter,
+                "vector scene requires {total} draw calls; budget is {maximum}"
             ),
             Self::InvalidCamera(error) => write!(formatter, "invalid vector camera: {error}"),
         }
@@ -1067,6 +1317,19 @@ mod tests {
     }
 
     #[test]
+    fn static_layers_normalise_painter_order_and_can_be_removed() {
+        let mut scene = RetainedVectorScene2d::default();
+        let known = scene.insert_mesh(mesh()).expect("mesh ID is available");
+        scene
+            .set_static_layer_draws(42, [(known, VectorDraw2d::new().with_layer(-5))])
+            .expect("known mesh is accepted");
+        assert_eq!(scene.static_layers[&42][0].1.layer, 42);
+        assert_eq!(scene.static_layer_count(), 1);
+        assert!(scene.remove_static_layer(42));
+        assert_eq!(scene.static_layer_count(), 0);
+    }
+
+    #[test]
     fn vector_draw_rejects_non_finite_values() {
         let error = validate_draw(VectorDraw2d::new().with_rotation(f32::NAN))
             .expect_err("NaN is never sent to the GPU");
@@ -1105,5 +1368,19 @@ mod tests {
                 .iter()
                 .any(|vertex| vertex.color[0] != vertex.color[2])
         );
+    }
+
+    #[test]
+    fn radial_gradient_rejects_a_zero_radius() {
+        let error = VectorFill2d::radial_gradient(
+            [0.0, 0.0],
+            0.0,
+            [
+                VectorGradientStop2d::new(0.0, [1.0; 4]).expect("valid stop"),
+                VectorGradientStop2d::new(1.0, [0.0; 4]).expect("valid stop"),
+            ],
+        )
+        .expect_err("zero radius cannot define a radial gradient");
+        assert_eq!(error, VectorPathError2d::InvalidGradientRadius);
     }
 }

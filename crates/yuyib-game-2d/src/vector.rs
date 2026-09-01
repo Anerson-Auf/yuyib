@@ -10,6 +10,10 @@ use yuyib_ecs::{bevy_ecs::entity::Entity, prelude::*};
 use yuyib_render_2d::{VectorDraw2d, VectorMeshId2d};
 
 /// Explicit painter layer shared by vector shapes, decals and particles.
+///
+/// When present alongside [`VectorShape2d`], extraction gives this component
+/// precedence over `VectorDraw2d::layer`. That makes gameplay layer changes a
+/// separate ECS concern while preserving the lower-level draw API.
 #[derive(Component, Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Layer2d(pub i32);
 
@@ -149,9 +153,15 @@ impl ExtractedVectorShapes2d {
 #[must_use]
 pub fn extract_vector_shapes_2d(world: &mut World) -> ExtractedVectorShapes2d {
     let mut draws: Vec<(u64, VectorMeshId2d, VectorDraw2d)> = world
-        .query::<(Entity, &VectorShape2d)>()
+        .query::<(Entity, &VectorShape2d, Option<&Layer2d>)>()
         .iter(world)
-        .map(|(entity, shape)| (entity.to_bits(), shape.mesh, shape.draw))
+        .map(|(entity, shape, layer)| {
+            let mut draw = shape.draw;
+            if let Some(layer) = layer {
+                draw.layer = layer.0;
+            }
+            (entity.to_bits(), shape.mesh, draw)
+        })
         .collect();
     draws.sort_by_key(|(entity, _, draw)| (draw.layer, *entity));
     ExtractedVectorShapes2d {
