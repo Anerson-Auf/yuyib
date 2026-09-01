@@ -21,7 +21,7 @@ pub mod high_level;
 pub mod ecs;
 
 pub use high_level::{
-    ClientConfig, ClientEvent, ClientId, ClientState, MessageRouter, NetClient, NetServer,
+    ClientConfig, ClientEvent, ClientId, ClientState, DisconnectReason, MessageRouter, NetClient, NetServer,
     ServerConfig, ServerEvent,
 };
 

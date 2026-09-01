@@ -2,7 +2,7 @@
 
 use bevy_ecs::message::Messages;
 use bevy_ecs::prelude::*;
-use crate::high_level::{ClientEvent, NetClient, NetServer, ServerEvent};
+use crate::high_level::{ClientEvent, DisconnectReason, NetClient, NetServer, ServerEvent};
 use crate::WireFrame;
 
 /// ECS resource wrapping the thread-safe `NetClient`.
@@ -42,6 +42,8 @@ pub enum EcsClientEvent {
     Connected,
     /// Client disconnected from the server.
     Disconnected,
+    /// Client disconnected from server with explicit reason.
+    DisconnectedWithReason(DisconnectReason),
     /// Client received a message frame from the server.
     Message(WireFrame),
     /// An error occurred during client connection or I/O.
@@ -55,6 +57,8 @@ pub enum EcsServerEvent {
     ClientConnected(u64),
     /// A client session disconnected.
     ClientDisconnected(u64),
+    /// A client session disconnected with explicit reason.
+    ClientDisconnectedWithReason(u64, DisconnectReason),
     /// A client sent a message frame to the server.
     ClientMessage(u64, WireFrame),
 }
@@ -69,6 +73,9 @@ pub fn poll_client_events_system(
             let ecs_event = match event {
                 ClientEvent::Connected => EcsClientEvent::Connected,
                 ClientEvent::Disconnected => EcsClientEvent::Disconnected,
+                ClientEvent::DisconnectedWithReason(reason) => {
+                    EcsClientEvent::DisconnectedWithReason(reason)
+                }
                 ClientEvent::Message(frame) => EcsClientEvent::Message(frame),
                 ClientEvent::Error(error) => EcsClientEvent::Error(error),
             };
@@ -87,6 +94,9 @@ pub fn poll_server_events_system(
             let ecs_event = match event {
                 ServerEvent::ClientConnected(client_id) => EcsServerEvent::ClientConnected(client_id),
                 ServerEvent::ClientDisconnected(client_id) => EcsServerEvent::ClientDisconnected(client_id),
+                ServerEvent::ClientDisconnectedWithReason(client_id, reason) => {
+                    EcsServerEvent::ClientDisconnectedWithReason(client_id, reason)
+                }
                 ServerEvent::ClientMessage(client_id, frame) => EcsServerEvent::ClientMessage(client_id, frame),
             };
             messages.write(ecs_event);

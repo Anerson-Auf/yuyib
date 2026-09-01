@@ -143,6 +143,16 @@ fn server_handle_events(
                     state_changed = true;
                 }
             }
+            EcsServerEvent::ClientDisconnectedWithReason(client_id, reason) => {
+                println!(
+                    "Server ECS: Client {} disconnected ({:?})",
+                    client_id,
+                    reason
+                );
+                if lobby.players.remove(&client_id).is_some() {
+                    state_changed = true;
+                }
+            }
             EcsServerEvent::ClientMessage(client_id, frame) => {
                 match router.router.handle(&mut lobby, *client_id, &frame) {
                     Ok(true) => {
@@ -197,6 +207,9 @@ fn client_handle_events(
             }
             EcsClientEvent::Disconnected => {
                 println!("Client ECS: Disconnected from server");
+            }
+            EcsClientEvent::DisconnectedWithReason(reason) => {
+                println!("Client ECS: Disconnected from server ({:?})", reason);
             }
             EcsClientEvent::Message(frame) => {
                 if frame.message_type().as_str() == "lobby.status" {

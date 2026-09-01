@@ -36,6 +36,8 @@ pub enum ClientEvent {
     Connected,
     /// Dispatched when disconnected from the server.
     Disconnected,
+    /// Disconnected with a detailed reason.
+    DisconnectedWithReason(DisconnectReason),
     /// Dispatched when a custom application message frame is received.
     Message(WireFrame),
     /// Dispatched when an error occurs during connection or I/O.
@@ -49,8 +51,29 @@ pub enum ServerEvent {
     ClientConnected(ClientId),
     /// Dispatched when a client session terminates.
     ClientDisconnected(ClientId),
+    /// Dispatched when a client session terminates with a reason.
+    ClientDisconnectedWithReason(ClientId, DisconnectReason),
     /// Dispatched when a client sends a custom application message frame.
     ClientMessage(ClientId, WireFrame),
+}
+
+/// Reason why a network session ended.
+#[derive(Clone, Debug)]
+pub enum DisconnectReason {
+    /// Local shutdown requested.
+    LocalShutdown,
+    /// The connection was explicitly terminated by the server.
+    AdminDisconnect,
+    /// Remote side closed the transport socket.
+    RemoteClosed,
+    /// Heartbeat timeout while waiting for pong.
+    HeartbeatTimeout,
+    /// Retry budget exhausted while reconnecting (client-side only).
+    ReconnectExhausted,
+    /// Underlying transport error.
+    TransportError(String),
+    /// Unexpected protocol parsing or decoding error.
+    ProtocolError(String),
 }
 
 /// Configuration settings for the network client.
@@ -208,8 +231,7 @@ async fn client_worker_loop(
                 ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 let mut missed_pongs = 0;
                 let heartbeat_limit = heartbeat_miss_limit(config.heartbeat_timeout, config.heartbeat_interval);
-
-                loop {
+                let disconnect_reason = 'session: loop {
                     tokio::select! {
                         frame_res = connection.read_frame() => {
                             match frame_res {
@@ -217,7 +239,9 @@ async fn client_worker_loop(
                                     if frame.message_type() == &ping_type {
                                         let reply = WireFrame::new(frame.version(), pong_type.clone(), Vec::new());
                                         if connection.write_frame(&reply).await.is_err() {
-                                            break;
+                                            break 'session Some(DisconnectReason::TransportError(
+                                                "failed to send pong".to_owned(),
+                                            ));
                                         }
                                     } else if frame.message_type() == &pong_type {
                                         missed_pongs = 0;
@@ -227,38 +251,44 @@ async fn client_worker_loop(
                                         }
                                     }
                                 }
-                                Err(error) => {
-                                    let _ = events_tx.send(ClientEvent::Error(error.to_string())).await;
-                                    break;
+                                    Err(error) => {
+                                        let _ = events_tx
+                                            .send(ClientEvent::Error(error.to_string()))
+                                            .await;
+                                    break 'session Some(DisconnectReason::TransportError(error.to_string()));
                                 }
                             }
                         }
                         outbound = outbound_rx.recv() => {
                             if let Some(frame) = outbound {
                                 if connection.write_frame(&frame).await.is_err() {
-                                    break;
+                                    break 'session Some(DisconnectReason::TransportError(
+                                        "failed to send application frame".to_owned(),
+                                    ));
                                 }
                             } else {
                                 // outbound channel dropped -> shutdown client
-                                return;
+                                break 'session Some(DisconnectReason::LocalShutdown);
                             }
                         }
                         _ = ping_interval.tick() => {
                             if heartbeat_limit != u64::MAX && missed_pongs >= heartbeat_limit {
-                                let _ = events_tx.send(ClientEvent::Error("Heartbeat timeout".to_owned())).await;
-                                break;
+                                break 'session Some(DisconnectReason::HeartbeatTimeout);
                             }
                             missed_pongs += 1;
                             let ping_frame = WireFrame::new(ProtocolVersion::new(1), ping_type.clone(), Vec::new());
                             if connection.write_frame(&ping_frame).await.is_err() {
-                                break;
+                                break 'session Some(DisconnectReason::TransportError(
+                                    "failed to send heartbeat".to_owned(),
+                                ));
                             }
                         }
                     }
-                }
+                }.unwrap_or(DisconnectReason::RemoteClosed);
 
                 state.store(ClientState::Disconnected as u8, Ordering::Relaxed);
-                if events_tx.send(ClientEvent::Disconnected).await.is_err() {
+                let event = ClientEvent::DisconnectedWithReason(disconnect_reason);
+                if events_tx.send(event).await.is_err() {
                     return;
                 }
             }
@@ -269,6 +299,11 @@ async fn client_worker_loop(
                     .await;
                 if reconnect_attempts > config.max_reconnect_attempts {
                     state.store(ClientState::Disconnected as u8, Ordering::Relaxed);
+                    let _ = events_tx
+                        .send(ClientEvent::DisconnectedWithReason(
+                            DisconnectReason::ReconnectExhausted,
+                        ))
+                        .await;
                     return;
                 }
                 tokio::time::sleep(config.reconnect_interval).await;
@@ -399,7 +434,7 @@ impl NetServer {
 
 enum ClientTaskEvent {
     Message(WireFrame),
-    Disconnected,
+    Disconnected(DisconnectReason),
 }
 
 async fn server_worker_loop(
@@ -443,9 +478,16 @@ async fn server_worker_loop(
                                 return;
                             }
                         }
-                        ClientTaskEvent::Disconnected => {
+                        ClientTaskEvent::Disconnected(reason) => {
                             if clients.remove(&client_id).is_some() {
-                                if events_tx.send(ServerEvent::ClientDisconnected(client_id)).await.is_err() {
+                                if events_tx
+                                    .send(ServerEvent::ClientDisconnectedWithReason(
+                                        client_id,
+                                        reason,
+                                    ))
+                                    .await
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }
@@ -505,7 +547,7 @@ async fn client_session_task(
     let ping_type = MessageType::new("sys.ping").unwrap();
     let pong_type = MessageType::new("sys.pong").unwrap();
 
-    loop {
+    let disconnect_reason = loop {
         tokio::select! {
             frame_res = codec.read_frame(&mut stream) => {
                 match frame_res {
@@ -513,7 +555,9 @@ async fn client_session_task(
                         if frame.message_type() == &ping_type {
                             let reply = WireFrame::new(frame.version(), pong_type.clone(), Vec::new());
                             if codec.write_frame(&mut stream, &reply).await.is_err() {
-                                break;
+                                break Some(DisconnectReason::TransportError(
+                                    "failed to send pong".to_owned(),
+                                ));
                             }
                         } else if frame.message_type() == &pong_type {
                             missed_pongs = 0;
@@ -524,7 +568,7 @@ async fn client_session_task(
                         }
                     }
                     Err(_) => {
-                        break;
+                        break Some(DisconnectReason::RemoteClosed);
                     }
                 }
             }
@@ -533,31 +577,40 @@ async fn client_session_task(
                     match command {
                         ClientCommand::Outbound(frame) => {
                             if codec.write_frame(&mut stream, &frame).await.is_err() {
-                                break;
+                                break Some(DisconnectReason::TransportError(
+                                    "failed to send application frame".to_owned(),
+                                ));
                             }
                         }
                         ClientCommand::Disconnect => {
-                            break;
+                            break Some(DisconnectReason::AdminDisconnect);
                         }
                     }
                 } else {
-                    break;
+                    break Some(DisconnectReason::LocalShutdown);
                 }
             }
             _ = ping_interval.tick() => {
                 if heartbeat_limit != u64::MAX && missed_pongs >= heartbeat_limit {
-                    break;
+                    break Some(DisconnectReason::HeartbeatTimeout);
                 }
                 missed_pongs += 1;
                 let ping_frame = WireFrame::new(ProtocolVersion::new(1), ping_type.clone(), Vec::new());
                 if codec.write_frame(&mut stream, &ping_frame).await.is_err() {
-                    break;
+                    break Some(DisconnectReason::TransportError(
+                        "failed to send heartbeat".to_owned(),
+                    ));
                 }
             }
         }
-    }
+    }.unwrap_or(DisconnectReason::RemoteClosed);
 
-    let _ = events_tx.send((client_id, ClientTaskEvent::Disconnected)).await;
+    let _ = events_tx
+        .send((
+            client_id,
+            ClientTaskEvent::Disconnected(disconnect_reason),
+        ))
+        .await;
 }
 
 /// Message router dispatcher to register type-safe JSON callback handlers.
