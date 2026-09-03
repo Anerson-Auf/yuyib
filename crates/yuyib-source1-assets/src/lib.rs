@@ -5,8 +5,10 @@
 //! resolves/decodes one RGBA8 VTF base texture. It rejects absolute paths,
 //! URI-like references, traversal and canonical symlink escapes.
 //!
-//! This boundary intentionally has no VPK support, VMT include/patch handling,
-//! bump/PBR binding, Source 2 parsing, cache, or GPU resource ownership.
+//! This boundary intentionally has no VPK support, bump/PBR binding, Source 2
+//! parsing, cache, or GPU resource ownership. `Patch` VMTs are followed for
+//! `$basetexture`: an included material is loaded first, then `insert` and
+//! `replace` properties from the patch override it.
 
 #![forbid(unsafe_code)]
 
@@ -16,7 +18,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use yuyib_vmt::{VmtMaterial, parse};
+use yuyib_vmt::{VmtBlock, VmtMaterial, parse};
 use yuyib_vtf::{VtfError, VtfHighResFormat, decode};
 
 /// Decoded Source 1 base texture ready for a later RGBA8 GPU uploader.
@@ -90,7 +92,44 @@ impl Source1MaterialResolver {
         &self,
         relative_path: impl AsRef<Path>,
     ) -> Result<Source1BaseTexture, Source1AssetError> {
-        let path = resolve_local(&self.materials_root, relative_path.as_ref(), "VMT")?;
+        let path = self.resolve_material_path(relative_path.as_ref())?;
+        self.resolve_vmt_file(&path, 0)
+    }
+
+    fn resolve_vmt_file(
+        &self,
+        path: &Path,
+        patch_depth: usize,
+    ) -> Result<Source1BaseTexture, Source1AssetError> {
+        if patch_depth >= 16 {
+            return Err(Source1AssetError::PatchDepthExceeded);
+        }
+        let text = fs::read_to_string(&path).map_err(|source| Source1AssetError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let material = parse(&text).map_err(Source1AssetError::Vmt)?;
+        if material.shader().eq_ignore_ascii_case("patch") {
+            let included = material
+                .block()
+                .property("include")
+                .ok_or(Source1AssetError::PatchMissingInclude)?;
+            let included_path = self.resolve_material_path(Path::new(included))?;
+            if let Some(base_texture) = patch_base_texture(material.block()) {
+                return self.resolve_texture_authored(base_texture);
+            }
+            return self.resolve_vmt_file(&included_path, patch_depth + 1);
+        }
+        self.resolve(&material)
+    }
+
+    fn resolve_material_path(&self, relative: &Path) -> Result<PathBuf, Source1AssetError> {
+        let relative = strip_materials_prefix(relative);
+        let mut relative = relative.to_path_buf();
+        if relative.extension().is_none() {
+            relative.set_extension("vmt");
+        }
+        let path = resolve_local(&self.materials_root, &relative, "VMT")?;
         if path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -101,21 +140,40 @@ impl Source1MaterialResolver {
                 expected: "vmt",
             });
         }
-        let text = fs::read_to_string(&path).map_err(|source| Source1AssetError::Read {
-            path: path.clone(),
-            source,
-        })?;
-        let material = parse(&text).map_err(Source1AssetError::Vmt)?;
-        self.resolve(&material)
+        Ok(path)
     }
 
     fn resolve_texture_path(&self, authored: &str) -> Result<PathBuf, Source1AssetError> {
+        self.resolve_texture_path_value(authored)
+    }
+
+    fn resolve_texture_authored(
+        &self,
+        authored: &str,
+    ) -> Result<Source1BaseTexture, Source1AssetError> {
+        let path = self.resolve_texture_path_value(authored)?;
+        let bytes = fs::read(&path).map_err(|source| Source1AssetError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let image = decode(&bytes).map_err(Source1AssetError::Vtf)?;
+        Ok(Source1BaseTexture {
+            path,
+            width: image.width(),
+            height: image.height(),
+            source_format: image.source_format(),
+            rgba8: image.pixels_rgba8().to_vec(),
+        })
+    }
+
+    fn resolve_texture_path_value(&self, authored: &str) -> Result<PathBuf, Source1AssetError> {
         if authored.contains("://") {
             return Err(Source1AssetError::UnsafePath {
                 value: authored.into(),
             });
         }
-        let mut relative = PathBuf::from(authored.replace('\\', "/"));
+        let mut relative =
+            strip_materials_prefix(Path::new(&authored.replace('\\', "/"))).to_path_buf();
         if relative.extension().is_none() {
             relative.set_extension("vtf");
         }
@@ -131,6 +189,31 @@ impl Source1MaterialResolver {
             });
         }
         Ok(path)
+    }
+}
+
+fn patch_base_texture(block: &VmtBlock) -> Option<&str> {
+    for block in block.blocks() {
+        if block.name().eq_ignore_ascii_case("replace")
+            || block.name().eq_ignore_ascii_case("insert")
+        {
+            if let Some(texture) = block.property("$basetexture") {
+                return Some(texture);
+            }
+        }
+    }
+    None
+}
+
+fn strip_materials_prefix(path: &Path) -> &Path {
+    let mut components = path.components();
+    let Some(Component::Normal(first)) = components.next() else {
+        return path;
+    };
+    if first.to_string_lossy().eq_ignore_ascii_case("materials") {
+        components.as_path()
+    } else {
+        path
     }
 }
 
@@ -223,6 +306,10 @@ pub enum Source1AssetError {
     Vmt(yuyib_vmt::VmtParseError),
     /// VTF decode failed.
     Vtf(VtfError),
+    /// A Patch VMT did not name an included material.
+    PatchMissingInclude,
+    /// A Patch include chain was deeper than the bounded resolver permits.
+    PatchDepthExceeded,
 }
 impl fmt::Display for Source1AssetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -248,6 +335,8 @@ impl fmt::Display for Source1AssetError {
             Self::MissingBaseTexture => formatter.write_str("VMT has no $basetexture"),
             Self::Vmt(source) => write!(formatter, "cannot parse VMT: {source}"),
             Self::Vtf(source) => write!(formatter, "cannot decode VTF: {source}"),
+            Self::PatchMissingInclude => formatter.write_str("Patch VMT has no include"),
+            Self::PatchDepthExceeded => formatter.write_str("Patch VMT include depth exceeds 16"),
         }
     }
 }

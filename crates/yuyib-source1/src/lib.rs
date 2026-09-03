@@ -2,7 +2,8 @@
 //!
 //! This crate converts parsed VMF solid sides into yuyib-vmf-model brush
 //! solids and delegates convex geometry compilation to that crate. It does not
-//! support Source 2, BSP, VMT, VTF, UV conversion or entities-to-ECS.
+//! support Source 2, BSP, VMT, VTF or entities-to-ECS. The optional textured
+//! compiler uses Source `uaxis`/`vaxis` plus caller-provided VTF dimensions.
 
 #![forbid(unsafe_code)]
 
@@ -11,7 +12,8 @@ use std::{collections::BTreeSet, error::Error, fmt};
 use yuyib_model::Model;
 use yuyib_vmf::{VmfEntity, VmfMap, VmfSide, VmfSolid};
 use yuyib_vmf_model::{
-    BrushCompileError, BrushCompileLimits, BrushSide, BrushSolid, PlanePoints, compile_brushes,
+    BrushCompileError, BrushCompileLimits, BrushSide, BrushSolid, PlanePoints, TextureAxes,
+    TextureAxis, compile_brushes, compile_brushes_with_texture_sizes,
 };
 
 /// Selects which world and entity solids are compiled.
@@ -136,6 +138,26 @@ pub fn compile_map(
     compile_brushes(&solids, compiler_limits).map_err(Source1Error::Compile)
 }
 
+/// Compiles a map with normalized UVs for materials whose VTF size is known.
+///
+/// # Errors
+/// Returns the same adapter and geometry errors as [`compile_map`].
+pub fn compile_map_with_texture_sizes(
+    map: &VmfMap,
+    selection: &MapBrushSelection,
+    adapter_limits: Source1AdapterLimits,
+    compiler_limits: BrushCompileLimits,
+    texture_size: impl Fn(&str) -> Option<[u16; 2]>,
+) -> Result<Model, Source1Error> {
+    let selected = adapt_map(map, selection, adapter_limits)?;
+    let solids: Vec<_> = selected
+        .into_iter()
+        .map(|selected| selected.solid)
+        .collect();
+    compile_brushes_with_texture_sizes(&solids, compiler_limits, texture_size)
+        .map_err(Source1Error::Compile)
+}
+
 fn selected_solids<'a>(
     map: &'a VmfMap,
     selection: &MapBrushSelection,
@@ -241,8 +263,61 @@ fn adapt_side(
         side,
         source,
     })?;
-    Ok(BrushSide::new(points, material))
+    let mut output = BrushSide::new(points, material);
+    if let (Some(uaxis), Some(vaxis)) = (source.uaxis(), source.vaxis()) {
+        let u = parse_texture_axis(uaxis).map_err(|source| Source1Error::InvalidTextureAxis {
+            origin,
+            side,
+            source,
+        })?;
+        let v = parse_texture_axis(vaxis).map_err(|source| Source1Error::InvalidTextureAxis {
+            origin,
+            side,
+            source,
+        })?;
+        output = output.with_texture_axes(TextureAxes { u, v });
+    }
+    Ok(output)
 }
+
+fn parse_texture_axis(input: &str) -> Result<TextureAxis, TextureAxisParseError> {
+    let (values, scale) = input
+        .trim()
+        .strip_prefix('[')
+        .and_then(|text| text.split_once(']'))
+        .ok_or(TextureAxisParseError)?;
+    let values: Vec<_> = values
+        .split_whitespace()
+        .map(str::parse::<f32>)
+        .collect::<Result<_, _>>()
+        .map_err(|_| TextureAxisParseError)?;
+    let scale = scale
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| TextureAxisParseError)?;
+    if values.len() != 4
+        || !values.iter().all(|value| value.is_finite())
+        || !scale.is_finite()
+        || scale == 0.0
+    {
+        return Err(TextureAxisParseError);
+    }
+    Ok(TextureAxis {
+        direction: [values[0], values[1], values[2]],
+        shift: values[3],
+        scale,
+    })
+}
+
+/// A VMF texture-axis value was not exactly `[x y z shift] scale`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextureAxisParseError;
+impl fmt::Display for TextureAxisParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid texture axis")
+    }
+}
+impl Error for TextureAxisParseError {}
 
 /// Parses exactly three finite VMF point tuples.
 ///
@@ -357,6 +432,15 @@ pub enum Source1Error {
         /// Underlying conversion error.
         source: PlaneParseError,
     },
+    /// Texture-axis text conversion failed.
+    InvalidTextureAxis {
+        /// Owning solid.
+        origin: VmfBrushOrigin,
+        /// Side index.
+        side: usize,
+        /// Underlying conversion error.
+        source: TextureAxisParseError,
+    },
     /// Adapter work limit was exceeded.
     LimitExceeded {
         /// Limited resource.
@@ -391,6 +475,14 @@ impl fmt::Display for Source1Error {
                 formatter,
                 "invalid plane at {origin:?} side {side}: {source}"
             ),
+            Self::InvalidTextureAxis {
+                origin,
+                side,
+                source,
+            } => write!(
+                formatter,
+                "invalid texture axis at {origin:?} side {side}: {source}"
+            ),
             Self::LimitExceeded { limit, maximum } => {
                 write!(formatter, "{limit:?} exceeds limit {maximum}")
             }
@@ -402,6 +494,7 @@ impl Error for Source1Error {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidPlane { source, .. } => Some(source),
+            Self::InvalidTextureAxis { source, .. } => Some(source),
             Self::Compile(source) => Some(source),
             _ => None,
         }

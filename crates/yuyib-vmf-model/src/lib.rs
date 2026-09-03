@@ -19,7 +19,8 @@
 //! # Deliberate scope
 //!
 //! Only finite convex brush solids made from planar sides are supported. The
-//! compiler emits geometric normals but no VMF texture-axis UVs yet. It does
+//! compiler emits geometric normals. [`compile_brushes_with_texture_sizes`]
+//! also converts VMF texture-axis UVs when the caller provides VTF dimensions. It does
 //! not read VMT/VTF, lightmaps, displacements, entities, props, areaportals,
 //! BSP data, Hammer editor state, Source 2 VMAP/VPK content, or perform a
 //! runtime visibility/physics conversion.
@@ -70,6 +71,27 @@ pub struct BrushSide {
     pub plane: PlanePoints,
     /// Source 1 material/VMT identifier, preserved exactly in model metadata.
     pub material: String,
+    /// Optional Source 1 texture projection axes from the VMF side.
+    pub texture_axes: Option<TextureAxes>,
+}
+
+/// Source 1 texture projection data for one brush side.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureAxes {
+    /// Horizontal texture projection.
+    pub u: TextureAxis,
+    /// Vertical texture projection.
+    pub v: TextureAxis,
+}
+/// One Source VMF `uaxis` or `vaxis` value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureAxis {
+    /// Source-coordinate projection direction.
+    pub direction: [f32; 3],
+    /// Source texel offset before scaling.
+    pub shift: f32,
+    /// Source texture scale; it must be nonzero.
+    pub scale: f32,
 }
 
 impl BrushSide {
@@ -79,7 +101,14 @@ impl BrushSide {
         Self {
             plane,
             material: material.into(),
+            texture_axes: None,
         }
+    }
+    /// Adds Source texture axes without changing the legacy constructor.
+    #[must_use]
+    pub const fn with_texture_axes(mut self, texture_axes: TextureAxes) -> Self {
+        self.texture_axes = Some(texture_axes);
+        self
     }
 }
 
@@ -326,6 +355,51 @@ pub fn compile_solid(
     compile_brushes(std::slice::from_ref(solid), limits)
 }
 
+/// Compiles brushes and emits normalized UVs when texture dimensions are known.
+///
+/// Returning `None` from `texture_size` leaves a side without UVs.
+///
+/// # Errors
+/// Returns the same bounded geometry errors as [`compile_brushes`].
+pub fn compile_brushes_with_texture_sizes(
+    solids: &[BrushSolid],
+    limits: BrushCompileLimits,
+    texture_size: impl Fn(&str) -> Option<[u16; 2]>,
+) -> Result<Model, BrushCompileError> {
+    if solids.len() > limits.max_solids {
+        return Err(BrushCompileError::TooManySolids {
+            actual: solids.len(),
+            limit: limits.max_solids,
+        });
+    }
+    let mut materials = Vec::new();
+    let mut material_indices = HashMap::new();
+    let mut meshes = Vec::new();
+    let mut total_indices = 0_usize;
+    for (solid_index, solid) in solids.iter().enumerate() {
+        let primitives = compile_one_solid(
+            solid,
+            solid_index,
+            limits,
+            &mut materials,
+            &mut material_indices,
+            &mut total_indices,
+            &texture_size,
+        )?;
+        let name = solid
+            .name
+            .clone()
+            .or_else(|| Some(format!("vmf_solid_{solid_index}")));
+        meshes.push(
+            Mesh::new(name, primitives).map_err(|source| BrushCompileError::Mesh {
+                solid: solid_index,
+                source,
+            })?,
+        );
+    }
+    Model::new(meshes, materials, Vec::new()).map_err(BrushCompileError::Model)
+}
+
 /// Compiles convex Source 1 brush solids into one renderer-neutral model.
 ///
 /// Materials are deduplicated by exact source string in first-seen source
@@ -346,38 +420,7 @@ pub fn compile_brushes(
     solids: &[BrushSolid],
     limits: BrushCompileLimits,
 ) -> Result<Model, BrushCompileError> {
-    if solids.len() > limits.max_solids {
-        return Err(BrushCompileError::TooManySolids {
-            actual: solids.len(),
-            limit: limits.max_solids,
-        });
-    }
-    let mut materials = Vec::new();
-    let mut material_indices = HashMap::new();
-    let mut meshes = Vec::new();
-    let mut total_indices = 0_usize;
-
-    for (solid_index, solid) in solids.iter().enumerate() {
-        let primitives = compile_one_solid(
-            solid,
-            solid_index,
-            limits,
-            &mut materials,
-            &mut material_indices,
-            &mut total_indices,
-        )?;
-        let name = solid
-            .name
-            .clone()
-            .or_else(|| Some(format!("vmf_solid_{solid_index}")));
-        meshes.push(
-            Mesh::new(name, primitives).map_err(|source| BrushCompileError::Mesh {
-                solid: solid_index,
-                source,
-            })?,
-        );
-    }
-    Model::new(meshes, materials, Vec::new()).map_err(BrushCompileError::Model)
+    compile_brushes_with_texture_sizes(solids, limits, |_| None)
 }
 
 #[derive(Clone, Copy)]
@@ -393,6 +436,7 @@ fn compile_one_solid(
     materials: &mut Vec<Material>,
     material_indices: &mut HashMap<String, MaterialIndex>,
     total_indices: &mut usize,
+    texture_size: &impl Fn(&str) -> Option<[u16; 2]>,
 ) -> Result<Vec<MeshPrimitive>, BrushCompileError> {
     if solid.sides.len() < 4 {
         return Err(BrushCompileError::TooFewSides {
@@ -473,7 +517,7 @@ fn compile_one_solid(
             material_indices,
         );
         let normals = vec![outward; face.len()];
-        let primitive = MeshPrimitive::new(face, indices)
+        let mut primitive = MeshPrimitive::new(face.clone(), indices)
             .map_err(|source| BrushCompileError::MeshValidation {
                 solid: solid_index,
                 side: side_index,
@@ -486,9 +530,41 @@ fn compile_one_solid(
                 source,
             })?
             .with_material(material);
+        if let (Some(axes), Some(size)) = (
+            solid.sides[side_index].texture_axes,
+            texture_size(&solid.sides[side_index].material),
+        ) {
+            if size[0] > 0
+                && size[1] > 0
+                && axes.u.scale.is_finite()
+                && axes.v.scale.is_finite()
+                && axes.u.scale != 0.0
+                && axes.v.scale != 0.0
+            {
+                let tex_coords = face
+                    .iter()
+                    .map(|position| texture_uv(*position, axes, size))
+                    .collect();
+                primitive = primitive.with_tex_coords_0(tex_coords).map_err(|source| {
+                    BrushCompileError::MeshValidation {
+                        solid: solid_index,
+                        side: side_index,
+                        source,
+                    }
+                })?;
+            }
+        }
         primitives.push(primitive);
     }
     Ok(primitives)
+}
+
+fn texture_uv(yuyib_position: [f32; 3], axes: TextureAxes, size: [u16; 2]) -> [f32; 2] {
+    let source = [yuyib_position[0], -yuyib_position[2], yuyib_position[1]];
+    [
+        (dot3(source, axes.u.direction) + axes.u.shift) / axes.u.scale / f32::from(size[0]),
+        (dot3(source, axes.v.direction) + axes.v.shift) / axes.v.scale / f32::from(size[1]),
+    ]
 }
 
 fn material_index(

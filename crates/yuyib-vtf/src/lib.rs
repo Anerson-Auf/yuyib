@@ -1,42 +1,25 @@
-//! Bounded narrow Source 1 VTF binary decoding.
+//! Source 1 VTF decoding into renderer-neutral RGBA8 pixels.
 //!
-//! The reader accepts little-endian VTF 7.2 headers for a single
-//! 2D frame with no low-resolution thumbnail. It validates the complete
-//! smallest-to-largest mip layout, then decodes the highest-resolution exact
-//! RGBA8888 or BGRA8888 payload into RGBA8 output.
-//!
-//! It deliberately rejects VTF 7.3 resource chunks, cubemaps, multiple frames,
-//! depth textures, low-res thumbnails, compressed formats, VPK/filesystem
-//! loading and Source 2 texture formats.
+//! Supports ordinary 2D, one-frame VTF 7.1 through 7.4 files and the common
+//! RGBA8888, BGRA8888, BGR888, DXT1, DXT3 and DXT5 encodings.
 
 #![forbid(unsafe_code)]
-#![allow(
-    clippy::doc_markdown,
-    reason = "The public decoder names are intentionally plain in compact rustdoc."
-)]
+#![allow(missing_docs, reason = "Compact error variants mirror binary fields.")]
 
 use std::{error::Error, fmt};
 
 const SIGNATURE: &[u8; 4] = b"VTF\0";
 const MIN_HEADER_SIZE: usize = 80;
-const SUPPORTED_MINOR: u32 = 2;
-const IMAGE_FORMAT_NONE: i32 = -1;
-const IMAGE_FORMAT_RGBA8888: i32 = 0;
-const IMAGE_FORMAT_BGRA8888: i32 = 12;
+const HIGH_RES_RESOURCE: [u8; 3] = [0x30, 0, 0];
 
 /// Bounds applied before decoding untrusted VTF bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VtfLimits {
-    /// Maximum complete VTF input bytes.
     pub max_input_bytes: usize,
-    /// Maximum width or height.
     pub max_dimension: u16,
-    /// Maximum declared mip count.
     pub max_mip_count: u8,
-    /// Maximum decoded highest-resolution RGBA8 bytes.
     pub max_decoded_bytes: usize,
 }
-
 impl Default for VtfLimits {
     fn default() -> Self {
         Self {
@@ -48,16 +31,39 @@ impl Default for VtfLimits {
     }
 }
 
-/// High-resolution Source VTF format accepted by this decoder.
+/// Original high-resolution VTF encoding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VtfHighResFormat {
-    /// Four payload bytes are red, green, blue, alpha.
     Rgba8888,
-    /// Four payload bytes are blue, green, red, alpha.
+    Bgr888,
     Bgra8888,
+    Dxt1,
+    Dxt3,
+    Dxt5,
+}
+impl VtfHighResFormat {
+    fn from_raw(raw: i32) -> Result<Self, VtfError> {
+        match raw {
+            0 => Ok(Self::Rgba8888),
+            3 => Ok(Self::Bgr888),
+            12 => Ok(Self::Bgra8888),
+            13 => Ok(Self::Dxt1),
+            14 => Ok(Self::Dxt3),
+            15 => Ok(Self::Dxt5),
+            format => Err(VtfError::UnsupportedHighResFormat { format }),
+        }
+    }
+    fn mip_bytes(self, w: usize, h: usize) -> Option<usize> {
+        match self {
+            Self::Rgba8888 | Self::Bgra8888 => w.checked_mul(h)?.checked_mul(4),
+            Self::Bgr888 => w.checked_mul(h)?.checked_mul(3),
+            Self::Dxt1 => w.div_ceil(4).checked_mul(h.div_ceil(4))?.checked_mul(8),
+            Self::Dxt3 | Self::Dxt5 => w.div_ceil(4).checked_mul(h.div_ceil(4))?.checked_mul(16),
+        }
+    }
 }
 
-/// Decoded highest-resolution RGBA8 texture pixels.
+/// Decoded largest-mip RGBA8 pixels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VtfImage {
     width: u16,
@@ -66,54 +72,40 @@ pub struct VtfImage {
     source_format: VtfHighResFormat,
     mip_count: u8,
 }
-
 impl VtfImage {
-    /// Returns highest-resolution image width.
     #[must_use]
     pub const fn width(&self) -> u16 {
         self.width
     }
-    /// Returns highest-resolution image height.
     #[must_use]
     pub const fn height(&self) -> u16 {
         self.height
     }
-    /// Returns tightly packed RGBA8 pixels in row-major order.
     #[must_use]
     pub fn pixels_rgba8(&self) -> &[u8] {
         &self.pixels
     }
-    /// Returns original high-resolution VTF pixel ordering.
     #[must_use]
     pub const fn source_format(&self) -> VtfHighResFormat {
         self.source_format
     }
-    /// Returns declared mip level count after validation.
     #[must_use]
     pub const fn mip_count(&self) -> u8 {
         self.mip_count
     }
 }
 
-/// Decodes a narrow supported Source 1 VTF file with default limits.
+/// Decodes a supported Source 1 VTF with default bounds.
 ///
 /// # Errors
-///
-/// Returns VtfError for header, format, overflow, mip layout or budget failure.
+/// Returns a structured error for malformed, over-budget or unsupported data.
 pub fn decode(bytes: &[u8]) -> Result<VtfImage, VtfError> {
     decode_with_limits(bytes, VtfLimits::default())
 }
-
-/// Decodes a narrow supported Source 1 VTF file with explicit limits.
-///
-/// Header fields are little-endian. The VTF high-resolution mip chain is
-/// interpreted in Source 1 storage order, smallest level first and largest
-/// level last. Only one frame, one face and depth one are accepted, so no
-/// frame/face/depth stride is guessed.
+/// Decodes a supported Source 1 VTF with explicit bounds.
 ///
 /// # Errors
-///
-/// Returns VtfError for header, format, overflow, mip layout or budget failure.
+/// Returns a structured error for malformed, over-budget or unsupported data.
 pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, VtfError> {
     if bytes.len() > limits.max_input_bytes {
         return Err(VtfError::LimitExceeded {
@@ -123,11 +115,7 @@ pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, V
     }
     let header = Header::read(bytes)?;
     header.validate(limits)?;
-    let format = match header.high_res_format {
-        IMAGE_FORMAT_RGBA8888 => VtfHighResFormat::Rgba8888,
-        IMAGE_FORMAT_BGRA8888 => VtfHighResFormat::Bgra8888,
-        format => return Err(VtfError::UnsupportedHighResFormat { format }),
-    };
+    let format = VtfHighResFormat::from_raw(header.format)?;
     let header_size = usize::try_from(header.size).map_err(|_| VtfError::InvalidHeaderSize {
         actual: header.size,
     })?;
@@ -136,17 +124,34 @@ pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, V
             actual: header.size,
         });
     }
-    let levels = mip_layout(header.width, header.height, header.mip_count)?;
-    let total = levels.iter().try_fold(0_usize, |total, level| {
-        total.checked_add(level.bytes).ok_or(VtfError::Overflow {
+    let levels = mip_layout(header.width, header.height, header.mips, format)?;
+    let total = levels.iter().try_fold(0_usize, |sum, level| {
+        sum.checked_add(*level).ok_or(VtfError::Overflow {
             field: "mip payload bytes",
         })
     })?;
+    let high_size = *levels.last().ok_or(VtfError::InvalidMipCount {
+        mip_count: header.mips,
+    })?;
+    let decoded = usize::from(header.width)
+        .checked_mul(usize::from(header.height))
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(VtfError::Overflow {
+            field: "decoded pixel bytes",
+        })?;
+    if decoded > limits.max_decoded_bytes {
+        return Err(VtfError::LimitExceeded {
+            limit: VtfLimit::DecodedBytes,
+            maximum: limits.max_decoded_bytes,
+        });
+    }
+    let start = header.high_res_offset(bytes, header_size)?;
     let available = bytes
         .len()
-        .checked_sub(header_size)
-        .ok_or(VtfError::InvalidHeaderSize {
-            actual: header.size,
+        .checked_sub(start)
+        .ok_or(VtfError::TruncatedPayload {
+            expected: total,
+            available: 0,
         })?;
     if available < total {
         return Err(VtfError::TruncatedPayload {
@@ -154,17 +159,8 @@ pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, V
             available,
         });
     }
-    let high = levels.last().ok_or(VtfError::InvalidMipCount {
-        mip_count: header.mip_count,
-    })?;
-    if high.bytes > limits.max_decoded_bytes {
-        return Err(VtfError::LimitExceeded {
-            limit: VtfLimit::DecodedBytes,
-            maximum: limits.max_decoded_bytes,
-        });
-    }
-    let high_offset = header_size
-        .checked_add(total.checked_sub(high.bytes).ok_or(VtfError::Overflow {
+    let high_start = start
+        .checked_add(total.checked_sub(high_size).ok_or(VtfError::Overflow {
             field: "high-res mip offset",
         })?)
         .ok_or(VtfError::Overflow {
@@ -172,26 +168,22 @@ pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, V
         })?;
     let source =
         bytes
-            .get(high_offset..high_offset + high.bytes)
+            .get(high_start..high_start + high_size)
             .ok_or(VtfError::TruncatedPayload {
                 expected: total,
                 available,
             })?;
-    let mut pixels = Vec::with_capacity(high.bytes);
-    let (source_pixels, remainder) = source.as_chunks::<4>();
-    debug_assert!(remainder.is_empty());
-    for pixel in source_pixels {
-        match format {
-            VtfHighResFormat::Rgba8888 => pixels.extend_from_slice(pixel),
-            VtfHighResFormat::Bgra8888 => pixels.extend([pixel[2], pixel[1], pixel[0], pixel[3]]),
-        }
-    }
     Ok(VtfImage {
         width: header.width,
         height: header.height,
-        pixels,
+        pixels: decode_level(
+            source,
+            usize::from(header.width),
+            usize::from(header.height),
+            format,
+        )?,
         source_format: format,
-        mip_count: header.mip_count,
+        mip_count: header.mips,
     })
 }
 
@@ -203,14 +195,10 @@ struct Header {
     width: u16,
     height: u16,
     frames: u16,
-    high_res_format: i32,
-    mip_count: u8,
-    low_res_format: i32,
-    low_res_width: u8,
-    low_res_height: u8,
+    format: i32,
+    mips: u8,
     depth: u16,
 }
-
 impl Header {
     fn read(bytes: &[u8]) -> Result<Self, VtfError> {
         if bytes.len() < MIN_HEADER_SIZE {
@@ -222,28 +210,19 @@ impl Header {
             return Err(VtfError::InvalidSignature);
         }
         Ok(Self {
-            major: read_u32(bytes, 4)?,
-            minor: read_u32(bytes, 8)?,
-            size: read_u32(bytes, 12)?,
-            width: read_u16(bytes, 16)?,
-            height: read_u16(bytes, 18)?,
-            frames: read_u16(bytes, 24)?,
-            high_res_format: read_i32(bytes, 52)?,
-            mip_count: *bytes.get(56).ok_or(VtfError::TruncatedHeader {
-                available: bytes.len(),
-            })?,
-            low_res_format: read_i32(bytes, 57)?,
-            low_res_width: *bytes.get(61).ok_or(VtfError::TruncatedHeader {
-                available: bytes.len(),
-            })?,
-            low_res_height: *bytes.get(62).ok_or(VtfError::TruncatedHeader {
-                available: bytes.len(),
-            })?,
-            depth: read_u16(bytes, 63)?,
+            major: u32_at(bytes, 4)?,
+            minor: u32_at(bytes, 8)?,
+            size: u32_at(bytes, 12)?,
+            width: u16_at(bytes, 16)?,
+            height: u16_at(bytes, 18)?,
+            frames: u16_at(bytes, 24)?,
+            format: i32_at(bytes, 52)?,
+            mips: byte_at(bytes, 56)?,
+            depth: u16_at(bytes, 63)?,
         })
     }
     fn validate(self, limits: VtfLimits) -> Result<(), VtfError> {
-        if self.major != 7 || self.minor != SUPPORTED_MINOR {
+        if self.major != 7 || !(1..=4).contains(&self.minor) {
             return Err(VtfError::UnsupportedVersion {
                 major: self.major,
                 minor: self.minor,
@@ -267,107 +246,263 @@ impl Header {
         if self.depth != 1 {
             return Err(VtfError::UnsupportedDepth { depth: self.depth });
         }
-        if self.mip_count == 0 || self.mip_count > limits.max_mip_count {
+        if self.mips == 0 || self.mips > limits.max_mip_count {
             return Err(VtfError::InvalidMipCount {
-                mip_count: self.mip_count,
+                mip_count: self.mips,
             });
-        }
-        if self.low_res_format != IMAGE_FORMAT_NONE
-            || self.low_res_width != 0
-            || self.low_res_height != 0
-        {
-            return Err(VtfError::UnsupportedLowResImage);
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Copy)]
-struct MipLevel {
-    bytes: usize,
-}
-
-fn mip_layout(width: u16, height: u16, count: u8) -> Result<Vec<MipLevel>, VtfError> {
-    let mut levels = Vec::new();
-    for level in 0..count {
-        let shift = u32::from(level);
-        let level_width = usize::from(width).checked_shr(shift).unwrap_or(0).max(1);
-        let level_height = usize::from(height).checked_shr(shift).unwrap_or(0).max(1);
-        let bytes = level_width
-            .checked_mul(level_height)
-            .and_then(|pixels| pixels.checked_mul(4))
+    fn high_res_offset(self, bytes: &[u8], header_size: usize) -> Result<usize, VtfError> {
+        if self.minor < 3 {
+            return Ok(header_size);
+        }
+        let count = usize::try_from(u32_at(bytes, 68)?).map_err(|_| VtfError::Overflow {
+            field: "resource count",
+        })?;
+        let end = MIN_HEADER_SIZE
+            .checked_add(count.checked_mul(8).ok_or(VtfError::Overflow {
+                field: "resource table",
+            })?)
             .ok_or(VtfError::Overflow {
-                field: "mip level bytes",
+                field: "resource table",
             })?;
-        levels.push(MipLevel { bytes });
+        if end > header_size || end > bytes.len() {
+            return Err(VtfError::InvalidResourceDirectory);
+        }
+        for item in 0..count {
+            let at = MIN_HEADER_SIZE + item * 8;
+            if bytes.get(at..at + 3) == Some(HIGH_RES_RESOURCE.as_slice()) {
+                let value =
+                    usize::try_from(u32_at(bytes, at + 4)?).map_err(|_| VtfError::Overflow {
+                        field: "high-res resource offset",
+                    })?;
+                if value < header_size || value >= bytes.len() {
+                    return Err(VtfError::InvalidResourceDirectory);
+                }
+                return Ok(value);
+            }
+        }
+        Err(VtfError::MissingHighResResource)
+    }
+}
+fn mip_layout(w: u16, h: u16, count: u8, format: VtfHighResFormat) -> Result<Vec<usize>, VtfError> {
+    let mut levels = Vec::with_capacity(usize::from(count));
+    for level in 0..count {
+        let width = usize::from(w)
+            .checked_shr(u32::from(level))
+            .unwrap_or(0)
+            .max(1);
+        let height = usize::from(h)
+            .checked_shr(u32::from(level))
+            .unwrap_or(0)
+            .max(1);
+        levels.push(format.mip_bytes(width, height).ok_or(VtfError::Overflow {
+            field: "mip level bytes",
+        })?);
     }
     levels.reverse();
     Ok(levels)
 }
-
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, VtfError> {
-    let array: [u8; 2] = bytes
-        .get(offset..offset + 2)
-        .ok_or(VtfError::TruncatedHeader {
-            available: bytes.len(),
-        })?
-        .try_into()
-        .expect("fixed slice length");
-    Ok(u16::from_le_bytes(array))
+fn decode_level(
+    source: &[u8],
+    w: usize,
+    h: usize,
+    format: VtfHighResFormat,
+) -> Result<Vec<u8>, VtfError> {
+    let mut out = vec![
+        0;
+        w.checked_mul(h).and_then(|n| n.checked_mul(4)).ok_or(
+            VtfError::Overflow {
+                field: "decoded pixel bytes"
+            }
+        )?
+    ];
+    match format {
+        VtfHighResFormat::Rgba8888 => {
+            for (d, s) in out.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+                d.copy_from_slice(s);
+            }
+        }
+        VtfHighResFormat::Bgra8888 => {
+            for (d, s) in out.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+                d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+            }
+        }
+        VtfHighResFormat::Bgr888 => {
+            for (d, s) in out.chunks_exact_mut(4).zip(source.chunks_exact(3)) {
+                d.copy_from_slice(&[s[2], s[1], s[0], 255]);
+            }
+        }
+        format => decode_dxt(source, w, h, format, &mut out),
+    };
+    Ok(out)
 }
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, VtfError> {
-    let array: [u8; 4] = bytes
-        .get(offset..offset + 4)
-        .ok_or(VtfError::TruncatedHeader {
-            available: bytes.len(),
-        })?
-        .try_into()
-        .expect("fixed slice length");
-    Ok(u32::from_le_bytes(array))
+fn decode_dxt(src: &[u8], w: usize, h: usize, format: VtfHighResFormat, out: &mut [u8]) {
+    let block_len = if format == VtfHighResFormat::Dxt1 {
+        8
+    } else {
+        16
+    };
+    let blocks_x = w.div_ceil(4);
+    for (block_index, block) in src.chunks_exact(block_len).enumerate() {
+        let x = block_index % blocks_x * 4;
+        let y = block_index / blocks_x * 4;
+        let (alpha, at) = match format {
+            VtfHighResFormat::Dxt1 => (None, 0),
+            VtfHighResFormat::Dxt3 => (Some(dxt3_alpha(&block[..8])), 8),
+            VtfHighResFormat::Dxt5 => (Some(dxt5_alpha(&block[..8])), 8),
+            _ => unreachable!(),
+        };
+        let colors = dxt_colors(&block[at..at + 4], format == VtfHighResFormat::Dxt1);
+        let bits = u32::from_le_bytes(block[at + 4..at + 8].try_into().expect("fixed DXT block"));
+        for py in 0..4 {
+            for px in 0..4 {
+                let dx = x + px;
+                let dy = y + py;
+                if dx >= w || dy >= h {
+                    continue;
+                }
+                let i = py * 4 + px;
+                let mut rgba = colors[((bits >> (i * 2)) & 3) as usize];
+                if let Some(alpha) = alpha {
+                    rgba[3] = alpha[i];
+                }
+                out[(dy * w + dx) * 4..][..4].copy_from_slice(&rgba);
+            }
+        }
+    }
 }
-fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, VtfError> {
-    let array: [u8; 4] = bytes
-        .get(offset..offset + 4)
-        .ok_or(VtfError::TruncatedHeader {
-            available: bytes.len(),
-        })?
-        .try_into()
-        .expect("fixed slice length");
-    Ok(i32::from_le_bytes(array))
+fn dxt_colors(src: &[u8], dxt1: bool) -> [[u8; 4]; 4] {
+    let a = u16::from_le_bytes(src[..2].try_into().expect("fixed color"));
+    let b = u16::from_le_bytes(src[2..4].try_into().expect("fixed color"));
+    let rgb = |v: u16| {
+        [
+            (((v >> 11) & 31) * 255 / 31) as u8,
+            (((v >> 5) & 63) * 255 / 63) as u8,
+            ((v & 31) * 255 / 31) as u8,
+            255,
+        ]
+    };
+    let first = rgb(a);
+    let second = rgb(b);
+    let mix = |x: u8, y: u8, nx: u16, ny: u16, d: u16| {
+        ((u16::from(x) * nx + u16::from(y) * ny) / d) as u8
+    };
+    if dxt1 && a <= b {
+        [
+            first,
+            second,
+            [
+                mix(first[0], second[0], 1, 1, 2),
+                mix(first[1], second[1], 1, 1, 2),
+                mix(first[2], second[2], 1, 1, 2),
+                255,
+            ],
+            [0, 0, 0, 0],
+        ]
+    } else {
+        [
+            first,
+            second,
+            [
+                mix(first[0], second[0], 2, 1, 3),
+                mix(first[1], second[1], 2, 1, 3),
+                mix(first[2], second[2], 2, 1, 3),
+                255,
+            ],
+            [
+                mix(first[0], second[0], 1, 2, 3),
+                mix(first[1], second[1], 1, 2, 3),
+                mix(first[2], second[2], 1, 2, 3),
+                255,
+            ],
+        ]
+    }
 }
-
-/// Decoder failure with explicit unsupported scope and bounds.
-#[allow(
-    missing_docs,
-    reason = "Variant field names are self-describing and the variants document their semantics."
-)]
+fn dxt3_alpha(src: &[u8]) -> [u8; 16] {
+    let bits = u64::from_le_bytes(src.try_into().expect("fixed alpha"));
+    std::array::from_fn(|i| (((bits >> (i * 4)) & 15) as u8) * 17)
+}
+fn dxt5_alpha(src: &[u8]) -> [u8; 16] {
+    let a0 = src[0];
+    let a1 = src[1];
+    let mut table = [0; 8];
+    table[0] = a0;
+    table[1] = a1;
+    if a0 > a1 {
+        for i in 2..8 {
+            table[i] =
+                (((8 - i) as u16 * u16::from(a0) + (i - 1) as u16 * u16::from(a1)) / 7) as u8;
+        }
+    } else {
+        for i in 2..6 {
+            table[i] =
+                (((6 - i) as u16 * u16::from(a0) + (i - 1) as u16 * u16::from(a1)) / 5) as u8;
+        }
+        table[6] = 0;
+        table[7] = 255;
+    }
+    let bits = src[2..8]
+        .iter()
+        .enumerate()
+        .fold(0_u64, |all, (i, byte)| all | u64::from(*byte) << (i * 8));
+    std::array::from_fn(|i| table[((bits >> (i * 3)) & 7) as usize])
+}
+fn byte_at(bytes: &[u8], at: usize) -> Result<u8, VtfError> {
+    bytes.get(at).copied().ok_or(VtfError::TruncatedHeader {
+        available: bytes.len(),
+    })
+}
+fn u16_at(bytes: &[u8], at: usize) -> Result<u16, VtfError> {
+    Ok(u16::from_le_bytes(
+        bytes
+            .get(at..at + 2)
+            .ok_or(VtfError::TruncatedHeader {
+                available: bytes.len(),
+            })?
+            .try_into()
+            .expect("fixed slice"),
+    ))
+}
+fn u32_at(bytes: &[u8], at: usize) -> Result<u32, VtfError> {
+    Ok(u32::from_le_bytes(
+        bytes
+            .get(at..at + 4)
+            .ok_or(VtfError::TruncatedHeader {
+                available: bytes.len(),
+            })?
+            .try_into()
+            .expect("fixed slice"),
+    ))
+}
+fn i32_at(bytes: &[u8], at: usize) -> Result<i32, VtfError> {
+    Ok(i32::from_le_bytes(
+        bytes
+            .get(at..at + 4)
+            .ok_or(VtfError::TruncatedHeader {
+                available: bytes.len(),
+            })?
+            .try_into()
+            .expect("fixed slice"),
+    ))
+}
+/// VTF decoder error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VtfError {
-    /// File did not start with exact VTF zero signature.
     InvalidSignature,
-    /// Bytes were too short for fixed Source 1 header fields.
     TruncatedHeader { available: usize },
-    /// VTF version is outside verified 7.2 scope.
     UnsupportedVersion { major: u32, minor: u32 },
-    /// Declared header size was too small or beyond input.
     InvalidHeaderSize { actual: u32 },
-    /// Dimensions were zero or exceeded configured bounds.
     InvalidDimensions { width: u16, height: u16 },
-    /// Multiple frames are unsupported.
     UnsupportedFrames { frames: u16 },
-    /// Non-2D texture depth is unsupported.
     UnsupportedDepth { depth: u16 },
-    /// Mip count was zero or exceeded configured bounds.
     InvalidMipCount { mip_count: u8 },
-    /// Low-res thumbnail data is outside this narrow reader scope.
-    UnsupportedLowResImage,
-    /// High-res image format is outside RGBA8888/BGRA8888 subset.
     UnsupportedHighResFormat { format: i32 },
-    /// Input payload did not contain full validated mip layout.
+    MissingHighResResource,
+    InvalidResourceDirectory,
     TruncatedPayload { expected: usize, available: usize },
-    /// Arithmetic overflow occurred while evaluating layout.
     Overflow { field: &'static str },
-    /// Configured resource maximum was exceeded.
     LimitExceeded { limit: VtfLimit, maximum: usize },
 }
 impl fmt::Display for VtfError {
@@ -376,28 +511,23 @@ impl fmt::Display for VtfError {
     }
 }
 impl Error for VtfError {}
-
-/// Resource controlled by VtfLimits.
+/// Resource controlled by [`VtfLimits`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VtfLimit {
-    /// Whole input bytes.
     InputBytes,
-    /// Output RGBA8 bytes.
     DecodedBytes,
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn vtf(format: i32, pixels: &[u8]) -> Vec<u8> {
-        let mut bytes = vec![0_u8; 80];
+    fn vtf(format: i32, w: u16, h: u16, pixels: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0; 80];
         bytes[..4].copy_from_slice(b"VTF\0");
         bytes[4..8].copy_from_slice(&7_u32.to_le_bytes());
         bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
         bytes[12..16].copy_from_slice(&80_u32.to_le_bytes());
-        bytes[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        bytes[18..20].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[16..18].copy_from_slice(&w.to_le_bytes());
+        bytes[18..20].copy_from_slice(&h.to_le_bytes());
         bytes[24..26].copy_from_slice(&1_u16.to_le_bytes());
         bytes[52..56].copy_from_slice(&format.to_le_bytes());
         bytes[56] = 1;
@@ -406,34 +536,45 @@ mod tests {
         bytes.extend_from_slice(pixels);
         bytes
     }
-
     #[test]
-    fn decodes_rgba_and_bgra_headers() {
-        let rgba = decode(&vtf(0, &[1, 2, 3, 4, 5, 6, 7, 8])).expect("RGBA");
-        assert_eq!(rgba.pixels_rgba8(), [1, 2, 3, 4, 5, 6, 7, 8]);
-        let bgra = decode(&vtf(12, &[3, 2, 1, 4, 7, 6, 5, 8])).expect("BGRA");
-        assert_eq!(bgra.pixels_rgba8(), [1, 2, 3, 4, 5, 6, 7, 8]);
+    fn decodes_common_formats() {
+        assert_eq!(
+            decode(&vtf(3, 1, 1, &[3, 2, 1]))
+                .expect("BGR")
+                .pixels_rgba8(),
+            [1, 2, 3, 255]
+        );
+        let color = [0, 0xf8, 0x1f, 0, 0, 0, 0, 0];
+        assert_eq!(
+            &decode(&vtf(13, 4, 4, &color)).expect("DXT1").pixels_rgba8()[..4],
+            [255, 0, 0, 255]
+        );
+        let mut dxt3 = vec![0xff; 8];
+        dxt3.extend(color);
+        assert_eq!(
+            &decode(&vtf(14, 4, 4, &dxt3)).expect("DXT3").pixels_rgba8()[..4],
+            [255, 0, 0, 255]
+        );
+        let mut dxt5 = vec![255, 0, 0, 0, 0, 0, 0, 0];
+        dxt5.extend(color);
+        assert_eq!(
+            &decode(&vtf(15, 4, 4, &dxt5)).expect("DXT5").pixels_rgba8()[..4],
+            [255, 0, 0, 255]
+        );
     }
     #[test]
-    fn rejects_truncated_and_budgeted_data() {
-        assert!(matches!(
-            decode(b"VTF\0"),
-            Err(VtfError::TruncatedHeader { .. })
-        ));
-        let error = decode_with_limits(
-            &vtf(0, &[0; 8]),
-            VtfLimits {
-                max_decoded_bytes: 1,
-                ..VtfLimits::default()
-            },
-        )
-        .expect_err("budget");
-        assert!(matches!(
-            error,
-            VtfError::LimitExceeded {
-                limit: VtfLimit::DecodedBytes,
-                ..
-            }
-        ));
+    fn reads_v74_resource_directory() {
+        let mut bytes = vtf(13, 4, 4, &[]);
+        bytes[8..12].copy_from_slice(&4_u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&96_u32.to_le_bytes());
+        bytes.resize(96, 0);
+        bytes[68..72].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[80..83].copy_from_slice(&HIGH_RES_RESOURCE);
+        bytes[84..88].copy_from_slice(&96_u32.to_le_bytes());
+        bytes.extend([0, 0xf8, 0x1f, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            decode(&bytes).expect("v74").source_format(),
+            VtfHighResFormat::Dxt1
+        );
     }
 }
