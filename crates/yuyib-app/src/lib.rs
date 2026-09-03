@@ -5,12 +5,12 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "webview")]
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
-#[cfg(all(feature = "ui", not(feature = "webview")))]
-use std::rc::Rc;
 #[cfg(feature = "ui")]
 use std::cell::Cell;
+#[cfg(all(feature = "ui", not(feature = "webview")))]
+use std::rc::Rc;
+#[cfg(feature = "webview")]
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use std::{error::Error, fmt};
 
 use yuyib_core::{FrameInfo, Runtime};
@@ -33,24 +33,25 @@ use yuyib_render::{
     RenderStatus, Renderer, RendererInitError, SurfaceValidationError,
 };
 #[cfg(feature = "ui")]
+use yuyib_ui::UiInputState;
+#[cfg(feature = "ui")]
+use yuyib_ui::UiResponse;
+#[cfg(feature = "ui")]
 use yuyib_ui::{
     Color as UiColor, ColorToken, Dimension, Insets, LayoutConstraints, LayoutKind, Point,
-    Size as UiSize, UiBuilder, UiError, UiLayout, UiTokens, UiTree, Widget, WidgetId, WidgetStyle,
-    layout_with_input_state,
+    Size as UiSize, UiBehaviorRegistry, UiBuilder, UiError, UiLayout, UiTokens, UiTree, Widget,
+    WidgetId, WidgetStyle, layout_with_input_state,
 };
 #[cfg(feature = "ui-text")]
 use yuyib_ui::{LayoutWithMeasureError, UiMeasurer, layout_with_measurer_and_input_state};
-#[cfg(feature = "ui")]
-use yuyib_ui::UiResponse;
-#[cfg(feature = "ui-text")]
-use yuyib_ui::UiInputState;
-#[cfg(feature = "ui")]
-use yuyib_ui_render::{
-    UiInputRenderOptions, UiRenderError, UiRenderLimits, UiRenderStats, UiRenderer,
-    extract_draw_list, extract_draw_list_with_input, extract_image_draw_list,
-};
 #[cfg(feature = "ui-text")]
 use yuyib_ui_render::UiRectangle;
+#[cfg(feature = "ui")]
+use yuyib_ui_render::{
+    UiCustomPaintRegistry, UiInputRenderOptions, UiRenderError, UiRenderLimits, UiRenderStats,
+    UiRenderer, extract_draw_list, extract_draw_list_with_input,
+    extract_draw_list_with_input_and_custom_paint, extract_image_draw_list,
+};
 #[cfg(feature = "ui-text")]
 use yuyib_ui_text::{FontSource, TextEngine, TextError, TextLayoutOptions, TextLimits};
 #[cfg(feature = "ui-text")]
@@ -836,7 +837,9 @@ impl Error for NativeUiTextError {
 /// chrome via [`Self::with_visual_style`]; for full paint control use
 /// [`Self::extract_draw_list`] / [`Self::extract_image_draw_list`] and a
 /// host-owned [`UiRenderer`] (or custom textured pass). IME, accessibility and
-/// custom render ordering remain lower-level host responsibilities.
+/// custom GPU render ordering remain lower-level host responsibilities.
+/// [`Widget::custom`] can use [`Self::with_behaviors`] for detailed events and
+/// [`Self::with_custom_paint`] for retained, bounded rectangle paint.
 #[cfg(feature = "ui")]
 pub struct ApplicationUi {
     tree: UiTree,
@@ -849,6 +852,8 @@ pub struct ApplicationUi {
     #[cfg(feature = "ui-text")]
     text: Option<ApplicationUiText>,
     input: Option<ApplicationUiInput>,
+    behaviors: Option<UiBehaviorRegistry>,
+    custom_paint: Option<UiCustomPaintRegistry>,
     /// When set, input/render no-op while the flag is `false` (pause overlay).
     active: Option<Rc<Cell<bool>>>,
 }
@@ -932,24 +937,46 @@ impl ApplicationUiText {
         limits: UiRenderLimits,
         visuals: UiVisualStyle,
         input: Option<&UiInputState>,
+        custom_paint: Option<&mut UiCustomPaintRegistry>,
     ) -> Result<UiRenderStats, NativeUiTextError> {
-        let stats = match input {
-            Some(state) => rectangles
-                .draw_with_input(
-                    frame,
-                    root,
-                    layout,
-                    tokens,
-                    UiInputRenderOptions::new(state)
-                        .with_limits(limits)
-                        // Focus outline on the rect pass would sit under glyphs;
-                        // hosts that need both use extract_draw_list + custom order.
-                        .with_visuals(visuals.with_focus_outline(None)),
-                )
-                .map_err(NativeUiTextError::Ui)?,
-            None => rectangles
-                .draw(frame, root, layout, tokens, limits)
-                .map_err(NativeUiTextError::Ui)?,
+        let stats = if let Some(custom_paint) = custom_paint {
+            let default_input = UiInputState::default();
+            let state = input.unwrap_or(&default_input);
+            let paint_visuals = input.map_or(UiVisualStyle::none(), |_| visuals);
+            let draw_list = extract_draw_list_with_input_and_custom_paint(
+                root,
+                layout,
+                tokens,
+                state,
+                // The focus outline is drawn later, above glyphs, by the
+                // existing interaction overlay pass.
+                paint_visuals.with_focus_outline(None),
+                custom_paint,
+                limits,
+            )
+            .map_err(NativeUiTextError::Ui)?;
+            rectangles
+                .draw_list(frame, &draw_list)
+                .map_err(NativeUiTextError::Ui)?
+        } else {
+            match input {
+                Some(state) => rectangles
+                    .draw_with_input(
+                        frame,
+                        root,
+                        layout,
+                        tokens,
+                        UiInputRenderOptions::new(state)
+                            .with_limits(limits)
+                            // Focus outline on the rect pass would sit under glyphs;
+                            // hosts that need both use extract_draw_list + custom order.
+                            .with_visuals(visuals.with_focus_outline(None)),
+                    )
+                    .map_err(NativeUiTextError::Ui)?,
+                None => rectangles
+                    .draw(frame, root, layout, tokens, limits)
+                    .map_err(NativeUiTextError::Ui)?,
+            }
         };
         let size = UiSize::new(frame.surface_size()[0], frame.surface_size()[1]);
         let scroll_key = input.map_or(0, yuyib_ui::UiInputState::scroll_layout_fingerprint);
@@ -1104,7 +1131,10 @@ impl ApplicationUiText {
     ) -> Result<usize, NativeUiTextError> {
         let mut batches = Vec::new();
         self.collect_text(root, layout, tokens, &mut batches)?;
-        Ok(batches.iter().map(|batch| batch.draw_list.quads().len()).sum())
+        Ok(batches
+            .iter()
+            .map(|batch| batch.draw_list.quads().len())
+            .sum())
     }
 }
 
@@ -1331,6 +1361,8 @@ impl ApplicationUi {
             #[cfg(feature = "ui-text")]
             text: None,
             input: None,
+            behaviors: None,
+            custom_paint: None,
             active: None,
         }
     }
@@ -1358,6 +1390,30 @@ impl ApplicationUi {
     #[must_use]
     pub const fn with_visual_style(mut self, visuals: UiVisualStyle) -> Self {
         self.visuals = visuals;
+        self
+    }
+
+    /// Attaches detailed behaviour callbacks for [`Widget::custom`] elements.
+    ///
+    /// The registry runs before the ordinary `with_winit_input` response
+    /// callback, so a custom behaviour can update shared state that a generic
+    /// response observer immediately reads. The retained tree remains plain
+    /// data and can still be cloned, validated or serialised independently.
+    #[must_use]
+    pub fn with_behaviors(mut self, behaviors: UiBehaviorRegistry) -> Self {
+        self.behaviors = Some(behaviors);
+        self
+    }
+
+    /// Attaches application-defined paint callbacks for [`Widget::custom`].
+    ///
+    /// Callbacks receive current layout/input state and append bounded
+    /// rectangle primitives in retained-tree order. This is the high-level
+    /// native equivalent of a panel `Paint` method; custom textures or GPU
+    /// pipelines still belong in an explicit lower-level render pass.
+    #[must_use]
+    pub fn with_custom_paint(mut self, custom_paint: UiCustomPaintRegistry) -> Self {
+        self.custom_paint = Some(custom_paint);
         self
     }
 
@@ -1479,9 +1535,12 @@ impl ApplicationUi {
             .input
             .as_ref()
             .map_or(0, |input| input.state.scroll_layout_fingerprint());
-        let should_rebuild = self.layout.as_ref().is_none_or(|(cached_size, cached_scroll, _)| {
-            *cached_size != size || *cached_scroll != scroll_key
-        });
+        let should_rebuild = self
+            .layout
+            .as_ref()
+            .is_none_or(|(cached_size, cached_scroll, _)| {
+                *cached_size != size || *cached_scroll != scroll_key
+            });
         if should_rebuild {
             let default_input = yuyib_ui::UiInputState::default();
             let input_state = self
@@ -1583,6 +1642,7 @@ impl ApplicationUi {
             tree,
             layout,
             input,
+            behaviors,
             ..
         } = self;
         let Some(input) = input else {
@@ -1597,6 +1657,9 @@ impl ApplicationUi {
             .emit_frame(tree, layout, &mut input.state)
             .map_err(ApplicationUiError::Input)?;
         for response in &responses {
+            if let Some(behaviors) = behaviors.as_mut() {
+                behaviors.dispatch(response);
+            }
             (input.on_response)(response);
         }
         Ok(())
@@ -1622,6 +1685,7 @@ impl ApplicationUi {
         let visuals = self.visuals;
         #[cfg(feature = "ui-text")]
         if let Some(text) = &mut self.text {
+            let custom_paint = self.custom_paint.as_mut();
             return text
                 .render(
                     frame,
@@ -1632,8 +1696,34 @@ impl ApplicationUi {
                     self.limits,
                     visuals,
                     input,
+                    custom_paint,
                 )
                 .map_err(ApplicationUiError::TextRender);
+        }
+        if let Some(custom_paint) = self.custom_paint.as_mut() {
+            let default_input = UiInputState::default();
+            let input = self
+                .input
+                .as_ref()
+                .map_or(&default_input, |value| &value.state);
+            let visuals = if self.input.is_some() {
+                self.visuals
+            } else {
+                UiVisualStyle::none()
+            };
+            let draw_list = extract_draw_list_with_input_and_custom_paint(
+                self.tree.root(),
+                &layout,
+                self.tokens,
+                input,
+                visuals,
+                custom_paint,
+                self.limits,
+            )
+            .map_err(ApplicationUiError::Render)?;
+            return renderer
+                .draw_list(frame, &draw_list)
+                .map_err(ApplicationUiError::Render);
         }
         if let Some(input) = &self.input {
             return renderer
@@ -1657,7 +1747,8 @@ impl ApplicationUi {
     ///
     /// Layouts for `size` first. When Winit input is attached, uses the retained
     /// [`UiInputState`] and [`Self::visual_style`]. Hosts can then draw with a
-    /// custom [`UiRenderer`] / pass order.
+    /// custom [`UiRenderer`] / pass order. When [`Self::with_custom_paint`] is
+    /// configured, its callbacks are included in the returned retained order.
     ///
     /// # Errors
     ///
@@ -1666,11 +1757,34 @@ impl ApplicationUi {
         self.layout_for(size)?;
         let layout = self
             .cached_layout()
-            .ok_or(ApplicationUiError::LayoutCacheUnavailable)?;
+            .ok_or(ApplicationUiError::LayoutCacheUnavailable)?
+            .clone();
+        if let Some(custom_paint) = self.custom_paint.as_mut() {
+            let default_input = UiInputState::default();
+            let input = self
+                .input
+                .as_ref()
+                .map_or(&default_input, |value| &value.state);
+            let visuals = if self.input.is_some() {
+                self.visuals
+            } else {
+                UiVisualStyle::none()
+            };
+            return extract_draw_list_with_input_and_custom_paint(
+                self.tree.root(),
+                &layout,
+                self.tokens,
+                input,
+                visuals,
+                custom_paint,
+                self.limits,
+            )
+            .map_err(ApplicationUiError::Render);
+        }
         if let Some(input) = &self.input {
             extract_draw_list_with_input(
                 self.tree.root(),
-                layout,
+                &layout,
                 self.tokens,
                 &input.state,
                 self.visuals,
@@ -1678,7 +1792,7 @@ impl ApplicationUi {
             )
             .map_err(ApplicationUiError::Render)
         } else {
-            extract_draw_list(self.tree.root(), layout, self.tokens, self.limits)
+            extract_draw_list(self.tree.root(), &layout, self.tokens, self.limits)
                 .map_err(ApplicationUiError::Render)
         }
     }
@@ -1716,9 +1830,8 @@ pub fn pause_overlay_tree(
     title: impl Into<String>,
     resume_hint: impl Into<String>,
 ) -> Result<UiTree, UiError> {
-    let dim = WidgetStyle::default().with_background(ColorToken::Custom(UiColor::rgba(
-        4, 8, 18, 160,
-    )));
+    let dim =
+        WidgetStyle::default().with_background(ColorToken::Custom(UiColor::rgba(4, 8, 18, 160)));
     let panel = WidgetStyle::default()
         .with_background(ColorToken::Custom(UiColor::rgb(18, 28, 48)))
         .with_padding(Insets::all(24))
@@ -1825,9 +1938,8 @@ impl DialogueOverlayContent {
 /// Returns [`UiError`] when widget IDs collide.
 #[cfg(feature = "ui")]
 pub fn dialogue_overlay_tree(content: &DialogueOverlayContent) -> Result<UiTree, UiError> {
-    let dim = WidgetStyle::default().with_background(ColorToken::Custom(UiColor::rgba(
-        4, 8, 18, 180,
-    )));
+    let dim =
+        WidgetStyle::default().with_background(ColorToken::Custom(UiColor::rgba(4, 8, 18, 180)));
     let panel = WidgetStyle::default()
         .with_background(ColorToken::Custom(UiColor::rgb(18, 28, 48)))
         .with_padding(Insets::all(20))
@@ -2639,9 +2751,11 @@ impl ApplicationHandler for ApplicationHost {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "ui-text")]
+    use super::NativeUiTextConfig;
+    use super::{Application, ApplicationHost, CursorControl, RenderLoop};
     #[cfg(feature = "ui")]
     use super::{ApplicationUi, UiVisualStyle, pause_overlay_tree};
-    use super::{Application, ApplicationHost, CursorControl, RenderLoop};
     #[cfg(feature = "webview")]
     use super::{
         ApplicationWebView, ApplicationWebViewCommandError, ApplicationWebViewError,
@@ -2663,19 +2777,17 @@ mod tests {
         event::ElementState,
         keyboard::{KeyCode, PhysicalKey},
     };
-    #[cfg(feature = "ui")]
-    use yuyib_ui::{LayoutKind, Size, UiAction, UiBuilder, Widget, WidgetId};
     #[cfg(feature = "ui-text")]
     use yuyib_ui::{
         Color as UiColor, ColorToken, Dimension, Insets, LayoutConstraints, UiInputState, UiTree,
         WidgetStyle, layout_with_input_state,
     };
+    #[cfg(feature = "ui")]
+    use yuyib_ui::{LayoutKind, Size, UiAction, UiBuilder, Widget, WidgetId};
     #[cfg(feature = "ui-text")]
     use yuyib_ui_text::FontSource;
     #[cfg(feature = "ui-text")]
     use yuyib_ui_text_render::TextClipRect;
-    #[cfg(feature = "ui-text")]
-    use super::NativeUiTextConfig;
     #[cfg(feature = "webview")]
     use yuyib_webview::{BridgeLimits, EndpointName, PageEvent, PageSessionId, WebViewBuilder};
 
@@ -2922,9 +3034,7 @@ mod tests {
         let style = UiVisualStyle::default().with_focus_outline(None);
         let mut ui = ApplicationUi::new(tree).with_visual_style(style);
         assert_eq!(ui.visual_style(), style);
-        let list = ui
-            .extract_draw_list(Size::new(640, 360))
-            .expect("extract");
+        let list = ui.extract_draw_list(Size::new(640, 360)).expect("extract");
         assert!(!list.is_empty());
     }
 
@@ -3008,9 +3118,8 @@ mod tests {
     fn scroll_text_tree() -> UiTree {
         UiBuilder::new(WidgetId::from_key("root"), LayoutKind::Column)
             .child(
-                Widget::label(WidgetId::from_key("outside"), "outside").with_constraints(
-                    LayoutConstraints::auto().with_height(Dimension::Points(20)),
-                ),
+                Widget::label(WidgetId::from_key("outside"), "outside")
+                    .with_constraints(LayoutConstraints::auto().with_height(Dimension::Points(20))),
             )
             .child(
                 Widget::scroll_view(WidgetId::from_key("scroll"))
@@ -3041,9 +3150,8 @@ mod tests {
     #[test]
     fn scroll_view_text_clip_matches_viewport_and_skips_siblings() {
         let tree = scroll_text_tree();
-        let layout =
-            layout_with_input_state(&tree, Size::new(100, 100), &UiInputState::default())
-                .expect("layout");
+        let layout = layout_with_input_state(&tree, Size::new(100, 100), &UiInputState::default())
+            .expect("layout");
         let scroll = layout
             .bounds(WidgetId::from_key("scroll"))
             .expect("scroll bounds");
@@ -3097,23 +3205,27 @@ mod tests {
                                                 .with_width(Dimension::Points(100))
                                                 .with_height(Dimension::Points(80)),
                                         )
-                                        .with_children(vec![
-                                            Widget::label(WidgetId::from_key("nested"), "nested")
+                                        .with_children(
+                                            vec![
+                                                Widget::label(
+                                                    WidgetId::from_key("nested"),
+                                                    "nested",
+                                                )
                                                 .with_constraints(
                                                     LayoutConstraints::auto()
                                                         .with_width(Dimension::Points(100))
                                                         .with_height(Dimension::Points(24)),
                                                 ),
-                                        ]),
+                                            ],
+                                        ),
                                     ]),
                             ]),
                     ]),
             )
             .build()
             .expect("nested scroll tree");
-        let layout =
-            layout_with_input_state(&tree, Size::new(100, 100), &UiInputState::default())
-                .expect("layout");
+        let layout = layout_with_input_state(&tree, Size::new(100, 100), &UiInputState::default())
+            .expect("layout");
         let inner = layout
             .bounds(WidgetId::from_key("inner"))
             .expect("inner bounds");
@@ -3204,10 +3316,17 @@ mod tests {
                                 .with_width(Dimension::Fill)
                                 .with_height(Dimension::Points(400)),
                         )
-                        .with_style(WidgetStyle::default().with_padding(Insets::all(8)).with_gap(6))
+                        .with_style(
+                            WidgetStyle::default()
+                                .with_padding(Insets::all(8))
+                                .with_gap(6),
+                        )
                         .with_children(vec![
-                            Widget::label(WidgetId::from_key("buttons-title"), "Кнопки и ScrollView")
-                                .with_style(note),
+                            Widget::label(
+                                WidgetId::from_key("buttons-title"),
+                                "Кнопки и ScrollView",
+                            )
+                            .with_style(note),
                             Widget::button(WidgetId::from_key("button-play"), "Запустить")
                                 .with_constraints(
                                     LayoutConstraints::auto().with_width(Dimension::Fill),
@@ -3216,9 +3335,7 @@ mod tests {
                                 WidgetId::from_key("diagnostic-row-0"),
                                 "Диагностика #00: bounded retained UI scroll row",
                             )
-                            .with_constraints(
-                                LayoutConstraints::auto().with_width(Dimension::Fill),
-                            )
+                            .with_constraints(LayoutConstraints::auto().with_width(Dimension::Fill))
                             .with_style(
                                 WidgetStyle::default()
                                     .with_background(ColorToken::SurfaceMuted)
@@ -3236,10 +3353,7 @@ mod tests {
             .with_text(NativeUiTextConfig::new(FontSource::file(FONT)))
             .expect("text config");
 
-        let layout = ui
-            .layout_for(Size::new(1280, 760))
-            .expect("layout")
-            .clone();
+        let layout = ui.layout_for(Size::new(1280, 760)).expect("layout").clone();
         let title_bounds = layout
             .bounds(WidgetId::from_key("gallery-title"))
             .expect("title bounds");

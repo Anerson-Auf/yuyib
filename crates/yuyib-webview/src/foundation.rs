@@ -14,6 +14,7 @@ use std::{
     sync::Arc,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::Value;
 use url::Url;
@@ -860,6 +861,63 @@ impl fmt::Display for BridgeLimitsError {
 
 impl Error for BridgeLimitsError {}
 
+/// Compact byte payload carried through the string-only WebView IPC boundary.
+///
+/// WebView2/Wry IPC delivers text, not an OS-owned `ArrayBuffer`. This type
+/// uses standard Base64 only at that boundary, avoiding the much larger and
+/// slower JSON-number-array representation. Applications decode their typed
+/// snapshot only after endpoint/session/size validation has succeeded.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct BinaryPayload {
+    encoding: String,
+    bytes: String,
+}
+
+impl BinaryPayload {
+    /// Encodes bounded binary data for a bridge payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::PayloadTooLarge`] when the encoded payload would
+    /// exceed the configured JSON payload limit.
+    pub fn new(bytes: impl AsRef<[u8]>, limits: BridgeLimits) -> Result<Self, BridgeError> {
+        let payload = Self {
+            encoding: "base64".to_owned(),
+            bytes: BASE64.encode(bytes.as_ref()),
+        };
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|_| BridgeError::Serialization)?
+            .len();
+        if payload_bytes > limits.max_payload_bytes {
+            return Err(BridgeError::PayloadTooLarge {
+                limit: limits.max_payload_bytes,
+            });
+        }
+        Ok(payload)
+    }
+
+    /// Decodes the binary payload after validating its encoding and size.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bridge error for a malformed/non-base64 payload or decoded
+    /// bytes beyond the selected payload limit.
+    pub fn decode(&self, limits: BridgeLimits) -> Result<Vec<u8>, BridgeError> {
+        if self.encoding != "base64" {
+            return Err(BridgeError::UnsupportedBinaryEncoding);
+        }
+        let bytes = BASE64
+            .decode(&self.bytes)
+            .map_err(|_| BridgeError::InvalidBinaryPayload)?;
+        if bytes.len() > limits.max_payload_bytes {
+            return Err(BridgeError::PayloadTooLarge {
+                limit: limits.max_payload_bytes,
+            });
+        }
+        Ok(bytes)
+    }
+}
+
 /// A bounded validated JSON message ready for future endpoint routing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BridgeEnvelope {
@@ -894,6 +952,23 @@ impl BridgeEnvelope {
         };
         value.validate(limits)?;
         Ok(value)
+    }
+
+    /// Creates an envelope whose payload is a compact binary byte sequence.
+    ///
+    /// The wire envelope remains JSON for the Wry IPC boundary, while the
+    /// snapshot data itself is Base64 rather than a JSON array of numbers.
+    pub fn from_binary(
+        version: u16,
+        session: PageSessionId,
+        id: MessageId,
+        endpoint: EndpointName,
+        bytes: impl AsRef<[u8]>,
+        limits: BridgeLimits,
+    ) -> Result<Self, BridgeError> {
+        let payload = serde_json::to_value(BinaryPayload::new(bytes, limits)?)
+            .map_err(|_| BridgeError::Serialization)?;
+        Self::new(version, session, id, endpoint, payload, limits)
     }
 
     /// Parses and validates one untrusted JSON message.
@@ -970,6 +1045,20 @@ impl BridgeEnvelope {
     #[must_use]
     pub const fn payload(&self) -> &Value {
         &self.payload
+    }
+
+    /// Decodes this envelope's compact binary payload.
+    ///
+    /// Endpoint routers that expect snapshots may call this after routing, or
+    /// deserialize [`BinaryPayload`] from [`Self::payload`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON payload is not a valid binary payload.
+    pub fn binary_payload(&self, limits: BridgeLimits) -> Result<Vec<u8>, BridgeError> {
+        let payload: BinaryPayload = serde_json::from_value(self.payload.clone())
+            .map_err(|_| BridgeError::InvalidBinaryPayload)?;
+        payload.decode(limits)
     }
 
     fn validate(&self, limits: BridgeLimits) -> Result<(), BridgeError> {
@@ -1221,6 +1310,10 @@ pub enum BridgeError {
         /// Configured byte limit.
         limit: usize,
     },
+    /// The payload did not use the one permitted binary encoding.
+    UnsupportedBinaryEncoding,
+    /// Base64 binary payload data was malformed or had the wrong JSON shape.
+    InvalidBinaryPayload,
     /// JSON serialization failed.
     Serialization,
 }
@@ -1247,6 +1340,10 @@ impl fmt::Display for BridgeError {
             Self::PayloadTooLarge { limit } => {
                 write!(formatter, "bridge payload exceeds {limit} bytes")
             }
+            Self::UnsupportedBinaryEncoding => {
+                formatter.write_str("bridge binary payload must use base64 encoding")
+            }
+            Self::InvalidBinaryPayload => formatter.write_str("bridge binary payload is invalid"),
             Self::Serialization => formatter.write_str("bridge JSON serialization failed"),
         }
     }
@@ -1781,6 +1878,27 @@ mod tests {
             ),
             Err(BridgeError::UnsupportedVersion { .. })
         ));
+    }
+
+    #[test]
+    fn binary_bridge_payload_round_trips_without_json_number_arrays() {
+        let limits = BridgeLimits::new(1, 512, 256, 96).expect("limits");
+        let envelope = BridgeEnvelope::from_binary(
+            1,
+            session(),
+            MessageId::new(NonZeroU64::new(9).expect("non-zero")),
+            EndpointName::parse("scene.snapshot").expect("endpoint"),
+            [0, 255, 17, 42],
+            limits,
+        )
+        .expect("bounded binary envelope");
+        let json = envelope.to_json(limits).expect("wire JSON");
+        assert!(!String::from_utf8_lossy(&json).contains("[0,255,17,42]"));
+        let decoded = BridgeEnvelope::parse_json(&json, limits).expect("validated envelope");
+        assert_eq!(
+            decoded.binary_payload(limits).expect("decoded payload"),
+            [0, 255, 17, 42]
+        );
     }
 
     #[test]

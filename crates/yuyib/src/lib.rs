@@ -183,7 +183,17 @@ pub mod prelude {
         extract_tiles_2d, extract_tiles_chunked_2d, extract_visible_sprites_2d,
         resolve_cardinal_clips_2d, resolve_kinematic_tilemap_aabb_2d, resolve_velocity_facing_2d,
         step_kinematic_sprite_controller_2d, step_sprite_animations_2d, step_sprite_animators_2d,
-        step_tile_map_animations_2d, Cardinal2d, CardinalClipPolicy2d,
+        step_tile_map_animations_2d, step_vector_particles_2d, Cardinal2d, CardinalClipPolicy2d,
+        Decal2d, ExtractedVectorShapes2d, Layer2d, Particle2d, ParticleEmitter2d, VectorShape2d,
+        extract_vector_shapes_2d,
+    };
+    #[cfg(feature = "two-d")]
+    pub use crate::render_2d::{
+        GpuVectorMesh2d, RetainedVectorScene2d, VectorBlendMode2d, VectorClipRect2d,
+        VectorAabb2d, VectorDraw2d, VectorDrawStats2d, VectorFill2d, VectorGradientStop2d,
+        VectorMesh2d, VectorMeshError2d, VectorMeshId2d, VectorPath2d, VectorPathCommand2d,
+        VectorPathError2d, VectorRenderBudget2d, VectorRenderer2d, VectorSceneError2d,
+        VectorVertex2d,
     };
     #[cfg(feature = "three-d")]
     pub use crate::game_3d::{
@@ -346,5 +356,5 @@ pub mod prelude {
         TextViewport,
     };
     #[cfg(feature = "webview")]
-    pub use crate::webview::{PageEvent, PageSessionId};
+    pub use crate::webview::{BinaryPayload, PageEvent, PageSessionId};
 }

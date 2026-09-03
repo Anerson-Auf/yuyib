@@ -34,9 +34,11 @@
 #![forbid(unsafe_code)]
 
 mod animator;
+mod batch;
 mod composer;
 mod nav;
 mod scene;
+mod vector;
 
 pub use animator::{
     Cardinal2d, CardinalClipPolicy2d, SpriteAnimator2d, SpriteAnimatorError2d, SpriteFacing2d,
@@ -44,11 +46,19 @@ pub use animator::{
     apply_velocity_facing_2d, resolve_cardinal_clips_2d, resolve_velocity_facing_2d,
     step_sprite_animators_2d,
 };
+pub use batch::{
+    SpriteBatch2d, SpriteBatch2dConfig, SpriteBatch2dConfigError, SpriteBatch2dError,
+    SpriteBatch2dStats, SpriteInstance2d,
+};
 pub use composer::{TileMapComposer2d, TileMapComposerError2d, TileStamp2d};
 pub use nav::{TileNavError2d, TileNavGrid2d};
 pub use scene::{
     DrawBudget2d, Game2dScene, Game2dSceneConfig, Game2dSceneConfigError, Game2dSceneError,
     Game2dSceneStats, TextureCacheConfig2d, TextureQueueError2d,
+};
+pub use vector::{
+    Decal2d, ExtractedVectorShapes2d, Layer2d, Particle2d, ParticleEmitter2d, VectorShape2d,
+    extract_vector_shapes_2d, step_vector_particles_2d,
 };
 pub use yuyib_animation::{
     AnimationError, AnimationSet, AnimationStateDef, AnimationStateMachine, PlayOutcome,
@@ -262,6 +272,60 @@ impl SpriteViewport2d {
         self.size
     }
 
+    /// Tests whether a finite sprite draw intersects this viewport.
+    ///
+    /// The test uses the draw's conservative rotated AABB, so it can keep a
+    /// sprite that is just outside the viewport. That is intentional: culling
+    /// must never hide pixels that could be visible. A draw touching only an
+    /// edge is excluded, matching [`Self::new`]'s half-open viewport contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpriteCullingError2d`] when the draw contains non-finite
+    /// geometry or its derived rotated bounds are non-finite.
+    pub fn intersects_draw(self, draw: SpriteDraw) -> Result<bool, SpriteCullingError2d> {
+        if !draw.position.iter().all(|value| value.is_finite())
+            || !draw.size.iter().all(|value| value.is_finite())
+            || !draw.rotation_radians.is_finite()
+        {
+            return Err(SpriteCullingError2d::InvalidGeometry);
+        }
+
+        let half_width = draw.size[0].abs() * 0.5;
+        let half_height = draw.size[1].abs() * 0.5;
+        let cosine = draw.rotation_radians.cos().abs();
+        let sine = draw.rotation_radians.sin().abs();
+        let extent_x = cosine * half_width + sine * half_height;
+        let extent_y = sine * half_width + cosine * half_height;
+        let left = draw.position[0] - extent_x;
+        let right = draw.position[0] + extent_x;
+        let top = draw.position[1] - extent_y;
+        let bottom = draw.position[1] + extent_y;
+        if ![
+            half_width,
+            half_height,
+            cosine,
+            sine,
+            extent_x,
+            extent_y,
+            left,
+            right,
+            top,
+            bottom,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+        {
+            return Err(SpriteCullingError2d::InvalidGeometry);
+        }
+
+        let viewport_end = self.end();
+        Ok(right > self.origin[0]
+            && left < viewport_end[0]
+            && bottom > self.origin[1]
+            && top < viewport_end[1])
+    }
+
     fn end(self) -> [f32; 2] {
         [self.origin[0] + self.size[0], self.origin[1] + self.size[1]]
     }
@@ -285,6 +349,21 @@ impl std::fmt::Display for SpriteViewportError {
 }
 
 impl std::error::Error for SpriteViewportError {}
+
+/// A sprite draw could not be safely tested against a [`SpriteViewport2d`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpriteCullingError2d {
+    /// Position, size, rotation, or a derived rotated AABB was `NaN` or infinite.
+    InvalidGeometry,
+}
+
+impl std::fmt::Display for SpriteCullingError2d {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid sprite culling input: {self:?}")
+    }
+}
+
+impl std::error::Error for SpriteCullingError2d {}
 
 /// Validated maximum for one viewport-culled sprite snapshot.
 ///
@@ -366,49 +445,6 @@ impl std::fmt::Display for VisibleSpriteExtractError {
 
 impl std::error::Error for VisibleSpriteExtractError {}
 
-fn sprite_intersects_viewport(sprite: &Sprite2d, viewport: SpriteViewport2d) -> Result<bool, ()> {
-    if !sprite.position.iter().all(|value| value.is_finite())
-        || !sprite.size.iter().all(|value| value.is_finite())
-        || !sprite.rotation_radians.is_finite()
-    {
-        return Err(());
-    }
-
-    let half_width = sprite.size[0].abs() * 0.5;
-    let half_height = sprite.size[1].abs() * 0.5;
-    let cosine = sprite.rotation_radians.cos().abs();
-    let sine = sprite.rotation_radians.sin().abs();
-    let extent_x = cosine * half_width + sine * half_height;
-    let extent_y = sine * half_width + cosine * half_height;
-    let left = sprite.position[0] - extent_x;
-    let right = sprite.position[0] + extent_x;
-    let top = sprite.position[1] - extent_y;
-    let bottom = sprite.position[1] + extent_y;
-    if ![
-        half_width,
-        half_height,
-        cosine,
-        sine,
-        extent_x,
-        extent_y,
-        left,
-        right,
-        top,
-        bottom,
-    ]
-    .iter()
-    .all(|value| value.is_finite())
-    {
-        return Err(());
-    }
-
-    let viewport_end = viewport.end();
-    Ok(right > viewport.origin[0]
-        && left < viewport_end[0]
-        && bottom > viewport.origin[1]
-        && top < viewport_end[1])
-}
-
 fn batches_from_ordered_sprite_draws(extracted: Vec<(u64, SpriteDraw)>) -> ExtractedSprites {
     let mut extracted = extracted;
     extracted.sort_by_key(|(entity_bits, draw)| (draw.layer, *entity_bits));
@@ -473,8 +509,9 @@ pub fn extract_visible_sprites_2d(
     let mut visible = Vec::new();
     let mut query = world.query::<(Entity, &Sprite2d)>();
     for (entity, sprite) in query.iter(world) {
-        let intersects = sprite_intersects_viewport(sprite, viewport)
-            .map_err(|()| VisibleSpriteExtractError::InvalidSpriteGeometry { entity })?;
+        let intersects = viewport
+            .intersects_draw(sprite.to_draw())
+            .map_err(|_| VisibleSpriteExtractError::InvalidSpriteGeometry { entity })?;
         if !intersects {
             continue;
         }

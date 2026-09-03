@@ -362,6 +362,11 @@ path = "examples/native_ui_gallery.rs"
 required-features = ["ui"]
 
 [[example]]
+name = "native_ui_custom_control"
+path = "examples/native_ui_custom_control.rs"
+required-features = ["ui"]
+
+[[example]]
 name = "sprite_animator_2d_smoke"
 path = "examples/sprite_animator_2d_smoke.rs"
 required-features = ["two-d"]

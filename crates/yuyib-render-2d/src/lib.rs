@@ -52,6 +52,20 @@ use yuyib_2d::{
 use yuyib_image::DecodedImage;
 use yuyib_render::{RenderFrame, Renderer, wgpu};
 
+/// Retained, GPU-native vector meshes and an instance-based scene facade.
+///
+/// Unlike browser Canvas commands, vector paths are tessellated before they
+/// enter this API and uploaded only when their immutable mesh changes. Normal
+/// frames update a compact transform/tint instance buffer.
+pub mod vector;
+
+pub use vector::{
+    GpuVectorMesh2d, RetainedVectorScene2d, VectorAabb2d, VectorBlendMode2d, VectorClipRect2d,
+    VectorDraw2d, VectorDrawStats2d, VectorFill2d, VectorGradientStop2d, VectorMesh2d,
+    VectorMeshError2d, VectorMeshId2d, VectorPath2d, VectorPathCommand2d, VectorPathError2d,
+    VectorRenderBudget2d, VectorRenderer2d, VectorSceneError2d, VectorVertex2d,
+};
+
 /// An orthographic 2D camera with its origin at the centre of the presentation surface.
 ///
 /// World units are pixels by default. Increasing `pixels_per_unit` zooms in;

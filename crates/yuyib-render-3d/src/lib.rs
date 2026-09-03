@@ -66,6 +66,7 @@ mod scene;
 mod shadow;
 mod skybox;
 mod ssao;
+mod static_world;
 
 pub use equirect::{EquirectEnvironmentError, PreparedEquirectEnvironment3d};
 pub use ggx_cook::{GgxCookConfig, GgxCookError, cook_ggx_specular_ibl};
@@ -102,6 +103,10 @@ pub use skybox::{
     GpuSkybox3d, PreparedSkybox3d, SkyboxError, SkyboxRenderError, SkyboxRenderer3d,
 };
 pub use ssao::{SsaoPolicy, SsaoPolicyError};
+pub use static_world::{
+    StaticWorld3d, StaticWorldBatch3d, StaticWorldBuildError3d, StaticWorldBuildStats3d,
+    StaticWorldDrawStats3d, StaticWorldRenderer3d, StaticWorldUploadError3d,
+};
 
 use std::{collections::HashMap, error::Error, fmt, mem::size_of, num::NonZeroU64, sync::Arc};
 
