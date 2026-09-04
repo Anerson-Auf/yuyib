@@ -14,7 +14,7 @@ use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 use yuyib_2d::{Texture, TextureHandle, TextureSize, TextureSizeError};
 use yuyib_assets::Assets;
 use yuyib_model::{AlphaMode, Material, MaterialIndex, MeshPrimitive, Model};
-use yuyib_render::RenderFrame;
+use yuyib_render::{RenderFrame, wgpu};
 use yuyib_render_texture::{
     PreparedTextureUpload, TextureCache, TextureSampler, TextureSamplingPreset, TextureUploadError,
 };
@@ -456,6 +456,27 @@ impl StaticWorldTexture3d {
             pixels,
             TextureSamplingPreset::HighQuality.sampler(),
         )
+    }
+
+    /// Validates RGBA8 pixels and prepares a high-quality repeating 2D texture.
+    ///
+    /// This is the normal policy for brush/world materials whose authored UVs
+    /// intentionally extend outside `0..=1`, including Source 1 BSP surfaces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StaticWorldTextureError3d`] under the same conditions as
+    /// [`Self::rgba8`].
+    pub fn rgba8_repeating(
+        cache_key: impl Into<String>,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Result<Self, StaticWorldTextureError3d> {
+        let mut sampler = TextureSamplingPreset::HighQuality.sampler();
+        sampler.address_mode_u = wgpu::AddressMode::Repeat;
+        sampler.address_mode_v = wgpu::AddressMode::Repeat;
+        Self::rgba8_with_sampler(cache_key, width, height, pixels, sampler)
     }
 
     /// Sampler-configurable equivalent of [`Self::rgba8`].

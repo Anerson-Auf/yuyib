@@ -324,6 +324,23 @@ mod tests {
     }
 
     #[test]
+    fn source_keys_ignore_case_and_quoted_paths_keep_backslashes() {
+        let material = parse(
+            r#"LightmappedGeneric {
+                "$baseTexture" "antmaps\medieval\wood_roof2"
+                "$SurfaceProp" "wood"
+            }"#,
+        )
+        .expect("ordinary Source VMT");
+
+        assert_eq!(
+            material.base_texture(),
+            Some("antmaps\\medieval\\wood_roof2")
+        );
+        assert_eq!(material.surface_prop(), Some("wood"));
+    }
+
+    #[test]
     fn malformed_and_budgeted_input_is_rejected() {
         assert!(matches!(
             parse("LightmappedGeneric {"),

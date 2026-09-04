@@ -1,6 +1,6 @@
 //! Source 1 VTF decoding into renderer-neutral RGBA8 pixels.
 //!
-//! Supports ordinary 2D, one-frame VTF 7.0 through 7.4 files and the common
+//! Supports ordinary 2D, one-frame VTF 7.0 through 7.5 files and the common
 //! RGBA8888, BGRA8888, BGR888, DXT1, DXT3 and DXT5 encodings.
 
 #![forbid(unsafe_code)]
@@ -237,7 +237,7 @@ impl Header {
         })
     }
     fn validate(self, limits: VtfLimits) -> Result<(), VtfError> {
-        if self.major != 7 || self.minor > 4 {
+        if self.major != 7 || self.minor > 5 {
             return Err(VtfError::UnsupportedVersion {
                 major: self.major,
                 minor: self.minor,
@@ -471,14 +471,12 @@ fn dxt5_alpha(src: &[u8]) -> [u8; 16] {
     table[0] = a0;
     table[1] = a1;
     if a0 > a1 {
-        for i in 2..8 {
-            table[i] =
-                (((8 - i) as u16 * u16::from(a0) + (i - 1) as u16 * u16::from(a1)) / 7) as u8;
+        for (i, value) in table.iter_mut().enumerate().skip(2) {
+            *value = (((8 - i) as u16 * u16::from(a0) + (i - 1) as u16 * u16::from(a1)) / 7) as u8;
         }
     } else {
-        for i in 2..6 {
-            table[i] =
-                (((6 - i) as u16 * u16::from(a0) + (i - 1) as u16 * u16::from(a1)) / 5) as u8;
+        for (i, value) in table.iter_mut().enumerate().take(6).skip(2) {
+            *value = (((6 - i) as u16 * u16::from(a0) + (i - 1) as u16 * u16::from(a1)) / 5) as u8;
         }
         table[6] = 0;
         table[7] = 255;
@@ -614,6 +612,23 @@ mod tests {
         bytes.extend([0, 0xf8, 0x1f, 0, 0, 0, 0, 0]);
         assert_eq!(
             decode(&bytes).expect("v74").source_format(),
+            VtfHighResFormat::Dxt1
+        );
+    }
+
+    #[test]
+    fn reads_v75_resource_directory() {
+        let mut bytes = vtf(13, 4, 4, &[]);
+        bytes[8..12].copy_from_slice(&5_u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&96_u32.to_le_bytes());
+        bytes.resize(96, 0);
+        bytes[68..72].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[80..83].copy_from_slice(&HIGH_RES_RESOURCE);
+        bytes[84..88].copy_from_slice(&96_u32.to_le_bytes());
+        bytes.extend([0, 0xf8, 0x1f, 0, 0, 0, 0, 0]);
+
+        assert_eq!(
+            decode(&bytes).expect("VTF 7.5").source_format(),
             VtfHighResFormat::Dxt1
         );
     }

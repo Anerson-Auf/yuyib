@@ -238,7 +238,7 @@ impl Source1BspLoader {
                         Arc::clone(texture)
                     } else {
                         let texture = Arc::new(
-                            StaticWorldTexture3d::rgba8(
+                            StaticWorldTexture3d::rgba8_repeating(
                                 cache_key.clone(),
                                 resolved.width,
                                 resolved.height,
@@ -700,38 +700,65 @@ fn cook_displacement(
         })?;
     let mut positions = Vec::with_capacity(vertex_count);
     let mut tex_coords = uvs.as_ref().map(|_| Vec::with_capacity(vertex_count));
-    for y in 0..side {
-        let ty = y as f32 / subdivisions as f32;
-        for x in 0..side {
-            let tx = x as f32 / subdivisions as f32;
-            let base = bilinear3(corners[0], corners[1], corners[2], corners[3], tx, ty);
-            let displacement = disp[y * side + x];
+    for row in 0..side {
+        let along_edge = row as f32 / subdivisions as f32;
+        for column in 0..side {
+            let across_edges = column as f32 / subdivisions as f32;
+            // Source stores each outer row along corner 0 -> 1, then each
+            // inner column across that row toward corner 3 -> 2.
+            let base = bilinear3(
+                corners[0],
+                corners[1],
+                corners[2],
+                corners[3],
+                along_edge,
+                across_edges,
+            );
+            let displacement = disp[row * side + column];
             positions.push(source_position_to_yuyib(add3(
                 base,
                 scale3(displacement.vector, displacement.distance),
             )));
             if let (Some(source), Some(target)) = (uvs.as_ref(), tex_coords.as_mut()) {
                 target.push(bilinear2(
-                    source[0], source[1], source[2], source[3], tx, ty,
+                    source[0],
+                    source[1],
+                    source[2],
+                    source[3],
+                    along_edge,
+                    across_edges,
                 ));
             }
         }
     }
     let mut indices = Vec::with_capacity(subdivisions * subdivisions * 6);
-    for y in 0..subdivisions {
-        for x in 0..subdivisions {
-            let top_left = (y * side + x) as u32;
+    for row in 0..subdivisions {
+        for column in 0..subdivisions {
+            let top_left = (row * side + column) as u32;
             let top_right = top_left + 1;
-            let bottom_left = ((y + 1) * side + x) as u32;
+            let bottom_left = ((row + 1) * side + column) as u32;
             let bottom_right = bottom_left + 1;
-            indices.extend([
-                top_left,
-                bottom_left,
-                top_right,
-                top_right,
-                bottom_left,
-                bottom_right,
-            ]);
+            if top_left.is_multiple_of(2) {
+                // Source's BL-to-TR diagonal.
+                indices.extend([
+                    top_left,
+                    bottom_left,
+                    bottom_right,
+                    top_left,
+                    bottom_right,
+                    top_right,
+                ]);
+            } else {
+                // Source's TL-to-BR diagonal.
+                indices.extend([
+                    top_left,
+                    bottom_left,
+                    top_right,
+                    top_right,
+                    bottom_left,
+                    bottom_right,
+                ]);
+            }
         }
     }
     orient_triangles(&positions, &mut indices, outward);
@@ -1166,5 +1193,70 @@ impl Error for Source1BspImportError {
             | Self::InvalidDisplacement { .. }
             | Self::ColliderVertexOverflow => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn displacement_rows_follow_source_corner_order_and_checkerboard_diagonals() {
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [6.0, 3.0, 0.0],
+            [0.0, 2.0, 0.0],
+        ];
+        let source_uv = [[0.0, 0.0], [4.0, 0.0], [6.0, 3.0], [0.0, 2.0]];
+        let face = BspFace {
+            plane: 0,
+            side: false,
+            on_node: true,
+            first_edge: 0,
+            edge_count: 4,
+            tex_info: 0,
+            displacement: 0,
+            light_offset: -1,
+            area: 12.0,
+        };
+        let info = BspDisplacementInfo {
+            start_position: corners[0],
+            displacement_vertex_start: 0,
+            power: 2,
+            map_face: 0,
+        };
+        let vertices = vec![
+            BspDisplacementVertex {
+                vector: [0.0, 0.0, 1.0],
+                distance: 0.0,
+                alpha: 0.0,
+            };
+            25
+        ];
+
+        let primitive = cook_displacement(
+            0,
+            face,
+            &corners,
+            Some(&source_uv),
+            [0.0, 1.0, 0.0],
+            &[info],
+            &vertices,
+            None,
+        )
+        .expect("valid displacement");
+
+        // Inner column 1 moves from corner 0 toward corner 3. Outer row 1
+        // moves from corner 0 toward corner 1, matching Valve's builddisp.
+        assert_eq!(primitive.positions()[1], [0.0, 0.0, -0.5]);
+        assert_eq!(primitive.positions()[5], [1.0, 0.0, 0.0]);
+        assert_eq!(primitive.tex_coords_0().expect("UV0")[1], [0.0, 0.5]);
+        assert_eq!(primitive.tex_coords_0().expect("UV0")[5], [1.0, 0.0]);
+
+        assert_eq!(
+            &primitive.indices()[..12],
+            &[0, 5, 6, 0, 6, 1, 1, 6, 2, 2, 6, 7]
+        );
     }
 }

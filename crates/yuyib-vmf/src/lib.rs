@@ -168,7 +168,7 @@ impl VmfBlock {
     pub fn property(&self, key: &str) -> Option<&str> {
         self.properties
             .iter()
-            .find(|property| property.key == key)
+            .find(|property| property.key.eq_ignore_ascii_case(key))
             .map(VmfProperty::value)
     }
 }
@@ -543,11 +543,13 @@ impl<'a> Lexer<'a> {
                     match escaped {
                         '"' => value.push('"'),
                         '\\' => value.push('\\'),
-                        'n' => value.push('\n'),
-                        'r' => value.push('\r'),
-                        't' => value.push('\t'),
+                        // Source KeyValues material paths commonly contain
+                        // unescaped Windows separators, including `\tree`.
+                        // Only quote/backslash escapes are unambiguous here;
+                        // every other pair remains literal.
                         character => {
-                            return Err(self.error(VmfParseErrorKind::InvalidEscape { character }));
+                            value.push('\\');
+                            value.push(character);
                         }
                     }
                 }
@@ -944,11 +946,17 @@ entity
 
     #[test]
     fn comments_and_supported_escapes_are_unambiguous() {
-        let map = parse("entity { \"classname\" \"info\\\\\\\"target // literal\" } // comment")
-            .expect("valid");
+        let map = parse(
+            "entity { \"ClassName\" \"info\\\\\\\"target // literal\" \"model\" \"models\\props\\tree.mdl\" } // comment",
+        )
+        .expect("valid");
         assert_eq!(
             map.entities()[0].classname(),
             Some("info\\\"target // literal")
+        );
+        assert_eq!(
+            map.entities()[0].block().property("MODEL"),
+            Some("models\\props\\tree.mdl")
         );
     }
 
