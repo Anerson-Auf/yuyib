@@ -493,12 +493,6 @@ impl DepthLoad {
     }
 }
 
-/// Maximum unlit instances uploaded in one [`MeshRenderer3d`] batch.
-///
-/// Editor gizmos need a handful of parts; keeping this small avoids oversized
-/// uniform buffers while still covering multi-draw overlays.
-const UNLIT_MESH_INSTANCE_CAPACITY: u64 = 32;
-
 /// High-level unlit mesh GPU API.
 ///
 /// Construct this renderer once per presentation format, upload meshes during
@@ -519,18 +513,30 @@ pub struct MeshRenderer3d {
     camera_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     instance_stride: u64,
+    batch_capacity: usize,
     camera_bind_group: wgpu::BindGroup,
     instance_bind_group: wgpu::BindGroup,
 }
 
 impl MeshRenderer3d {
+    /// Default number of draws accepted by one unlit render pass.
+    ///
+    /// Specialized resident renderers may allocate a larger fixed capacity
+    /// during loading; neither route grows buffers during gameplay frames.
+    pub const DEFAULT_BATCH_CAPACITY: usize = 32;
+
     /// Creates a renderer using the presentation format configured on `renderer`.
     #[must_use]
     pub fn new(renderer: &Renderer) -> Self {
         let depth_format = renderer.depth_format();
         let color_format = renderer.color_target_format();
         renderer.with_raw_gpu(|device, _queue, _configuration| {
-            Self::create(device, color_format, depth_format)
+            Self::create(
+                device,
+                color_format,
+                depth_format,
+                Self::DEFAULT_BATCH_CAPACITY,
+            )
         })
     }
 
@@ -540,7 +546,26 @@ impl MeshRenderer3d {
     /// Production applications should generally use [`Self::new`] during setup.
     #[must_use]
     pub fn new_for_frame(frame: &RenderFrame<'_>) -> Self {
-        Self::create(frame.device(), frame.surface_format(), frame.depth_format())
+        Self::new_for_frame_with_batch_capacity(frame, Self::DEFAULT_BATCH_CAPACITY)
+    }
+
+    /// Creates a frame-bound renderer with loading-time fixed batch capacity.
+    pub(crate) fn new_for_frame_with_batch_capacity(
+        frame: &RenderFrame<'_>,
+        batch_capacity: usize,
+    ) -> Self {
+        Self::create(
+            frame.device(),
+            frame.surface_format(),
+            frame.depth_format(),
+            batch_capacity,
+        )
+    }
+
+    /// Number of draws accepted by one batch on this renderer instance.
+    #[must_use]
+    pub const fn batch_capacity(&self) -> usize {
+        self.batch_capacity
     }
 
     /// Uploads positions and indices from a validated primitive.
@@ -733,7 +758,7 @@ impl MeshRenderer3d {
     /// # Errors
     ///
     /// Returns [`MeshRenderError`] for invalid camera/matrix/colour data, or
-    /// when `draws` exceeds [`UNLIT_MESH_INSTANCE_CAPACITY`].
+    /// when `draws` exceeds [`Self::batch_capacity`].
     pub fn draw_batch_depth_clear_double_sided(
         &self,
         frame: &mut RenderFrame<'_>,
@@ -750,7 +775,7 @@ impl MeshRenderer3d {
     /// # Errors
     ///
     /// Returns [`MeshRenderError`] for invalid camera/matrix/colour data, or
-    /// when `draws` exceeds [`UNLIT_MESH_INSTANCE_CAPACITY`].
+    /// when `draws` exceeds [`Self::batch_capacity`].
     pub fn draw_batch_with_depth_load_double_sided(
         &self,
         frame: &mut RenderFrame<'_>,
@@ -765,10 +790,10 @@ impl MeshRenderer3d {
                 transient_uniform_buffer_allocations: 0,
             });
         }
-        if draws.len() as u64 > UNLIT_MESH_INSTANCE_CAPACITY {
+        if draws.len() > self.batch_capacity {
             return Err(MeshRenderError::BatchTooLarge {
                 requested: draws.len(),
-                capacity: UNLIT_MESH_INSTANCE_CAPACITY as usize,
+                capacity: self.batch_capacity,
             });
         }
         let view_projection = camera.view_projection(frame.draw_size())?;
@@ -973,7 +998,9 @@ impl MeshRenderer3d {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         depth_format: wgpu::TextureFormat,
+        batch_capacity: usize,
     ) -> Self {
+        let batch_capacity = batch_capacity.max(1);
         let instance_uniform_size = size_of::<MeshUniform>() as u64;
         let instance_stride = aligned_uniform_stride(
             device.limits().min_uniform_buffer_offset_alignment,
@@ -1013,7 +1040,9 @@ impl MeshRenderer3d {
         });
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("yuyib 3d instance"),
-            size: instance_stride.saturating_mul(UNLIT_MESH_INSTANCE_CAPACITY),
+            size: instance_stride.saturating_mul(
+                u64::try_from(batch_capacity).expect("unlit batch capacity fits u64"),
+            ),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1200,6 +1229,7 @@ impl MeshRenderer3d {
             camera_buffer,
             instance_buffer,
             instance_stride,
+            batch_capacity,
             camera_bind_group,
             instance_bind_group,
         }
@@ -5295,7 +5325,7 @@ impl LitSceneRenderer3d {
             }
         }
         let mut depth_started = false;
-        for draws in textured_lit_draws.chunks(TEXTURED_LIT_BATCH_CAPACITY) {
+        for draws in textured_lit_draws.chunks(TexturedLitMeshRenderer3d::DEFAULT_BATCH_CAPACITY) {
             let draw_stats = self
                 .standard
                 .textured_lit
@@ -7515,33 +7545,57 @@ pub struct TexturedLitMeshRenderer3d {
     camera_buffer: wgpu::Buffer,
     draw_buffer: wgpu::Buffer,
     draw_uniform_stride: u64,
+    batch_capacity: usize,
     camera_bind_group: wgpu::BindGroup,
     draw_bind_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
 }
 
-/// Maximum opaque items recorded in one textured-Lambert pass.
-///
-/// The uniform buffer is intentionally bounded instead of growing during a
-/// frame.  Larger scenes are transparently split into multiple passes by the
-/// high-level scene renderer, which keeps GPU allocation out of gameplay.
-const TEXTURED_LIT_BATCH_CAPACITY: usize = 512;
-
 impl TexturedLitMeshRenderer3d {
+    /// Default opaque draws accepted by one textured-Lambert pass.
+    ///
+    /// Specialized resident renderers may allocate a larger fixed capacity
+    /// during loading, keeping GPU allocation out of gameplay frames.
+    pub const DEFAULT_BATCH_CAPACITY: usize = 512;
+
     /// Creates a renderer from an application renderer.
     #[must_use]
     pub fn new(renderer: &Renderer) -> Self {
         let depth_format = renderer.depth_format();
         let color_format = renderer.color_target_format();
         renderer.with_raw_gpu(|device, _queue, _configuration| {
-            Self::create(device, color_format, depth_format)
+            Self::create(
+                device,
+                color_format,
+                depth_format,
+                Self::DEFAULT_BATCH_CAPACITY,
+            )
         })
     }
 
     /// Creates a renderer from the device associated with the current frame.
     #[must_use]
     pub fn new_for_frame(frame: &RenderFrame<'_>) -> Self {
-        Self::create(frame.device(), frame.surface_format(), frame.depth_format())
+        Self::new_for_frame_with_batch_capacity(frame, Self::DEFAULT_BATCH_CAPACITY)
+    }
+
+    /// Creates a frame-bound renderer with loading-time fixed batch capacity.
+    pub(crate) fn new_for_frame_with_batch_capacity(
+        frame: &RenderFrame<'_>,
+        batch_capacity: usize,
+    ) -> Self {
+        Self::create(
+            frame.device(),
+            frame.surface_format(),
+            frame.depth_format(),
+            batch_capacity,
+        )
+    }
+
+    /// Number of draws accepted by one batch on this renderer instance.
+    #[must_use]
+    pub const fn batch_capacity(&self) -> usize {
+        self.batch_capacity
     }
 
     /// Uploads a primitive which has both normals and UV0.
@@ -7631,10 +7685,10 @@ impl TexturedLitMeshRenderer3d {
         draws: &[TexturedLitBatchDraw<'_>],
         depth_load: DepthLoad,
     ) -> Result<MeshDrawStats, TexturedLitMeshRenderError> {
-        if draws.len() > TEXTURED_LIT_BATCH_CAPACITY {
+        if draws.len() > self.batch_capacity {
             return Err(TexturedLitMeshRenderError::BatchTooLarge {
                 actual: draws.len(),
-                maximum: TEXTURED_LIT_BATCH_CAPACITY,
+                maximum: self.batch_capacity,
             });
         }
         if draws.is_empty() {
@@ -7774,7 +7828,9 @@ impl TexturedLitMeshRenderer3d {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         depth_format: wgpu::TextureFormat,
+        batch_capacity: usize,
     ) -> Self {
+        let batch_capacity = batch_capacity.max(1);
         let camera_layout = uniform_layout(
             device,
             "yuyib textured Lambert camera layout",
@@ -7801,7 +7857,7 @@ impl TexturedLitMeshRenderer3d {
             device,
             "yuyib textured Lambert draw",
             draw_uniform_stride.saturating_mul(
-                u64::try_from(TEXTURED_LIT_BATCH_CAPACITY).expect("capacity fits u64"),
+                u64::try_from(batch_capacity).expect("capacity fits u64"),
             ),
         );
         let camera_bind_group = uniform_bind_group(
@@ -7892,6 +7948,7 @@ impl TexturedLitMeshRenderer3d {
             camera_buffer,
             draw_buffer,
             draw_uniform_stride,
+            batch_capacity,
             camera_bind_group,
             draw_bind_group,
             texture_layout,

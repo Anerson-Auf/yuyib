@@ -331,10 +331,16 @@ impl StaticWorldRenderer3d {
         frame: &RenderFrame<'_>,
         world: &StaticWorld3d,
     ) -> Result<(), StaticWorldUploadError3d> {
+        let renderer = MeshRenderer3d::new_for_frame_with_batch_capacity(
+            frame,
+            resident_batch_capacity(
+                world.batches().len(),
+                MeshRenderer3d::DEFAULT_BATCH_CAPACITY,
+            ),
+        );
         let mut batches = Vec::with_capacity(world.batches().len());
         for (batch, source) in world.batches().iter().enumerate() {
-            let mesh = self
-                .renderer
+            let mesh = renderer
                 .upload_mesh_for_frame(frame, source.primitive())
                 .map_err(|source| StaticWorldUploadError3d { batch, source })?;
             batches.push(StaticWorldGpuBatch3d {
@@ -342,6 +348,7 @@ impl StaticWorldRenderer3d {
                 color: source.color(),
             });
         }
+        self.renderer = renderer;
         self.batches = batches;
         Ok(())
     }
@@ -352,39 +359,28 @@ impl StaticWorldRenderer3d {
         self.batches.len()
     }
 
-    /// Draws the whole opaque world in chunks that respect the dynamic-uniform
-    /// capacity of [`MeshRenderer3d`].
+    /// Draws the whole opaque world through its upload-sized uniform buffer.
     ///
-    /// The first chunk clears depth; later chunks keep it, so every batch
-    /// participates in one coherent opaque depth phase.
+    /// Upload grows persistent capacity to the resident batch count, so the
+    /// frame records one coherent depth-cleared pass without reallocating.
     pub fn draw_for_frame(
         &self,
         frame: &mut RenderFrame<'_>,
         camera: Camera3d,
     ) -> Result<StaticWorldDrawStats3d, MeshRenderError> {
-        const MAX_BATCH_DRAWS: usize = 1_024;
-        let mut stats = StaticWorldDrawStats3d::default();
-        for (chunk_index, chunk) in self.batches.chunks(MAX_BATCH_DRAWS).enumerate() {
-            let draws: Vec<_> = chunk
-                .iter()
-                .map(|batch| (&batch.mesh, identity_matrix(), batch.color))
-                .collect();
-            let draw_stats = if chunk_index == 0 {
-                self.renderer
-                    .draw_batch_depth_clear_double_sided(frame, camera, &draws)?
-            } else {
-                self.renderer.draw_batch_with_depth_load_double_sided(
-                    frame,
-                    camera,
-                    &draws,
-                    DepthLoad::Load,
-                )?
-            };
-            stats.batches += draws.len();
-            stats.triangles += u64::from(draw_stats.triangles);
-            stats.draw_calls += u64::from(draw_stats.draw_calls);
-        }
-        Ok(stats)
+        let draws: Vec<_> = self
+            .batches
+            .iter()
+            .map(|batch| (&batch.mesh, identity_matrix(), batch.color))
+            .collect();
+        let draw = self
+            .renderer
+            .draw_batch_depth_clear_double_sided(frame, camera, &draws)?;
+        Ok(StaticWorldDrawStats3d {
+            batches: draws.len(),
+            triangles: u64::from(draw.triangles),
+            draw_calls: u64::from(draw.draw_calls),
+        })
     }
 }
 
@@ -417,6 +413,14 @@ const fn identity_matrix() -> [f32; 16] {
     [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]
+}
+
+const fn resident_batch_capacity(batch_count: usize, default_capacity: usize) -> usize {
+    if batch_count > default_capacity {
+        batch_count
+    } else {
+        default_capacity
+    }
 }
 
 /// Decoded, sampler-ready texture used by a [`TexturedStaticWorld3d`].
@@ -976,6 +980,23 @@ impl TexturedStaticWorldRenderer3d {
         frame: &RenderFrame<'_>,
         world: &TexturedStaticWorld3d,
     ) -> Result<TexturedStaticWorldUploadStats3d, TexturedStaticWorldUploadError3d> {
+        let factor_count = world
+            .batches
+            .iter()
+            .filter(|batch| matches!(batch, TexturedStaticWorldBatch3d::Factor { .. }))
+            .count();
+        let textured_count = world.batches.len() - factor_count;
+        let factor_renderer = MeshRenderer3d::new_for_frame_with_batch_capacity(
+            frame,
+            resident_batch_capacity(factor_count, MeshRenderer3d::DEFAULT_BATCH_CAPACITY),
+        );
+        let textured_renderer = TexturedLitMeshRenderer3d::new_for_frame_with_batch_capacity(
+            frame,
+            resident_batch_capacity(
+                textured_count,
+                TexturedLitMeshRenderer3d::DEFAULT_BATCH_CAPACITY,
+            ),
+        );
         let mut texture_assets = Assets::new();
         let mut texture_cache = TextureCache::new();
         let mut texture_handles = HashMap::<String, TextureHandle>::new();
@@ -985,8 +1006,7 @@ impl TexturedStaticWorldRenderer3d {
         for (batch, source) in world.batches.iter().enumerate() {
             match source {
                 TexturedStaticWorldBatch3d::Factor { primitive, color } => {
-                    let mesh = self
-                        .factor_renderer
+                    let mesh = factor_renderer
                         .upload_mesh_for_frame(frame, primitive)
                         .map_err(|source| TexturedStaticWorldUploadError3d::FactorMesh {
                             batch,
@@ -1024,12 +1044,11 @@ impl TexturedStaticWorldRenderer3d {
                                 cache_key: key.clone(),
                             }
                         })?;
-                        let material = self.textured_renderer.upload_material_for_frame(frame, gpu);
+                        let material = textured_renderer.upload_material_for_frame(frame, gpu);
                         material_cache.insert(key.clone(), material.clone());
                         material
                     };
-                    let mesh = self
-                        .textured_renderer
+                    let mesh = textured_renderer
                         .upload_mesh_for_frame(frame, primitive)
                         .map_err(|source| TexturedStaticWorldUploadError3d::TexturedMesh {
                             batch,
@@ -1048,6 +1067,8 @@ impl TexturedStaticWorldRenderer3d {
             batches: batches.len(),
             unique_textures: texture_cache.len(),
         };
+        self.factor_renderer = factor_renderer;
+        self.textured_renderer = textured_renderer;
         self.texture_assets = texture_assets;
         self.texture_cache = texture_cache;
         self.texture_handles = texture_handles;
@@ -1064,7 +1085,7 @@ impl TexturedStaticWorldRenderer3d {
     /// Draws fallback factors and sampled batches in one coherent depth phase.
     ///
     /// Factor batches are submitted first. The first non-empty phase clears
-    /// depth and all following chunks load it. Textured chunks reuse cached VTF
+    /// depth and the textured phase loads it. Textured draws reuse cached VTF
     /// textures and bind groups; no per-frame GPU resources are allocated.
     ///
     /// # Errors
@@ -1076,8 +1097,6 @@ impl TexturedStaticWorldRenderer3d {
         camera: Camera3d,
         lighting: LambertLighting3d,
     ) -> Result<StaticWorldDrawStats3d, TexturedStaticWorldRenderError3d> {
-        const FACTOR_CHUNK: usize = 1_024;
-        const TEXTURED_CHUNK: usize = 512;
         let factors: Vec<_> = self
             .batches
             .iter()
@@ -1090,17 +1109,13 @@ impl TexturedStaticWorldRenderer3d {
             .collect();
         let mut stats = StaticWorldDrawStats3d::default();
         let mut has_depth = false;
-        for chunk in factors.chunks(FACTOR_CHUNK) {
-            let draw = if has_depth {
-                self.factor_renderer
-                    .draw_batch_with_depth_load_double_sided(frame, camera, chunk, DepthLoad::Load)
-            } else {
-                self.factor_renderer
-                    .draw_batch_depth_clear_double_sided(frame, camera, chunk)
-            }
-            .map_err(TexturedStaticWorldRenderError3d::Factor)?;
+        if !factors.is_empty() {
+            let draw = self
+                .factor_renderer
+                .draw_batch_depth_clear_double_sided(frame, camera, &factors)
+                .map_err(TexturedStaticWorldRenderError3d::Factor)?;
             has_depth = true;
-            stats.batches += chunk.len();
+            stats.batches += factors.len();
             stats.triangles += u64::from(draw.triangles);
             stats.draw_calls += u64::from(draw.draw_calls);
         }
@@ -1122,7 +1137,7 @@ impl TexturedStaticWorldRenderer3d {
                 TexturedStaticWorldGpuBatch3d::Factor { .. } => None,
             })
             .collect();
-        for chunk in textured.chunks(TEXTURED_CHUNK) {
+        if !textured.is_empty() {
             let depth_load = if has_depth {
                 DepthLoad::Load
             } else {
@@ -1130,10 +1145,9 @@ impl TexturedStaticWorldRenderer3d {
             };
             let draw = self
                 .textured_renderer
-                .draw_batch_with_depth_load(frame, camera, chunk, depth_load)
+                .draw_batch_with_depth_load(frame, camera, &textured, depth_load)
                 .map_err(TexturedStaticWorldRenderError3d::Textured)?;
-            has_depth = true;
-            stats.batches += chunk.len();
+            stats.batches += textured.len();
             stats.triangles += u64::from(draw.triangles);
             stats.draw_calls += u64::from(draw.draw_calls);
         }
@@ -1242,6 +1256,14 @@ mod tests {
     use yuyib_model::{Material, MaterialIndex, Mesh, MeshPrimitive};
 
     use super::*;
+
+    #[test]
+    fn static_world_capacity_grows_during_upload_not_during_draw() {
+        assert_eq!(MeshRenderer3d::DEFAULT_BATCH_CAPACITY, 32);
+        assert_eq!(resident_batch_capacity(0, 32), 32);
+        assert_eq!(resident_batch_capacity(32, 32), 32);
+        assert_eq!(resident_batch_capacity(96, 32), 96);
+    }
 
     #[test]
     fn groups_primitives_by_material_without_changing_triangle_count() {
