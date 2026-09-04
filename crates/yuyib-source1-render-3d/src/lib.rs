@@ -110,6 +110,48 @@ impl Source1AnimatedModel3d {
         self.player.as_mut()
     }
 
+    /// Current authored sample plus any procedural pose layers.
+    #[must_use]
+    pub const fn pose(&self) -> &Source1Pose {
+        &self.pose
+    }
+
+    /// Replaces the current sampled pose with the owning model's bind pose.
+    ///
+    /// This is useful as the stable base for procedural fallback layers when a
+    /// declared Source sequence is only a static reference pose.
+    pub fn use_bind_pose(&mut self) {
+        self.pose = self.asset.animations().skeleton().bind_pose();
+    }
+
+    /// Applies a model-space procedural rotation to a named bone subtree.
+    ///
+    /// Returns `Ok(false)` when the model has no matching bone, allowing games
+    /// to share an optional fallback rig policy across compatible playermodels.
+    ///
+    /// # Errors
+    /// Returns when the current pose and skeleton are incompatible or the
+    /// requested axis-angle rotation is invalid.
+    pub fn rotate_bone_subtree(
+        &mut self,
+        bone_name: &str,
+        axis: [f32; 3],
+        radians: f32,
+    ) -> Result<bool, Source1AnimatedModelError> {
+        let skeleton = self.asset.animations().skeleton();
+        let Some(bone) = skeleton
+            .bones()
+            .iter()
+            .position(|bone| bone.name().eq_ignore_ascii_case(bone_name))
+        else {
+            return Ok(false);
+        };
+        self.pose
+            .rotate_bone_subtree(skeleton, bone, axis, radians)
+            .map_err(Source1AnimatedModelError::Animation)?;
+        Ok(true)
+    }
+
     /// Selects a sequence and samples its first frame.
     ///
     /// # Errors

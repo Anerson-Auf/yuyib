@@ -166,6 +166,12 @@ impl Source1AnimationClip {
             f32::from(u16::try_from(self.frames.len() - 1).unwrap_or(u16::MAX)) / self.fps
         }
     }
+
+    /// Whether at least two authored frames contain different local transforms.
+    #[must_use]
+    pub fn has_motion(&self) -> bool {
+        self.frames.windows(2).any(|frames| frames[0] != frames[1])
+    }
 }
 
 /// Skeleton, sequences and external dependencies declared by an MDL.
@@ -271,6 +277,59 @@ impl Source1Pose {
     #[must_use]
     pub fn matrices(&self) -> &[[f32; 16]] {
         &self.matrices
+    }
+
+    /// Applies one model-space axis-angle correction to a bone and all descendants.
+    ///
+    /// The rotation pivots around the bone's current joint position. This is a
+    /// low-level animation-layer primitive for procedural stance, look-at and IK
+    /// corrections after sampling an authored Source sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the pose does not match the skeleton, the bone is absent, or
+    /// the axis/angle is non-finite or degenerate.
+    pub fn rotate_bone_subtree(
+        &mut self,
+        skeleton: &Source1Skeleton,
+        bone: usize,
+        axis: [f32; 3],
+        radians: f32,
+    ) -> Result<(), Source1AnimationError> {
+        if self.matrices.len() != skeleton.bones.len() {
+            return Err(Source1AnimationError::PoseBoneCount {
+                expected: skeleton.bones.len(),
+                actual: self.matrices.len(),
+            });
+        }
+        if bone >= skeleton.bones.len() {
+            return Err(Source1AnimationError::InvalidBone { bone });
+        }
+        let axis_length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        if !axis_length.is_finite() || axis_length <= f32::EPSILON || !radians.is_finite() {
+            return Err(Source1AnimationError::InvalidRotation);
+        }
+        let axis = axis.map(|value| value / axis_length);
+        let bind_global_source = invert_rigid(skeleton.inverse_bind_source[bone]);
+        let bind_joint = [
+            bind_global_source[12],
+            bind_global_source[14],
+            -bind_global_source[13],
+        ];
+        let pivot = transform_point(self.matrices[bone], bind_joint);
+        let correction = mat_mul(
+            translation_matrix(pivot),
+            mat_mul(
+                axis_angle_matrix(axis, radians),
+                translation_matrix([-pivot[0], -pivot[1], -pivot[2]]),
+            ),
+        );
+        for candidate in 0..skeleton.bones.len() {
+            if is_bone_descendant(&skeleton.bones, candidate, bone) {
+                self.matrices[candidate] = mat_mul(correction, self.matrices[candidate]);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -436,6 +495,20 @@ pub enum Source1AnimationError {
     InvalidSpeed,
     /// Frame delta was negative or non-finite.
     InvalidDelta,
+    /// A procedural pose was built for a different skeleton.
+    PoseBoneCount {
+        /// Skeleton bone count.
+        expected: usize,
+        /// Pose matrix count.
+        actual: usize,
+    },
+    /// A procedural layer referenced an absent bone.
+    InvalidBone {
+        /// Requested zero-based bone index.
+        bone: usize,
+    },
+    /// A procedural axis or angle was non-finite or degenerate.
+    InvalidRotation,
 }
 
 impl fmt::Display for Source1AnimationError {
@@ -450,6 +523,15 @@ impl fmt::Display for Source1AnimationError {
             Self::InvalidDelta => {
                 formatter.write_str("Source animation delta must be finite and non-negative")
             }
+            Self::PoseBoneCount { expected, actual } => write!(
+                formatter,
+                "Source pose has {actual} matrices for a {expected}-bone skeleton"
+            ),
+            Self::InvalidBone { bone } => {
+                write!(formatter, "Source animation bone {bone} is absent")
+            }
+            Self::InvalidRotation => formatter
+                .write_str("Source procedural rotation must use a finite angle and non-zero axis"),
         }
     }
 }
@@ -1277,6 +1359,54 @@ fn transform_matrix(transform: Source1BoneTransform) -> [f32; 16] {
     ]
 }
 
+fn transform_point(matrix: [f32; 16], point: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0] * point[0] + matrix[4] * point[1] + matrix[8] * point[2] + matrix[12],
+        matrix[1] * point[0] + matrix[5] * point[1] + matrix[9] * point[2] + matrix[13],
+        matrix[2] * point[0] + matrix[6] * point[1] + matrix[10] * point[2] + matrix[14],
+    ]
+}
+
+fn translation_matrix([x, y, z]: [f32; 3]) -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, x, y, z, 1.0,
+    ]
+}
+
+fn axis_angle_matrix([x, y, z]: [f32; 3], radians: f32) -> [f32; 16] {
+    let (sine, cosine) = radians.sin_cos();
+    let one_minus_cosine = 1.0 - cosine;
+    [
+        cosine + x * x * one_minus_cosine,
+        y * x * one_minus_cosine + z * sine,
+        z * x * one_minus_cosine - y * sine,
+        0.0,
+        x * y * one_minus_cosine - z * sine,
+        cosine + y * y * one_minus_cosine,
+        z * y * one_minus_cosine + x * sine,
+        0.0,
+        x * z * one_minus_cosine + y * sine,
+        y * z * one_minus_cosine - x * sine,
+        cosine + z * z * one_minus_cosine,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+}
+
+fn is_bone_descendant(bones: &[Source1Bone], candidate: usize, ancestor: usize) -> bool {
+    let mut current = Some(candidate);
+    while let Some(index) = current {
+        if index == ancestor {
+            return true;
+        }
+        current = bones[index].parent;
+    }
+    false
+}
+
 fn invert_rigid(matrix: [f32; 16]) -> [f32; 16] {
     let r = [
         matrix[0], matrix[4], matrix[8], 0.0, matrix[1], matrix[5], matrix[9], 0.0, matrix[2],
@@ -1369,6 +1499,40 @@ mod tests {
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         for (actual, expected) in pose.matrices()[0].iter().zip(identity) {
+            assert!((actual - expected).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn procedural_subtree_rotation_keeps_joint_pivot_fixed() {
+        let bone = Source1Bone {
+            name: "root".to_owned(),
+            parent: None,
+            bind: Source1BoneTransform {
+                translation: [1.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+            },
+            position_scale: [1.0; 3],
+            rotation_euler: [0.0; 3],
+            rotation_scale: [1.0; 3],
+            alignment: [0.0, 0.0, 0.0, 1.0],
+            flags: 0,
+        };
+        let bind = transform_matrix(bone.bind);
+        let skeleton = Source1Skeleton {
+            bones: vec![bone],
+            inverse_bind_source: vec![invert_rigid(bind)],
+        };
+        let mut pose = skeleton.bind_pose();
+        pose.rotate_bone_subtree(&skeleton, 0, [0.0, 0.0, 1.0], std::f32::consts::FRAC_PI_2)
+            .expect("procedural rotation");
+        let matrix = pose.matrices()[0];
+        let pivot = transform_point(matrix, [1.0, 0.0, 0.0]);
+        let endpoint = transform_point(matrix, [2.0, 0.0, 0.0]);
+        for (actual, expected) in pivot.into_iter().zip([1.0, 0.0, 0.0]) {
+            assert!((actual - expected).abs() < 1.0e-5);
+        }
+        for (actual, expected) in endpoint.into_iter().zip([1.0, 1.0, 0.0]) {
             assert!((actual - expected).abs() < 1.0e-5);
         }
     }
