@@ -56,6 +56,7 @@ const SURF_SKY: i32 = 0x0004;
 const SURF_NODRAW: i32 = 0x0080;
 const SURF_HINT: i32 = 0x0100;
 const SURF_SKIP: i32 = 0x0200;
+const SOLID_NONE: u8 = 0;
 
 /// High-level BSP import policy.
 #[derive(Clone, Debug)]
@@ -106,6 +107,10 @@ pub struct Source1BspImportReport {
     pub static_prop_instances: usize,
     pub static_prop_models: usize,
     pub static_prop_meshes: usize,
+    /// Static-prop instances whose Source `SolidType_t` is not `SOLID_NONE`.
+    pub static_prop_collision_instances: usize,
+    /// Non-degenerate static-prop render triangles appended to the world collider.
+    pub static_prop_collision_triangles: usize,
     pub water_materials: usize,
     pub water_batches: usize,
     pub water_normal_frames: usize,
@@ -274,10 +279,7 @@ impl Source1BspLoader {
 
         let mut geometry =
             cook_geometry(bsp, &entities, self.options.skip_non_render_surface_flags)?;
-        // Static-prop PHY collision is a distinct Source asset. Keep the BSP
-        // world/brush collider authoritative instead of treating every render
-        // triangle (foliage included) as solid.
-        let (collider, skipped_collision_triangles) = collider_from_model(&geometry.model)?;
+        let mut collider_cook = CollisionMeshCook::from_model(&geometry.model)?;
         let static_prop_assets = load_static_prop_assets(
             bsp,
             &Source1StaticPropAssetOptions {
@@ -286,9 +288,10 @@ impl Source1BspLoader {
         )
         .map_err(Source1BspImportError::StaticPropAssets)?;
         let static_prop_stats = match static_prop_assets.as_ref() {
-            Some(assets) => append_static_props(&mut geometry, assets, &pak)?,
+            Some(assets) => append_static_props(&mut geometry, assets, &pak, &mut collider_cook)?,
             None => StaticPropCookStats::default(),
         };
+        let (collider, skipped_collision_triangles) = collider_cook.finish()?;
         let mut textures_by_material = HashMap::new();
         let mut textures_by_path = HashMap::<String, Arc<StaticWorldTexture3d>>::new();
         let mut water_material_names = BTreeSet::new();
@@ -400,6 +403,8 @@ impl Source1BspLoader {
             static_prop_instances: static_prop_stats.instances,
             static_prop_models: static_prop_stats.models,
             static_prop_meshes: static_prop_stats.meshes,
+            static_prop_collision_instances: static_prop_stats.collision_instances,
+            static_prop_collision_triangles: static_prop_stats.collision_triangles,
             water_materials: water_materials.len(),
             water_batches: water_world.stats().batches,
             water_normal_frames: water_normal_frames.values().map(Vec::len).sum(),
@@ -448,6 +453,8 @@ struct StaticPropCookStats {
     instances: usize,
     models: usize,
     meshes: usize,
+    collision_instances: usize,
+    collision_triangles: usize,
 }
 
 #[allow(
@@ -458,6 +465,7 @@ fn append_static_props(
     geometry: &mut CookedGeometry,
     assets: &Source1StaticPropAssets,
     pak: &HashMap<String, Vec<u8>>,
+    collider_cook: &mut CollisionMeshCook,
 ) -> Result<StaticPropCookStats, Source1BspImportError> {
     let decoded = assets
         .models
@@ -479,6 +487,8 @@ fn append_static_props(
         })
         .collect::<HashMap<_, _>>();
     let mut instance_meshes = 0;
+    let mut collision_instances = 0;
+    let mut collision_triangles = 0;
 
     for (instance_index, prop) in assets.lump.props.iter().enumerate() {
         let model = decoded.get(usize::from(prop.model_index)).ok_or(
@@ -492,6 +502,8 @@ fn append_static_props(
             angles: prop.angles,
             uniform_scale: 1.0,
         };
+        let collides = prop.solid != SOLID_NONE;
+        collision_instances += usize::from(collides);
         for studio_mesh in &model.meshes {
             let studio_material = model.material_for_skin(studio_mesh, prop.skin).ok_or(
                 Source1BspImportError::InvalidStaticPropMaterial {
@@ -526,11 +538,16 @@ fn append_static_props(
                 .copied()
                 .map(|normal| transform.transform_normal(normal))
                 .collect();
-            let primitive = MeshPrimitive::new(positions, studio_mesh.indices.clone())
+            let mut primitive = MeshPrimitive::new(positions, studio_mesh.indices.clone())
                 .map_err(|source| Source1BspImportError::StaticPropMesh {
                     instance: instance_index,
                     source,
-                })?
+                })?;
+            if collides {
+                collision_triangles +=
+                    collider_cook.append_primitive(primitive.positions(), primitive.indices())?;
+            }
+            primitive = primitive
                 .with_normals(normals)
                 .map_err(|source| Source1BspImportError::StaticPropMesh {
                     instance: instance_index,
@@ -563,6 +580,8 @@ fn append_static_props(
         instances: assets.lump.props.len(),
         models: decoded.len(),
         meshes: instance_meshes,
+        collision_instances,
+        collision_triangles,
     })
 }
 
@@ -1204,49 +1223,68 @@ fn cook_displacement(
     Ok(primitive)
 }
 
-fn collider_from_model(model: &Model) -> Result<(TriangleMesh3d, usize), Source1BspImportError> {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    let mut skipped = 0;
-    for mesh in model.meshes() {
-        for primitive in mesh.primitives() {
-            let base = u32::try_from(vertices.len())
-                .map_err(|_| Source1BspImportError::ColliderVertexOverflow)?;
-            vertices.extend(
-                primitive
-                    .positions()
-                    .iter()
-                    .map(|position| Vec3::new(position[0], position[1], position[2])),
-            );
-            for &[a, b, c] in primitive.indices().as_chunks::<3>().0 {
-                let positions = primitive.positions();
-                let point = |index: u32| {
-                    let position = positions[index as usize];
-                    Vec3::new(position[0], position[1], position[2])
-                };
-                let first_edge = point(b) - point(a);
-                let second_edge = point(c) - point(a);
-                let area_vector = Vec3::new(
-                    first_edge.y * second_edge.z - first_edge.z * second_edge.y,
-                    first_edge.z * second_edge.x - first_edge.x * second_edge.z,
-                    first_edge.x * second_edge.y - first_edge.y * second_edge.x,
-                );
-                if area_vector.length_squared() <= f32::EPSILON {
-                    skipped += 1;
-                    continue;
-                }
-                for index in [a, b, c] {
-                    indices.push(
-                        base.checked_add(index)
-                            .ok_or(Source1BspImportError::ColliderVertexOverflow)?,
-                    );
-                }
+#[derive(Default)]
+struct CollisionMeshCook {
+    vertices: Vec<Vec3>,
+    indices: Vec<u32>,
+    skipped: usize,
+}
+
+impl CollisionMeshCook {
+    fn from_model(model: &Model) -> Result<Self, Source1BspImportError> {
+        let mut cook = Self::default();
+        for mesh in model.meshes() {
+            for primitive in mesh.primitives() {
+                cook.append_primitive(primitive.positions(), primitive.indices())?;
             }
         }
+        Ok(cook)
     }
-    let collider = TriangleMesh3d::from_indexed(&vertices, &indices)
-        .map_err(Source1BspImportError::Collider)?;
-    Ok((collider, skipped))
+
+    fn append_primitive(
+        &mut self,
+        positions: &[[f32; 3]],
+        source_indices: &[u32],
+    ) -> Result<usize, Source1BspImportError> {
+        let base = u32::try_from(self.vertices.len())
+            .map_err(|_| Source1BspImportError::ColliderVertexOverflow)?;
+        self.vertices.extend(
+            positions
+                .iter()
+                .map(|position| Vec3::new(position[0], position[1], position[2])),
+        );
+        let before = self.indices.len();
+        for &[a, b, c] in source_indices.as_chunks::<3>().0 {
+            let point = |index: u32| {
+                let position = positions[index as usize];
+                Vec3::new(position[0], position[1], position[2])
+            };
+            let first_edge = point(b) - point(a);
+            let second_edge = point(c) - point(a);
+            let area_vector = Vec3::new(
+                first_edge.y * second_edge.z - first_edge.z * second_edge.y,
+                first_edge.z * second_edge.x - first_edge.x * second_edge.z,
+                first_edge.x * second_edge.y - first_edge.y * second_edge.x,
+            );
+            if area_vector.length_squared() <= f32::EPSILON {
+                self.skipped += 1;
+                continue;
+            }
+            for index in [a, b, c] {
+                self.indices.push(
+                    base.checked_add(index)
+                        .ok_or(Source1BspImportError::ColliderVertexOverflow)?,
+                );
+            }
+        }
+        Ok((self.indices.len() - before) / 3)
+    }
+
+    fn finish(self) -> Result<(TriangleMesh3d, usize), Source1BspImportError> {
+        let collider = TriangleMesh3d::from_indexed(&self.vertices, &self.indices)
+            .map_err(Source1BspImportError::Collider)?;
+        Ok((collider, self.skipped))
+    }
 }
 
 enum MaterialTextureBinding {
@@ -2145,5 +2183,26 @@ mod tests {
             uv[0] > 1.0,
             "authored UVs must repeat instead of stretching"
         );
+    }
+
+    #[test]
+    fn collision_cook_appends_valid_triangles_and_omits_degenerate_ones() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let indices = [0, 1, 2, 1, 3, 2, 0, 0, 1];
+        let mut cook = CollisionMeshCook::default();
+
+        let appended = cook
+            .append_primitive(&positions, &indices)
+            .expect("bounded collision geometry");
+        let (mesh, skipped) = cook.finish().expect("valid triangle mesh");
+
+        assert_eq!(appended, 2);
+        assert_eq!(mesh.triangles().len(), 2);
+        assert_eq!(skipped, 1);
     }
 }
