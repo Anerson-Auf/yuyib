@@ -1,0 +1,21 @@
+[package]
+name = "yuyib-source1-render-3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "GPU residency and playback renderer for Source 1 StudioModel skeletons."
+
+[dependencies]
+yuyib-2d = { path = "../yuyib-2d" }
+yuyib-assets = { path = "../yuyib-assets" }
+yuyib-model = { path = "../yuyib-model" }
+yuyib-model-assets = { path = "../yuyib-model-assets" }
+yuyib-render = { path = "../yuyib-render" }
+yuyib-render-3d = { path = "../yuyib-render-3d" }
+yuyib-render-texture = { path = "../yuyib-render-texture" }
+yuyib-source1 = { path = "../yuyib-source1" }
+
+[lints]
+workspace = true

@@ -2197,7 +2197,34 @@ impl<'texture> TexturedSkinnedMaterial3d<'texture> {
     }
 }
 
-/// Low-level renderer for textured glTF skins.
+/// Renderer-neutral four-joint binding consumed by the low-level skinning path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkinVertex3d {
+    joints: [u16; 4],
+    weights: [f32; 4],
+}
+
+impl SkinVertex3d {
+    /// Creates one binding. Upload performs finite/range validation.
+    #[must_use]
+    pub const fn new(joints: [u16; 4], weights: [f32; 4]) -> Self {
+        Self { joints, weights }
+    }
+
+    /// Joint palette indices.
+    #[must_use]
+    pub const fn joints(self) -> [u16; 4] {
+        self.joints
+    }
+
+    /// Joint weights.
+    #[must_use]
+    pub const fn weights(self) -> [f32; 4] {
+        self.weights
+    }
+}
+
+/// Low-level renderer for textured skeletal skins.
 ///
 /// It owns no asset resolver and never substitutes a missing source image with
 /// white.  Use [`ModelTextureLoader`] to make images resident, then pass the
@@ -2246,7 +2273,25 @@ impl TexturedSkinnedMeshRenderer3d {
         primitive: &MeshPrimitive,
         skin: &ImportedSkinnedPrimitive,
     ) -> Result<GpuTexturedSkinnedMesh, TexturedSkinnedMeshUploadError> {
-        Self::upload_with(frame.device(), primitive, skin)
+        let vertices = skin
+            .vertices()
+            .iter()
+            .map(|vertex| SkinVertex3d::new(vertex.joints(), vertex.weights()))
+            .collect::<Vec<_>>();
+        Self::upload_skin_stream_with(frame.device(), primitive, &vertices)
+    }
+
+    /// Uploads renderer-neutral geometry and a matching four-joint skin stream.
+    ///
+    /// This is the importer-independent path used by Source StudioModel and can
+    /// also be used by custom skeletal formats.
+    pub fn upload_skin_stream_for_frame(
+        &self,
+        frame: &RenderFrame<'_>,
+        primitive: &MeshPrimitive,
+        skin_vertices: &[SkinVertex3d],
+    ) -> Result<GpuTexturedSkinnedMesh, TexturedSkinnedMeshUploadError> {
+        Self::upload_skin_stream_with(frame.device(), primitive, skin_vertices)
     }
 
     /// Uploads a primitive through the persistent application renderer.
@@ -2261,7 +2306,24 @@ impl TexturedSkinnedMeshRenderer3d {
         skin: &ImportedSkinnedPrimitive,
     ) -> Result<GpuTexturedSkinnedMesh, TexturedSkinnedMeshUploadError> {
         renderer.with_raw_gpu(|device, _queue, _configuration| {
-            Self::upload_with(device, primitive, skin)
+            let vertices = skin
+                .vertices()
+                .iter()
+                .map(|vertex| SkinVertex3d::new(vertex.joints(), vertex.weights()))
+                .collect::<Vec<_>>();
+            Self::upload_skin_stream_with(device, primitive, &vertices)
+        })
+    }
+
+    /// Uploads a renderer-neutral skin stream through the persistent renderer.
+    pub fn upload_skin_stream(
+        &self,
+        renderer: &Renderer,
+        primitive: &MeshPrimitive,
+        skin_vertices: &[SkinVertex3d],
+    ) -> Result<GpuTexturedSkinnedMesh, TexturedSkinnedMeshUploadError> {
+        renderer.with_raw_gpu(|device, _queue, _configuration| {
+            Self::upload_skin_stream_with(device, primitive, skin_vertices)
         })
     }
 
@@ -2315,6 +2377,33 @@ impl TexturedSkinnedMeshRenderer3d {
             frame,
             camera,
             mesh,
+            palette.matrices(),
+            model_matrix,
+            material,
+            depth_load,
+            false,
+        )
+    }
+
+    /// Draws one opaque skin using importer-independent palette matrices.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_palette_with_depth_load(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        mesh: &GpuTexturedSkinnedMesh,
+        palette: &[[f32; 16]],
+        model_matrix: [f32; 16],
+        material: TexturedSkinnedMaterial3d<'_>,
+        depth_load: DepthLoad,
+    ) -> Result<MeshDrawStats, TexturedSkinnedMeshRenderError> {
+        if material.alpha_mode == AlphaMode::Blend {
+            return Err(TexturedSkinnedMeshRenderError::BlendRequiresTransparentPhase);
+        }
+        self.draw_with_depth_load_phase(
+            frame,
+            camera,
+            mesh,
             palette,
             model_matrix,
             material,
@@ -2351,6 +2440,33 @@ impl TexturedSkinnedMeshRenderer3d {
             frame,
             camera,
             mesh,
+            palette.matrices(),
+            model_matrix,
+            material,
+            depth_load,
+            true,
+        )
+    }
+
+    /// Draws one blended skin with importer-independent palette matrices.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_transparent_palette_with_depth_load(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        mesh: &GpuTexturedSkinnedMesh,
+        palette: &[[f32; 16]],
+        model_matrix: [f32; 16],
+        material: TexturedSkinnedMaterial3d<'_>,
+        depth_load: DepthLoad,
+    ) -> Result<MeshDrawStats, TexturedSkinnedMeshRenderError> {
+        if material.alpha_mode != AlphaMode::Blend {
+            return Err(TexturedSkinnedMeshRenderError::TransparentPhaseRequiresBlend);
+        }
+        self.draw_with_depth_load_phase(
+            frame,
+            camera,
+            mesh,
             palette,
             model_matrix,
             material,
@@ -2365,7 +2481,7 @@ impl TexturedSkinnedMeshRenderer3d {
         frame: &mut RenderFrame<'_>,
         camera: Camera3d,
         mesh: &GpuTexturedSkinnedMesh,
-        palette: &SkinPalette,
+        palette: &[[f32; 16]],
         model_matrix: [f32; 16],
         material: TexturedSkinnedMaterial3d<'_>,
         depth_load: DepthLoad,
@@ -2383,7 +2499,7 @@ impl TexturedSkinnedMeshRenderer3d {
                 return Err(TexturedSkinnedMeshRenderError::InvalidAlphaCutoff);
             }
         };
-        validate_skin_palette(palette.matrices(), mesh.required_joint_count)
+        validate_skin_palette(palette, mesh.required_joint_count)
             .map_err(TexturedSkinnedMeshRenderError::Skin)?;
         let view_projection = camera.view_projection(frame.draw_size()).map_err(|error| {
             TexturedSkinnedMeshRenderError::Skin(SkinnedMeshRenderError::Mesh(error))
@@ -2421,11 +2537,9 @@ impl TexturedSkinnedMeshRenderer3d {
         frame
             .queue()
             .write_buffer(&self.instance_buffer, 0, bytemuck::bytes_of(&uniform));
-        frame.queue().write_buffer(
-            &self.palette_buffer,
-            0,
-            bytemuck::cast_slice(palette.matrices()),
-        );
+        frame
+            .queue()
+            .write_buffer(&self.palette_buffer, 0, bytemuck::cast_slice(palette));
         frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
             pass.set_pipeline(match (transparent, material.double_sided) {
                 (false, false) => &self.pipeline,
@@ -2595,19 +2709,19 @@ impl TexturedSkinnedMeshRenderer3d {
         }
     }
 
-    fn upload_with(
+    fn upload_skin_stream_with(
         device: &wgpu::Device,
         primitive: &MeshPrimitive,
-        skin: &ImportedSkinnedPrimitive,
+        skin_vertices: &[SkinVertex3d],
     ) -> Result<GpuTexturedSkinnedMesh, TexturedSkinnedMeshUploadError> {
         let tex_coords = primitive
             .tex_coords_0()
             .ok_or(TexturedSkinnedMeshUploadError::MissingTexCoords0)?;
-        if primitive.positions().len() != skin.vertices().len() {
+        if primitive.positions().len() != skin_vertices.len() {
             return Err(TexturedSkinnedMeshUploadError::Skin(
                 SkinnedMeshUploadError::VertexCountMismatch {
                     positions: primitive.positions().len(),
-                    skin_vertices: skin.vertices().len(),
+                    skin_vertices: skin_vertices.len(),
                 },
             ));
         }
@@ -2632,7 +2746,7 @@ impl TexturedSkinnedMeshRenderer3d {
             .iter()
             .copied()
             .zip(tex_coords.iter().copied())
-            .zip(skin.vertices())
+            .zip(skin_vertices)
             .enumerate()
             .map(|(vertex, ((position, tex_coord), skin_vertex))| {
                 if !all_finite(&position) {

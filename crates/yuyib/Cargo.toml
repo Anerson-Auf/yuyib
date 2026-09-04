@@ -90,6 +90,7 @@ source1 = [
     "dep:yuyib-source1-assets",
     "dep:yuyib-source1-bsp",
     "dep:yuyib-source1-scene",
+    "dep:yuyib-source1-render-3d",
     "dep:yuyib-vmf",
     "dep:yuyib-vmf-model",
     "dep:yuyib-vmt",
@@ -131,6 +132,7 @@ yuyib-shader = { path = "../yuyib-shader", version = "0.1.0", optional = true }
 yuyib-source1 = { path = "../yuyib-source1", version = "0.1.0", optional = true }
 yuyib-bsp = { path = "../yuyib-bsp", version = "0.1.0", optional = true }
 yuyib-source1-scene = { path = "../yuyib-source1-scene", version = "0.1.0", optional = true }
+yuyib-source1-render-3d = { path = "../yuyib-source1-render-3d", version = "0.1.0", optional = true }
 yuyib-source1-bsp = { path = "../yuyib-source1-bsp", version = "0.1.0", optional = true }
 yuyib-tasks = { path = "../yuyib-tasks", version = "0.1.0", optional = true }
 yuyib-vmf = { path = "../yuyib-vmf", version = "0.1.0", optional = true }

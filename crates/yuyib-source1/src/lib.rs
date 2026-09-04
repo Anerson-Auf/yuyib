@@ -7,8 +7,15 @@
 
 #![forbid(unsafe_code)]
 
+mod animation;
 mod model;
 mod studio;
+
+pub use animation::{
+    Source1AnimationClip, Source1AnimationError, Source1AnimationPlayer, Source1AnimationSet,
+    Source1Bone, Source1BoneTransform, Source1Pose, Source1Skeleton, Source1SkinVertex,
+    decode_studio_animations,
+};
 
 pub use model::{
     LoadedSource1Model, Source1ModelImportError, Source1ModelImportOptions,

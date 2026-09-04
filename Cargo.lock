@@ -5714,6 +5714,7 @@ dependencies = [
  "yuyib-source1",
  "yuyib-source1-assets",
  "yuyib-source1-bsp",
+ "yuyib-source1-render-3d",
  "yuyib-source1-scene",
  "yuyib-tasks",
  "yuyib-tiled",
@@ -6191,6 +6192,20 @@ dependencies = [
  "yuyib-source1-assets",
  "yuyib-vmt",
  "yuyib-vtf",
+]
+
+[[package]]
+name = "yuyib-source1-render-3d"
+version = "0.1.0"
+dependencies = [
+ "yuyib-2d",
+ "yuyib-assets",
+ "yuyib-model",
+ "yuyib-model-assets",
+ "yuyib-render",
+ "yuyib-render-3d",
+ "yuyib-render-texture",
+ "yuyib-source1",
 ]
 
 [[package]]

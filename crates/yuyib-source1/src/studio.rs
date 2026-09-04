@@ -4,11 +4,12 @@
 //! MDL v48/v49, VVD v4 and optimized VTX v7 files: LOD 0 body-part models,
 //! triangle lists/strips, positions, normals, UV0, skin tables and material
 //! search paths and one explicit body-group combination. Animation, flexes, bone skinning,
-//! collision PHY data and lower LOD selection are outside this module.
+//! collision PHY data and lower LOD selection are outside this module. Bone
+//! weights are retained for the separate skeletal animation layer.
 
 use std::{error::Error, fmt, sync::Arc};
 
-/// Matching files that make one Source 1 StudioModel render asset.
+/// Matching files that make one Source 1 `StudioModel` render asset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Source1StudioModelFiles {
     /// Canonical model path relative to the Source content root.
@@ -61,6 +62,18 @@ pub struct Source1StudioLimits {
     pub max_indices: usize,
     /// Maximum bytes scanned for one MDL string.
     pub max_string_bytes: usize,
+    /// Maximum `StudioModel` bones.
+    pub max_bones: usize,
+    /// Maximum local and included animation clips per MDL.
+    pub max_animation_clips: usize,
+    /// Maximum decoded frames in one clip.
+    pub max_animation_frames: usize,
+    /// Maximum decoded bone-frame samples across one MDL.
+    pub max_animation_samples: usize,
+    /// Maximum demand-loaded `.ani` blocks.
+    pub max_animation_blocks: usize,
+    /// Maximum `$includemodel` declarations.
+    pub max_included_models: usize,
 }
 
 impl Default for Source1StudioLimits {
@@ -74,6 +87,12 @@ impl Default for Source1StudioLimits {
             max_vertices: 16_000_000,
             max_indices: 48_000_000,
             max_string_bytes: 16 * 1024,
+            max_bones: 512,
+            max_animation_clips: 16_384,
+            max_animation_frames: 65_536,
+            max_animation_samples: 16_000_000,
+            max_animation_blocks: 256,
+            max_included_models: 1_024,
         }
     }
 }
@@ -104,6 +123,8 @@ pub struct Source1StudioMesh {
     pub normals: Vec<[f32; 3]>,
     /// Primary texture coordinates.
     pub tex_coords_0: Vec<[f32; 2]>,
+    /// Four-joint skin bindings matching the vertex arrays above.
+    pub skin_vertices: Vec<crate::Source1SkinVertex>,
     /// Triangle-list indices into the arrays above.
     pub indices: Vec<u32>,
 }
@@ -276,6 +297,23 @@ pub enum Source1StudioError {
         /// VVD header count.
         expected: usize,
     },
+    /// A required floating-point field contained NaN or infinity.
+    InvalidNumber {
+        /// Logical value owner.
+        section: &'static str,
+        /// Absolute byte offset.
+        offset: usize,
+    },
+    /// An external animation block was referenced but not supplied.
+    MissingAnimationBlock {
+        /// One-based `StudioModel` block index.
+        block: usize,
+    },
+    /// Compressed animation RLE metadata was invalid.
+    InvalidAnimationRle {
+        /// Absolute offset of the invalid RLE header.
+        offset: usize,
+    },
 }
 
 impl fmt::Display for Source1StudioError {
@@ -347,6 +385,24 @@ impl fmt::Display for Source1StudioError {
                 formatter,
                 "Source VVD fixups reconstruct {actual} LOD-0 vertices; header declares {expected}"
             ),
+            Self::InvalidNumber { section, offset } => {
+                write!(
+                    formatter,
+                    "Source StudioModel {section} at byte {offset} is not finite"
+                )
+            }
+            Self::MissingAnimationBlock { block } => {
+                write!(
+                    formatter,
+                    "Source StudioModel animation block {block} is unavailable"
+                )
+            }
+            Self::InvalidAnimationRle { offset } => {
+                write!(
+                    formatter,
+                    "Source StudioModel animation RLE at byte {offset} is invalid"
+                )
+            }
         }
     }
 }
@@ -416,6 +472,7 @@ struct StudioVertex {
     position: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
+    skin: crate::Source1SkinVertex,
 }
 
 #[derive(Clone, Copy)]
@@ -763,6 +820,7 @@ fn decode_vvd_lod0(
     for source in source_indices {
         let record = vertex_offset + source * VVD_VERTEX_BYTES;
         vertices.push(StudioVertex {
+            skin: decode_skin_vertex(*vvd, record)?,
             position: [
                 vvd.f32(record + 16, "vertex position")?,
                 vvd.f32(record + 20, "vertex position")?,
@@ -780,6 +838,35 @@ fn decode_vvd_lod0(
         });
     }
     Ok(vertices)
+}
+
+fn decode_skin_vertex(
+    vvd: Blob<'_>,
+    record: usize,
+) -> Result<crate::Source1SkinVertex, Source1StudioError> {
+    let count = usize::from(vvd.u8(record + 15, "vertex bone count")?).min(3);
+    let mut joints = [0_u16; 4];
+    let mut weights = [0.0_f32; 4];
+    for index in 0..count {
+        joints[index] = u16::from(vvd.u8(record + 12 + index, "vertex bone")?);
+        let weight = vvd.f32(record + index * 4, "vertex bone weight")?;
+        if !weight.is_finite() || weight < 0.0 {
+            return Err(Source1StudioError::InvalidNumber {
+                section: "vertex bone weight",
+                offset: record + index * 4,
+            });
+        }
+        weights[index] = weight;
+    }
+    let total: f32 = weights.iter().sum();
+    if total > f32::EPSILON {
+        for weight in &mut weights {
+            *weight /= total;
+        }
+    } else {
+        weights[0] = 1.0;
+    }
+    Ok(crate::Source1SkinVertex::new(joints, weights))
 }
 
 #[allow(
@@ -914,6 +1001,7 @@ fn decode_meshes(
                     positions: Vec::new(),
                     normals: Vec::new(),
                     tex_coords_0: Vec::new(),
+                    skin_vertices: Vec::new(),
                     indices: Vec::new(),
                 };
                 for group_index in 0..strip_group_count {
@@ -1000,6 +1088,7 @@ fn decode_strip_group(
         mesh.positions.push(vertex.position);
         mesh.normals.push(vertex.normal);
         mesh.tex_coords_0.push(vertex.uv);
+        mesh.skin_vertices.push(vertex.skin);
     }
 
     let index_count = vtx.non_negative(group + 8, "strip-group index count")?;

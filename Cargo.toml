@@ -51,6 +51,7 @@ members = [
     "crates/yuyib-webview",
     "crates/yuyib-source1-assets",
     "crates/yuyib-source1-scene",
+    "crates/yuyib-source1-render-3d",
     "crates/yuyib-physics",
     "crates/yuyib-audio",
     "crates/yuyib-net",

@@ -77,6 +77,8 @@ pub use yuyib_source1_assets as source1_assets;
 pub use yuyib_source1_bsp as source1_bsp;
 #[cfg(feature = "source1")]
 pub use yuyib_source1_scene as source1_scene;
+#[cfg(feature = "source1")]
+pub use yuyib_source1_render_3d as source1_render_3d;
 #[cfg(feature = "tasks")]
 pub use yuyib_tasks as tasks;
 #[cfg(feature = "ui")]

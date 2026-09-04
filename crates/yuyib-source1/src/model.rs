@@ -1,7 +1,7 @@
-//! Standalone Source 1 StudioModel loading into renderer-neutral Yuyib models.
+//! Standalone Source 1 `StudioModel` loading into renderer-neutral Yuyib models.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     fmt, fs,
     path::{Component, Path, PathBuf},
@@ -13,16 +13,15 @@ use yuyib_model::{
     ModelTextureRgba8Error, ModelTextureSampler, TextureBinding,
 };
 use yuyib_source1_assets::{
-    Source1AssetError, Source1MaterialAlphaMode, Source1MaterialResolver,
-    Source1ResolvedMaterial,
+    Source1AssetError, Source1MaterialAlphaMode, Source1MaterialResolver, Source1ResolvedMaterial,
 };
 
 use crate::{
-    Source1StaticPropTransform, Source1StudioError, Source1StudioLimits, Source1StudioMaterial,
-    Source1StudioModel, Source1StudioModelFiles,
+    Source1AnimationSet, Source1StaticPropTransform, Source1StudioError, Source1StudioLimits,
+    Source1StudioMaterial, Source1StudioModel, Source1StudioModelFiles,
 };
 
-/// Policy for a StudioModel material that cannot resolve its VMT/VTF chain.
+/// Policy for a `StudioModel` material that cannot resolve its VMT/VTF chain.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Source1ModelMaterialPolicy {
     /// Reject the import. This is the production-safe default.
@@ -32,7 +31,7 @@ pub enum Source1ModelMaterialPolicy {
     FactorFallback,
 }
 
-/// Standalone StudioModel import policy.
+/// Standalone `StudioModel` import policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Source1ModelImportOptions {
     /// Bounded-work policy for MDL/VVD/VTX decoding.
@@ -81,12 +80,22 @@ pub struct Source1ModelImportReport {
     pub triangles: usize,
     /// Material names retained on the explicit factor fallback path.
     pub fallback_materials: Vec<String>,
+    /// Bones decoded from the owning MDL.
+    pub bones: usize,
+    /// Playable local and resolved include-model sequences.
+    pub animation_clips: usize,
+    /// `$includemodel` paths successfully merged.
+    pub included_animation_models: Vec<String>,
+    /// Optional `$includemodel` paths absent below the content root.
+    pub missing_animation_models: Vec<String>,
 }
 
 /// CPU-side result of a standalone Source 1 MDL import.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedSource1Model {
     model: Model,
+    skin_vertices: Vec<Vec<crate::Source1SkinVertex>>,
+    animations: Source1AnimationSet,
     report: Source1ModelImportReport,
 }
 
@@ -103,6 +112,18 @@ impl LoadedSource1Model {
         &self.report
     }
 
+    /// Returns the `StudioModel` skeleton and animation sequences.
+    #[must_use]
+    pub const fn animations(&self) -> &Source1AnimationSet {
+        &self.animations
+    }
+
+    /// Returns one skin stream per renderer-neutral model mesh.
+    #[must_use]
+    pub fn skin_vertices(&self) -> &[Vec<crate::Source1SkinVertex>] {
+        &self.skin_vertices
+    }
+
     /// Consumes the import and returns its renderer-neutral model.
     #[must_use]
     pub fn into_model(self) -> Model {
@@ -111,8 +132,15 @@ impl LoadedSource1Model {
 
     /// Consumes the import into both model and report.
     #[must_use]
-    pub fn into_parts(self) -> (Model, Source1ModelImportReport) {
-        (self.model, self.report)
+    pub fn into_parts(
+        self,
+    ) -> (
+        Model,
+        Vec<Vec<crate::Source1SkinVertex>>,
+        Source1AnimationSet,
+        Source1ModelImportReport,
+    ) {
+        (self.model, self.skin_vertices, self.animations, self.report)
     }
 }
 
@@ -185,24 +213,38 @@ impl Source1ModelLoader {
     ///
     /// # Errors
     ///
-    /// Returns typed path, I/O, sidecar, StudioModel, material, texture pixel,
+    /// Returns typed path, I/O, sidecar, `StudioModel`, material, texture pixel,
     /// mesh or model validation failures. No partial model is returned.
     pub fn load(
         &self,
         model_path: impl AsRef<Path>,
     ) -> Result<LoadedSource1Model, Source1ModelImportError> {
         let (relative, mdl_path) = self.resolve_model_path(model_path.as_ref())?;
-        let files = self.read_sidecars(relative, &mdl_path)?;
+        let files = self.read_sidecars(relative.clone(), &mdl_path)?;
         let studio = crate::decode_studio_model_with_body(
             &files,
             self.options.studio_limits,
             self.options.body,
         )
-            .map_err(Source1ModelImportError::Studio)?;
-        self.cook(&studio)
+        .map_err(Source1ModelImportError::Studio)?;
+        let mut loaded = self.cook(&studio)?;
+        let ani = read_optional(&mdl_path.with_extension("ani"))?;
+        let mut animations =
+            crate::decode_studio_animations(&files.mdl, ani.as_deref(), self.options.studio_limits)
+                .map_err(Source1ModelImportError::Studio)?;
+        let mut visited = HashSet::from([relative.clone()]);
+        let mut resolved = Vec::new();
+        let mut missing = Vec::new();
+        self.merge_included_animations(&mut animations, &mut visited, &mut resolved, &mut missing)?;
+        loaded.report.bones = animations.skeleton().bones().len();
+        loaded.report.animation_clips = animations.clips().len();
+        loaded.report.included_animation_models = resolved;
+        loaded.report.missing_animation_models = missing;
+        loaded.animations = animations;
+        Ok(loaded)
     }
 
-    /// Converts an already decoded StudioModel using this loader's material root.
+    /// Converts an already decoded `StudioModel` using this loader's material root.
     ///
     /// # Errors
     ///
@@ -220,6 +262,7 @@ impl Source1ModelLoader {
         let mut textures = Vec::new();
         let mut runtime_materials = HashMap::<usize, MaterialIndex>::new();
         let mut meshes = Vec::with_capacity(studio.meshes.len());
+        let mut skin_vertices = Vec::with_capacity(studio.meshes.len());
         let mut fallback_materials = Vec::new();
         let mut vertices = 0_usize;
         let mut triangles = 0_usize;
@@ -280,6 +323,7 @@ impl Source1ModelLoader {
                 Mesh::new(Some(studio_mesh.model_name.clone()), vec![primitive])
                     .map_err(Source1ModelImportError::Mesh)?,
             );
+            skin_vertices.push(studio_mesh.skin_vertices.clone());
         }
 
         let model =
@@ -296,8 +340,17 @@ impl Source1ModelLoader {
             vertices,
             triangles,
             fallback_materials,
+            bones: 0,
+            animation_clips: 0,
+            included_animation_models: Vec::new(),
+            missing_animation_models: Vec::new(),
         };
-        Ok(LoadedSource1Model { model, report })
+        Ok(LoadedSource1Model {
+            model,
+            skin_vertices,
+            animations: Source1AnimationSet::default(),
+            report,
+        })
     }
 
     fn cook_material(
@@ -433,6 +486,75 @@ impl Source1ModelLoader {
             vtx_path: vtx_relative,
         })
     }
+
+    fn merge_included_animations(
+        &self,
+        target: &mut Source1AnimationSet,
+        visited: &mut HashSet<String>,
+        resolved: &mut Vec<String>,
+        missing: &mut Vec<String>,
+    ) -> Result<(), Source1ModelImportError> {
+        let includes = target.included_models().to_vec();
+        for authored in includes {
+            let relative = normalize_source_model_name(&authored);
+            if !visited.insert(relative.clone()) {
+                continue;
+            }
+            if visited.len() > self.options.studio_limits.max_included_models {
+                return Err(Source1ModelImportError::Studio(
+                    Source1StudioError::RecordLimit {
+                        section: "recursive include models",
+                        actual: visited.len(),
+                        limit: self.options.studio_limits.max_included_models,
+                    },
+                ));
+            }
+            let path = Path::new(&relative);
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+            {
+                return Err(Source1ModelImportError::UnsafePath {
+                    path: path.to_path_buf(),
+                });
+            }
+            let mdl_path = self.content_root.join(path);
+            let mdl = match fs::read(&mdl_path) {
+                Ok(bytes) => bytes,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(relative);
+                    continue;
+                }
+                Err(source) => {
+                    return Err(Source1ModelImportError::Read {
+                        kind: "included MDL",
+                        path: mdl_path,
+                        source,
+                    });
+                }
+            };
+            let canonical =
+                fs::canonicalize(&mdl_path).map_err(|source| Source1ModelImportError::Read {
+                    kind: "included MDL",
+                    path: mdl_path.clone(),
+                    source,
+                })?;
+            if !canonical.starts_with(&self.content_root) {
+                return Err(Source1ModelImportError::UnsafePath {
+                    path: path.to_path_buf(),
+                });
+            }
+            let ani = read_optional(&mdl_path.with_extension("ani"))?;
+            let mut included_set =
+                crate::decode_studio_animations(&mdl, ani.as_deref(), self.options.studio_limits)
+                    .map_err(Source1ModelImportError::Studio)?;
+            self.merge_included_animations(&mut included_set, visited, resolved, missing)?;
+            target.merge_included(&included_set);
+            resolved.push(relative);
+        }
+        Ok(())
+    }
 }
 
 fn source_sampler() -> ModelTextureSampler {
@@ -469,6 +591,28 @@ fn read_file(kind: &'static str, path: &Path) -> Result<Vec<u8>, Source1ModelImp
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, Source1ModelImportError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(Source1ModelImportError::Read {
+            kind: "ANI",
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn normalize_source_model_name(value: &str) -> String {
+    let normalized = value.replace('\\', "/");
+    let normalized = normalized.trim_start_matches('/');
+    if normalized.to_ascii_lowercase().starts_with("models/") {
+        normalized.to_owned()
+    } else {
+        format!("models/{normalized}")
+    }
 }
 
 fn read_first(
@@ -697,6 +841,7 @@ mod tests {
             positions: vec![[x, 2.0, 3.0], [x + 1.0, 2.0, 3.0], [x, 3.0, 3.0]],
             normals: vec![[0.0, 0.0, 1.0]; 3],
             tex_coords_0: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            skin_vertices: vec![crate::Source1SkinVertex::new([0; 4], [1.0, 0.0, 0.0, 0.0]); 3],
             indices: vec![0, 1, 2],
         }
     }
@@ -775,8 +920,14 @@ mod tests {
                 .texture(),
             ModelTextureIndex::new(1)
         );
-        assert_eq!(loaded.model().materials()[0].alpha_mode(), AlphaMode::Opaque);
-        assert_eq!(loaded.model().materials()[1].alpha_mode(), AlphaMode::Opaque);
+        assert_eq!(
+            loaded.model().materials()[0].alpha_mode(),
+            AlphaMode::Opaque
+        );
+        assert_eq!(
+            loaded.model().materials()[1].alpha_mode(),
+            AlphaMode::Opaque
+        );
         for texture in loaded.model().textures() {
             let (width, height, pixels) = texture
                 .decoded_rgba8_pixels()
