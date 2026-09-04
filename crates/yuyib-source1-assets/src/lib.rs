@@ -55,6 +55,8 @@ pub struct Source1ResolvedMaterial {
     pub base_texture: Source1BaseTexture,
     /// Alpha/depth policy authored in the VMT.
     pub alpha_mode: Source1MaterialAlphaMode,
+    /// Whether `$nocull 1` requests two-sided rasterization.
+    pub double_sided: bool,
 }
 
 /// Authored base-texture references resolved from one VMT include chain.
@@ -208,6 +210,7 @@ impl Source1MaterialResolver {
         Ok(Source1ResolvedMaterial {
             base_texture: self.resolve(&material)?,
             alpha_mode: source_material_alpha_mode(&material),
+            double_sided: material.no_cull() == Some(true),
         })
     }
 

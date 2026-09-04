@@ -319,6 +319,7 @@ impl Source1ModelLoader {
                 let mut output = Material::new()
                     .with_name(material.name.clone())
                     .with_metallic_roughness(0.0, 0.8)
+                    .with_double_sided(resolved.double_sided)
                     .with_base_color_texture(TextureBinding::new(texture_index, 0));
                 output = output.with_alpha_mode(match resolved.alpha_mode {
                     Source1MaterialAlphaMode::Opaque => AlphaMode::Opaque,

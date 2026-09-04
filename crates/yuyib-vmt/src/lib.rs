@@ -106,6 +106,7 @@ pub struct VmtMaterial {
     root: VmfBlock,
     translucent: Option<bool>,
     alpha_test: Option<bool>,
+    no_cull: Option<bool>,
     above_water: Option<bool>,
     refract: Option<bool>,
     reflect_amount: Option<f32>,
@@ -121,6 +122,7 @@ impl VmtMaterial {
     fn from_block(root: VmfBlock) -> Result<Self, VmtParseError> {
         let translucent = optional_bool(&root, "$translucent")?;
         let alpha_test = optional_bool(&root, "$alphatest")?;
+        let no_cull = optional_bool(&root, "$nocull")?;
         let above_water = optional_bool(&root, "$abovewater")?;
         let refract = optional_bool(&root, "$refract")?;
         let reflect_amount = optional_f32(&root, "$reflectamount")?;
@@ -134,6 +136,7 @@ impl VmtMaterial {
             root,
             translucent,
             alpha_test,
+            no_cull,
             above_water,
             refract,
             reflect_amount,
@@ -198,6 +201,12 @@ impl VmtMaterial {
     #[must_use]
     pub const fn alpha_test(&self) -> Option<bool> {
         self.alpha_test
+    }
+
+    /// Returns whether back-face culling is disabled for this material.
+    #[must_use]
+    pub const fn no_cull(&self) -> Option<bool> {
+        self.no_cull
     }
 
     /// Returns whether the authored Water material represents its above-water side.
@@ -553,6 +562,7 @@ mod tests {
                 "$basetexture" "brick/wall"
                 "$bumpmap" "brick/wall_normal"
                 "$translucent" "1"
+                "$nocull" "1"
                 "$surfaceprop" "brick"
                 Proxies { AnimatedTexture { "animatedtexturevar" "$basetexture" } }
             }"#,
@@ -562,9 +572,10 @@ mod tests {
         assert_eq!(material.base_texture(), Some("brick/wall"));
         assert_eq!(material.bump_map(), Some("brick/wall_normal"));
         assert_eq!(material.translucent(), Some(true));
+        assert_eq!(material.no_cull(), Some(true));
         assert_eq!(material.surface_prop(), Some("brick"));
         assert_eq!(material.blocks()[0].name(), "Proxies");
-        assert_eq!(material.properties().len(), 4);
+        assert_eq!(material.properties().len(), 5);
     }
 
     #[test]

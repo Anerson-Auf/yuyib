@@ -388,7 +388,7 @@ pub fn decode_studio_model_with_body(
     mdl.require(0, MDL_HEADER_MIN_BYTES, "header")?;
     mdl.magic(b"IDST")?;
     let mdl_version = mdl.i32(4, "version")?;
-    if !matches!(mdl_version, 48 | 49) {
+    if !matches!(mdl_version, 44..=49) {
         return Err(Source1StudioError::UnsupportedVersion {
             file: "MDL",
             version: mdl_version,
