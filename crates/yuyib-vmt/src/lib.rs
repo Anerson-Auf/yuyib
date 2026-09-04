@@ -17,7 +17,7 @@
 use std::{error::Error, fmt};
 
 use yuyib_vmf::{
-    VmfBlock, VmfLimits, VmfParseError, VmfParseErrorKind, VmfProperty, parse_with_limits,
+    VmfBlock, VmfLimits, VmfParseError, VmfParseErrorKind, VmfProperty, parse_keyvalues_with_limits,
 };
 
 /// Bounds applied before parsing VMT text.
@@ -83,8 +83,8 @@ pub fn parse(input: &str) -> Result<VmtMaterial, VmtParseError> {
 /// Returns VmtParseError for bounded KeyValues syntax failures or an invalid
 /// material root/property in the supported subset.
 pub fn parse_with_vmt_limits(input: &str, limits: VmtLimits) -> Result<VmtMaterial, VmtParseError> {
-    let map =
-        parse_with_limits(input, limits.into()).map_err(|error| VmtParseError::from_vmf(&error))?;
+    let map = parse_keyvalues_with_limits(input, limits.into())
+        .map_err(|error| VmtParseError::from_vmf(&error))?;
     let mut roots = map.other_blocks().iter();
     let Some(root) = roots.next() else {
         return Err(VmtParseError::new(VmtParseErrorKind::MissingShader, 1, 1));
@@ -299,6 +299,28 @@ mod tests {
         assert_eq!(material.shader(), "VertexLitGeneric");
         assert_eq!(material.base_texture(), Some("models/\\\"quoted"));
         assert_eq!(material.alpha_test(), Some(false));
+    }
+
+    #[test]
+    fn accepts_real_vmt_scalar_and_quoted_block_variants() {
+        let material = parse(
+            r#""LightmappedGeneric"
+            {
+                $basetexture "mirrorsedge/white_concrete"
+                "$normalmapalphaenvmapmask" 1
+                $detail detail\noise_detail_01
+                $detailblendfactor 0.1
+                "Proxies" { "AnimatedTexture" { "animatedtextureframerate" 0 } }
+            }"#,
+        )
+        .expect("real Valve KeyValues variants");
+        assert_eq!(material.shader(), "LightmappedGeneric");
+        assert_eq!(material.base_texture(), Some("mirrorsedge/white_concrete"));
+        assert_eq!(
+            material.block().property("$detail"),
+            Some("detail\\noise_detail_01")
+        );
+        assert_eq!(material.blocks()[0].name(), "Proxies");
     }
 
     #[test]

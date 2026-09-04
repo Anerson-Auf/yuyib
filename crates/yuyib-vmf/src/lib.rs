@@ -61,6 +61,34 @@ pub fn parse(input: &str) -> Result<VmfMap, VmfParseError> {
 /// Returns `VmfParseError` for malformed syntax, unsupported lexical constructs
 /// or a configured resource limit.
 pub fn parse_with_limits(input: &str, limits: VmfLimits) -> Result<VmfMap, VmfParseError> {
+    parse_with_mode(input, limits, false)
+}
+
+/// Parses Valve `KeyValues` with the scalar flexibility used by real VMT files.
+///
+/// In addition to strict VMF syntax, this accepts quoted block names and bare
+/// property keys/values such as `$basetexture`, `1` and `[1 1 1]` tokens. The
+/// same byte, token, depth, block and property limits remain enforced. VMF
+/// callers should keep using [`parse_with_limits`]; this compatibility entry
+/// point exists for formats such as VMT that share `KeyValues` but not VMF's
+/// narrower quoting convention.
+///
+/// # Errors
+///
+/// Returns [`VmfParseError`] for malformed nesting, strings or configured
+/// resource limits.
+pub fn parse_keyvalues_with_limits(
+    input: &str,
+    limits: VmfLimits,
+) -> Result<VmfMap, VmfParseError> {
+    parse_with_mode(input, limits, true)
+}
+
+fn parse_with_mode(
+    input: &str,
+    limits: VmfLimits,
+    permissive_scalars: bool,
+) -> Result<VmfMap, VmfParseError> {
     if input.len() > limits.max_input_bytes {
         return Err(VmfParseError::new(
             VmfParseErrorKind::LimitExceeded {
@@ -71,8 +99,8 @@ pub fn parse_with_limits(input: &str, limits: VmfLimits) -> Result<VmfMap, VmfPa
             1,
         ));
     }
-    let tokens = Lexer::new(input, limits).tokenize()?;
-    Parser::new(tokens, limits).parse_map()
+    let tokens = Lexer::new(input, limits, permissive_scalars).tokenize()?;
+    Parser::new(tokens, limits, permissive_scalars).parse_map()
 }
 
 /// Parsed Source 1 VMF map with typed views and preserved unrelated blocks.
@@ -429,10 +457,11 @@ struct Lexer<'a> {
     column: usize,
     limits: VmfLimits,
     token_count: usize,
+    permissive_scalars: bool,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str, limits: VmfLimits) -> Self {
+    fn new(source: &'a str, limits: VmfLimits, permissive_scalars: bool) -> Self {
         Self {
             source,
             offset: 0,
@@ -440,6 +469,7 @@ impl<'a> Lexer<'a> {
             column: 1,
             limits,
             token_count: 0,
+            permissive_scalars,
         }
     }
 
@@ -460,6 +490,7 @@ impl<'a> Lexer<'a> {
                     TokenKind::CloseBrace
                 }
                 '"' => TokenKind::String(self.string()?),
+                _ if self.permissive_scalars => TokenKind::Identifier(self.bare_scalar()),
                 character if is_identifier_start(character) => {
                     TokenKind::Identifier(self.identifier())
                 }
@@ -539,6 +570,16 @@ impl<'a> Lexer<'a> {
         self.source[start..self.offset].to_owned()
     }
 
+    fn bare_scalar(&mut self) -> String {
+        let start = self.offset;
+        while self.peek().is_some_and(|character| {
+            !character.is_whitespace() && !matches!(character, '{' | '}' | '"')
+        }) {
+            self.take();
+        }
+        self.source[start..self.offset].to_owned()
+    }
+
     fn peek(&self) -> Option<char> {
         self.source[self.offset..].chars().next()
     }
@@ -574,16 +615,18 @@ struct Parser {
     limits: VmfLimits,
     blocks: usize,
     properties: usize,
+    permissive_scalars: bool,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>, limits: VmfLimits) -> Self {
+    fn new(tokens: Vec<Token>, limits: VmfLimits, permissive_scalars: bool) -> Self {
         Self {
             tokens,
             cursor: 0,
             limits,
             blocks: 0,
             properties: 0,
+            permissive_scalars,
         }
     }
 
@@ -607,7 +650,7 @@ impl Parser {
                 maximum: self.limits.max_depth,
             }));
         }
-        let name = self.take_identifier()?;
+        let name = self.take_block_name()?;
         let opening = self.take_open_brace()?;
         self.blocks += 1;
         if self.blocks > self.limits.max_blocks {
@@ -630,7 +673,7 @@ impl Parser {
                     self.cursor += 1;
                     break;
                 }
-                TokenKind::String(ref key) => {
+                TokenKind::String(ref key) if !self.permissive_scalars => {
                     self.cursor += 1;
                     let value = self.take_string()?;
                     self.properties += 1;
@@ -648,7 +691,31 @@ impl Parser {
                         value,
                     });
                 }
+                TokenKind::String(ref key) | TokenKind::Identifier(ref key)
+                    if self.permissive_scalars && !self.next_is_open_brace() =>
+                {
+                    self.cursor += 1;
+                    let value = self.take_scalar()?;
+                    self.properties += 1;
+                    if self.properties > self.limits.max_properties {
+                        return Err(self.at(
+                            &token,
+                            VmfParseErrorKind::LimitExceeded {
+                                limit: VmfLimit::Properties,
+                                maximum: self.limits.max_properties,
+                            },
+                        ));
+                    }
+                    properties.push(VmfProperty {
+                        key: key.clone(),
+                        value,
+                    });
+                }
+                TokenKind::String(_) if self.permissive_scalars => {
+                    blocks.push(self.block(depth + 1)?);
+                }
                 TokenKind::Identifier(_) => blocks.push(self.block(depth + 1)?),
+                TokenKind::String(_) => unreachable!("strict quoted property handled above"),
                 TokenKind::OpenBrace => {
                     return Err(self.at(
                         &token,
@@ -678,6 +745,26 @@ impl Parser {
                 &token,
                 VmfParseErrorKind::Expected {
                     expected: "unquoted block name",
+                },
+            )),
+        }
+    }
+
+    fn take_block_name(&mut self) -> Result<String, VmfParseError> {
+        if !self.permissive_scalars {
+            return self.take_identifier();
+        }
+        let token = self.take_token().ok_or_else(|| {
+            self.current_error(VmfParseErrorKind::Expected {
+                expected: "block name",
+            })
+        })?;
+        match token.kind {
+            TokenKind::Identifier(value) | TokenKind::String(value) => Ok(value),
+            _ => Err(self.at(
+                &token,
+                VmfParseErrorKind::Expected {
+                    expected: "block name",
                 },
             )),
         }
@@ -716,6 +803,32 @@ impl Parser {
                 },
             )),
         }
+    }
+
+    fn take_scalar(&mut self) -> Result<String, VmfParseError> {
+        if !self.permissive_scalars {
+            return self.take_string();
+        }
+        let token = self.take_token().ok_or_else(|| {
+            self.current_error(VmfParseErrorKind::Expected {
+                expected: "property value",
+            })
+        })?;
+        match token.kind {
+            TokenKind::String(value) | TokenKind::Identifier(value) => Ok(value),
+            _ => Err(self.at(
+                &token,
+                VmfParseErrorKind::Expected {
+                    expected: "property value",
+                },
+            )),
+        }
+    }
+
+    fn next_is_open_brace(&self) -> bool {
+        self.tokens
+            .get(self.cursor + 1)
+            .is_some_and(|token| matches!(&token.kind, TokenKind::OpenBrace))
     }
 
     fn current(&self) -> Option<&Token> {

@@ -144,6 +144,28 @@ pub struct BrushCompileLimits {
     pub max_indices: usize,
 }
 
+/// Policy for redundant planes that do not contribute a polygon to a valid
+/// convex brush volume.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DegenerateFacePolicy {
+    /// Reject the solid. This preserves the strict geometry-tooling contract.
+    #[default]
+    Reject,
+    /// Omit only the redundant side and keep the remaining valid brush faces.
+    ///
+    /// Real shipped VMFs can contain editor-generated duplicate or clipped-away
+    /// planes. Runtime map importers may select this policy so one invisible
+    /// side does not discard an otherwise valid world.
+    Skip,
+}
+
+/// Behavioural options independent from bounded-work limits.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BrushCompileOptions {
+    /// Handling for a side with fewer than three surviving face vertices.
+    pub degenerate_faces: DegenerateFacePolicy,
+}
+
 impl Default for BrushCompileLimits {
     fn default() -> Self {
         Self {
@@ -366,6 +388,27 @@ pub fn compile_brushes_with_texture_sizes(
     limits: BrushCompileLimits,
     texture_size: impl Fn(&str) -> Option<[u16; 2]>,
 ) -> Result<Model, BrushCompileError> {
+    compile_brushes_with_texture_sizes_and_options(
+        solids,
+        limits,
+        BrushCompileOptions::default(),
+        texture_size,
+    )
+}
+
+/// Option-configurable textured brush compiler.
+///
+/// # Errors
+///
+/// Returns the same bounded and topology errors as
+/// [`compile_brushes_with_texture_sizes`], subject to the selected degenerate
+/// face policy.
+pub fn compile_brushes_with_texture_sizes_and_options(
+    solids: &[BrushSolid],
+    limits: BrushCompileLimits,
+    options: BrushCompileOptions,
+    texture_size: impl Fn(&str) -> Option<[u16; 2]>,
+) -> Result<Model, BrushCompileError> {
     if solids.len() > limits.max_solids {
         return Err(BrushCompileError::TooManySolids {
             actual: solids.len(),
@@ -384,6 +427,7 @@ pub fn compile_brushes_with_texture_sizes(
             &mut materials,
             &mut material_indices,
             &mut total_indices,
+            options,
             &texture_size,
         )?;
         let name = solid
@@ -429,6 +473,11 @@ struct Plane {
     distance: f32,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "brush compilation keeps geometry limits, material interning, UV resolution, and diagnostics in one transactional pass"
+)]
 fn compile_one_solid(
     solid: &BrushSolid,
     solid_index: usize,
@@ -436,6 +485,7 @@ fn compile_one_solid(
     materials: &mut Vec<Material>,
     material_indices: &mut HashMap<String, MaterialIndex>,
     total_indices: &mut usize,
+    options: BrushCompileOptions,
     texture_size: &impl Fn(&str) -> Option<[u16; 2]>,
 ) -> Result<Vec<MeshPrimitive>, BrushCompileError> {
     if solid.sides.len() < 4 {
@@ -475,10 +525,15 @@ fn compile_one_solid(
             .filter(|vertex| (dot3(plane.normal, *vertex) - plane.distance).abs() <= PLANE_EPSILON)
             .collect::<Vec<_>>();
         if face.len() < 3 {
-            return Err(BrushCompileError::DegenerateFace {
-                solid: solid_index,
-                side: side_index,
-            });
+            match options.degenerate_faces {
+                DegenerateFacePolicy::Reject => {
+                    return Err(BrushCompileError::DegenerateFace {
+                        solid: solid_index,
+                        side: side_index,
+                    });
+                }
+                DegenerateFacePolicy::Skip => continue,
+            }
         }
         if face.len() > limits.max_vertices_per_face {
             return Err(BrushCompileError::TooManyFaceVertices {
@@ -533,26 +588,24 @@ fn compile_one_solid(
         if let (Some(axes), Some(size)) = (
             solid.sides[side_index].texture_axes,
             texture_size(&solid.sides[side_index].material),
-        ) {
-            if size[0] > 0
-                && size[1] > 0
-                && axes.u.scale.is_finite()
-                && axes.v.scale.is_finite()
-                && axes.u.scale != 0.0
-                && axes.v.scale != 0.0
-            {
-                let tex_coords = face
-                    .iter()
-                    .map(|position| texture_uv(*position, axes, size))
-                    .collect();
-                primitive = primitive.with_tex_coords_0(tex_coords).map_err(|source| {
-                    BrushCompileError::MeshValidation {
-                        solid: solid_index,
-                        side: side_index,
-                        source,
-                    }
-                })?;
-            }
+        ) && size[0] > 0
+            && size[1] > 0
+            && axes.u.scale.is_finite()
+            && axes.v.scale.is_finite()
+            && axes.u.scale != 0.0
+            && axes.v.scale != 0.0
+        {
+            let tex_coords = face
+                .iter()
+                .map(|position| texture_uv(*position, axes, size))
+                .collect();
+            primitive = primitive.with_tex_coords_0(tex_coords).map_err(|source| {
+                BrushCompileError::MeshValidation {
+                    solid: solid_index,
+                    side: side_index,
+                    source,
+                }
+            })?;
         }
         primitives.push(primitive);
     }
@@ -873,6 +926,36 @@ mod tests {
             compile_solid(&solid, BrushCompileLimits::default()),
             Err(BrushCompileError::DegeneratePlane { side: 0, .. })
         ));
+    }
+
+    #[test]
+    fn runtime_policy_skips_redundant_clipped_away_face() {
+        let mut solid = cube();
+        solid.sides.push(BrushSide::new(
+            PlanePoints::new([-2.0, -1.0, -1.0], [-2.0, -1.0, 1.0], [-2.0, 1.0, 1.0]),
+            "tools/redundant",
+        ));
+        assert!(matches!(
+            compile_brushes_with_texture_sizes(
+                &[solid.clone()],
+                BrushCompileLimits::default(),
+                |_| None
+            ),
+            Err(BrushCompileError::DegenerateFace { side: 6, .. })
+        ));
+
+        let model = compile_brushes_with_texture_sizes_and_options(
+            &[solid],
+            BrushCompileLimits::default(),
+            BrushCompileOptions {
+                degenerate_faces: DegenerateFacePolicy::Skip,
+            },
+            |_| None,
+        )
+        .expect("runtime policy keeps valid cube faces");
+
+        assert_eq!(model.meshes()[0].primitives().len(), 6);
+        assert_eq!(model.materials().len(), 3);
     }
 
     #[test]

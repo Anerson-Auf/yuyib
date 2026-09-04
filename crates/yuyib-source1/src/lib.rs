@@ -12,8 +12,9 @@ use std::{collections::BTreeSet, error::Error, fmt};
 use yuyib_model::Model;
 use yuyib_vmf::{VmfEntity, VmfMap, VmfSide, VmfSolid};
 use yuyib_vmf_model::{
-    BrushCompileError, BrushCompileLimits, BrushSide, BrushSolid, PlanePoints, TextureAxes,
-    TextureAxis, compile_brushes, compile_brushes_with_texture_sizes,
+    BrushCompileError, BrushCompileLimits, BrushCompileOptions, BrushSide, BrushSolid, PlanePoints,
+    TextureAxes, TextureAxis, compile_brushes, compile_brushes_with_texture_sizes,
+    compile_brushes_with_texture_sizes_and_options,
 };
 
 /// Selects which world and entity solids are compiled.
@@ -156,6 +157,37 @@ pub fn compile_map_with_texture_sizes(
         .collect();
     compile_brushes_with_texture_sizes(&solids, compiler_limits, texture_size)
         .map_err(Source1Error::Compile)
+}
+
+/// Compiles a UV-mapped map with explicit runtime topology policy.
+///
+/// This is the robust runtime counterpart to [`compile_map_with_texture_sizes`].
+/// Geometry authoring and validation tools should normally retain strict
+/// [`BrushCompileOptions::default`].
+///
+/// # Errors
+///
+/// Returns adapter, bounded-work or downstream brush compilation failures.
+pub fn compile_map_with_texture_sizes_and_options(
+    map: &VmfMap,
+    selection: &MapBrushSelection,
+    adapter_limits: Source1AdapterLimits,
+    compiler_limits: BrushCompileLimits,
+    compiler_options: BrushCompileOptions,
+    texture_size: impl Fn(&str) -> Option<[u16; 2]>,
+) -> Result<Model, Source1Error> {
+    let selected = adapt_map(map, selection, adapter_limits)?;
+    let solids: Vec<_> = selected
+        .into_iter()
+        .map(|selected| selected.solid)
+        .collect();
+    compile_brushes_with_texture_sizes_and_options(
+        &solids,
+        compiler_limits,
+        compiler_options,
+        texture_size,
+    )
+    .map_err(Source1Error::Compile)
 }
 
 fn selected_solids<'a>(

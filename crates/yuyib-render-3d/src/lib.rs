@@ -105,7 +105,11 @@ pub use skybox::{
 pub use ssao::{SsaoPolicy, SsaoPolicyError};
 pub use static_world::{
     StaticWorld3d, StaticWorldBatch3d, StaticWorldBuildError3d, StaticWorldBuildStats3d,
-    StaticWorldDrawStats3d, StaticWorldRenderer3d, StaticWorldUploadError3d,
+    StaticWorldDrawStats3d, StaticWorldRenderer3d, StaticWorldTexture3d, StaticWorldTextureError3d,
+    StaticWorldUploadError3d, TexturedStaticWorld3d, TexturedStaticWorldBuildError3d,
+    TexturedStaticWorldBuildStats3d, TexturedStaticWorldMaterial3d,
+    TexturedStaticWorldRenderError3d, TexturedStaticWorldRenderer3d,
+    TexturedStaticWorldUploadError3d, TexturedStaticWorldUploadStats3d,
 };
 
 use std::{collections::HashMap, error::Error, fmt, mem::size_of, num::NonZeroU64, sync::Arc};
