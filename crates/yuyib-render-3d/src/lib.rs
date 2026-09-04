@@ -5983,6 +5983,28 @@ impl BaseColorSceneRenderer3d {
         models: &Assets<Model>,
         scene: &ExtractedModels,
     ) -> Result<SceneDrawStats, BaseColorSceneRenderError> {
+        self.draw_for_frame_with_depth_load(frame, camera, models, scene, DepthLoad::Clear)
+    }
+
+    /// Draws an ECS snapshot with an explicit initial depth-buffer operation.
+    ///
+    /// Use [`DepthLoad::Load`] when composing models after an already-rendered
+    /// opaque world. This preserves world occlusion for later transparent
+    /// passes such as Source water.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same upload, material, camera and scene failures as
+    /// [`Self::draw_for_frame`].
+    #[allow(clippy::too_many_lines)] // Opaque and sorted transparent phase are one transaction.
+    pub fn draw_for_frame_with_depth_load(
+        &mut self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        models: &Assets<Model>,
+        scene: &ExtractedModels,
+        depth_load: DepthLoad,
+    ) -> Result<SceneDrawStats, BaseColorSceneRenderError> {
         let mut cache_misses = 0;
         for batch in scene.batches() {
             if !self.cached_models.contains_key(&batch.model()) {
@@ -5997,7 +6019,9 @@ impl BaseColorSceneRenderer3d {
             ..Default::default()
         };
         let mut transparent = Vec::new();
-        MeshRenderer3d::begin_depth_phase(frame);
+        if depth_load == DepthLoad::Clear {
+            MeshRenderer3d::begin_depth_phase(frame);
+        }
         for batch in scene.batches() {
             let cached = self.cached_models.get(&batch.model()).ok_or(
                 BaseColorSceneRenderError::MissingModel {
