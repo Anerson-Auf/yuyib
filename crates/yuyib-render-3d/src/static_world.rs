@@ -23,12 +23,11 @@ use yuyib_render_texture::{
 };
 
 use crate::{
-    Camera3d, DepthLoad, GpuMesh, GpuTexture, GpuTexturedLitMaterial, GpuTexturedLitMesh,
-    LambertLighting3d, LitMaterial3d, LitMeshInstance3d, LitMeshUniform, MeshDrawStats,
-    MeshRenderError, MeshRenderer3d, MeshUploadError, TexturedLitBatchDraw,
+    Camera3d, CameraUniformRing, DepthLoad, GpuMesh, GpuTexture, GpuTexturedLitMaterial,
+    GpuTexturedLitMesh, LambertLighting3d, LitMaterial3d, LitMeshInstance3d, LitMeshUniform,
+    MeshDrawStats, MeshRenderError, MeshRenderer3d, MeshUploadError, TexturedLitBatchDraw,
     TexturedLitMeshRenderError, TexturedLitMeshRenderer3d, TexturedLitMeshUploadError,
-    aligned_uniform_stride, dynamic_uniform_bind_group, dynamic_uniform_layout, uniform_bind_group,
-    uniform_buffer, uniform_layout,
+    aligned_uniform_stride, dynamic_uniform_bind_group, dynamic_uniform_layout, uniform_buffer,
 };
 
 /// CPU-side immutable world geometry grouped by material.
@@ -1431,11 +1430,10 @@ struct BlendedStaticWorldBatchDraw<'a> {
 
 struct BlendedStaticWorldRenderer3d {
     pipeline: wgpu::RenderPipeline,
-    camera_buffer: wgpu::Buffer,
+    camera_uniforms: CameraUniformRing,
     draw_buffer: wgpu::Buffer,
     draw_uniform_stride: u64,
     batch_capacity: usize,
-    camera_bind_group: wgpu::BindGroup,
     draw_bind_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
 }
@@ -1584,9 +1582,10 @@ impl BlendedStaticWorldRenderer3d {
                     .map_err(TexturedLitMeshRenderError::Lit)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        frame
-            .queue()
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
+        let camera_offset = self
+            .camera_uniforms
+            .write_for_frame(frame, view_projection)
+            .map_err(TexturedLitMeshRenderError::Mesh)?;
         for (index, uniform) in uniforms.iter().enumerate() {
             let offset = u64::try_from(index)
                 .expect("batch capacity fits u64")
@@ -1597,7 +1596,7 @@ impl BlendedStaticWorldRenderer3d {
         }
         frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(0, self.camera_uniforms.bind_group(), &[camera_offset]);
             for (index, draw) in draws.iter().enumerate() {
                 let offset = u64::try_from(index)
                     .expect("batch capacity fits u64")
@@ -1624,10 +1623,11 @@ impl BlendedStaticWorldRenderer3d {
         batch_capacity: usize,
     ) -> Self {
         let batch_capacity = batch_capacity.max(1);
-        let camera_layout = uniform_layout(
+        let camera_layout = dynamic_uniform_layout(
             device,
             "yuyib blended static-world camera layout",
             wgpu::ShaderStages::VERTEX,
+            size_of::<[f32; 16]>() as u64,
         );
         let draw_layout = dynamic_uniform_layout(
             device,
@@ -1636,11 +1636,8 @@ impl BlendedStaticWorldRenderer3d {
             size_of::<LitMeshUniform>() as u64,
         );
         let texture_layout = blended_static_world_texture_layout(device);
-        let camera_buffer = uniform_buffer(
-            device,
-            "yuyib blended static-world camera",
-            size_of::<[f32; 16]>() as u64,
-        );
+        let camera_uniforms =
+            CameraUniformRing::new(device, "yuyib blended static-world camera", &camera_layout);
         let draw_uniform_stride = aligned_uniform_stride(
             device.limits().min_uniform_buffer_offset_alignment,
             size_of::<LitMeshUniform>() as u64,
@@ -1650,12 +1647,6 @@ impl BlendedStaticWorldRenderer3d {
             "yuyib blended static-world draws",
             draw_uniform_stride
                 .saturating_mul(u64::try_from(batch_capacity).expect("batch capacity fits u64")),
-        );
-        let camera_bind_group = uniform_bind_group(
-            device,
-            "yuyib blended static-world camera bind group",
-            &camera_layout,
-            &camera_buffer,
         );
         let draw_bind_group = dynamic_uniform_bind_group(
             device,
@@ -1715,11 +1706,10 @@ impl BlendedStaticWorldRenderer3d {
         });
         Self {
             pipeline,
-            camera_buffer,
+            camera_uniforms,
             draw_buffer,
             draw_uniform_stride,
             batch_capacity,
-            camera_bind_group,
             draw_bind_group,
             texture_layout,
         }

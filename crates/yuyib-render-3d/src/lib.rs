@@ -119,7 +119,10 @@ pub use static_world::{
     TexturedStaticWorldUploadError3d, TexturedStaticWorldUploadStats3d,
 };
 
-use std::{collections::HashMap, error::Error, fmt, mem::size_of, num::NonZeroU64, sync::Arc};
+use std::{
+    cell::RefCell, collections::HashMap, error::Error, fmt, mem::size_of, num::NonZeroU64,
+    sync::Arc,
+};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -517,12 +520,9 @@ pub struct MeshRenderer3d {
     double_sided_pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
     transparent_double_sided_pipeline: wgpu::RenderPipeline,
-    camera_buffer: wgpu::Buffer,
-    instance_buffer: wgpu::Buffer,
-    instance_stride: u64,
+    camera_uniforms: CameraUniformRing,
+    instance_uniforms: DynamicUniformRing<MeshUniform>,
     batch_capacity: usize,
-    camera_bind_group: wgpu::BindGroup,
-    instance_bind_group: wgpu::BindGroup,
 }
 
 impl MeshRenderer3d {
@@ -657,7 +657,7 @@ impl MeshRenderer3d {
     ) -> Result<MeshDrawStats, MeshRenderError> {
         let view_projection = camera.view_projection(frame.draw_size())?;
         let uniform = instance.uniform()?;
-        Ok(self.draw_uniform(
+        self.draw_uniform(
             frame,
             view_projection,
             mesh,
@@ -665,7 +665,7 @@ impl MeshRenderer3d {
             depth_load,
             false,
             false,
-        ))
+        )
     }
 
     /// Records one unlit indexed draw with a caller-provided model matrix.
@@ -808,28 +808,29 @@ impl MeshRenderer3d {
         for &(_, model_matrix, color) in draws {
             uniforms.push(MeshUniform::from_matrix(model_matrix, color)?);
         }
-        frame
-            .queue()
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
-        let mut packed = vec![0_u8; self.instance_stride as usize * draws.len()];
-        for (index, uniform) in uniforms.iter().enumerate() {
-            let start = index * self.instance_stride as usize;
-            let bytes = bytemuck::bytes_of(uniform);
-            packed[start..start + bytes.len()].copy_from_slice(bytes);
-        }
-        frame
-            .queue()
-            .write_buffer(&self.instance_buffer, 0, &packed);
+        let camera_offset = self
+            .camera_uniforms
+            .write_for_frame(frame, view_projection)?;
+        let instance_offsets = uniforms
+            .iter()
+            .copied()
+            .map(|uniform| {
+                self.instance_uniforms
+                    .write_for_frame(frame, uniform)
+                    .map_err(|overflow| MeshRenderError::UniformRingFull {
+                        uniform: "unlit instance",
+                        capacity: overflow.capacity,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut triangles = 0_u32;
         let draw_calls = draws.len() as u32;
         frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
             pass.set_pipeline(&self.double_sided_pipeline);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            for (index, (mesh, _, _)) in draws.iter().enumerate() {
-                let offset = u32::try_from(index as u64 * self.instance_stride)
-                    .expect("unlit instance dynamic offset fits u32");
-                pass.set_bind_group(1, &self.instance_bind_group, &[offset]);
+            pass.set_bind_group(0, self.camera_uniforms.bind_group(), &[camera_offset]);
+            for ((mesh, _, _), instance_offset) in draws.iter().zip(instance_offsets) {
+                pass.set_bind_group(1, self.instance_uniforms.bind_group(), &[instance_offset]);
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
@@ -855,7 +856,7 @@ impl MeshRenderer3d {
     ) -> Result<MeshDrawStats, MeshRenderError> {
         let view_projection = camera.view_projection(frame.draw_size())?;
         let uniform = MeshUniform::from_matrix(model_matrix, color)?;
-        Ok(self.draw_uniform(
+        self.draw_uniform(
             frame,
             view_projection,
             mesh,
@@ -863,7 +864,7 @@ impl MeshRenderer3d {
             depth_load,
             double_sided,
             false,
-        ))
+        )
     }
 
     /// Records one unlit draw for the standard-material bridge.
@@ -885,7 +886,7 @@ impl MeshRenderer3d {
     ) -> Result<MeshDrawStats, MeshRenderError> {
         let view_projection = camera.view_projection(frame.draw_size())?;
         let uniform = MeshUniform::from_matrix(model_matrix, color)?;
-        Ok(self.draw_uniform(
+        self.draw_uniform(
             frame,
             view_projection,
             mesh,
@@ -893,7 +894,7 @@ impl MeshRenderer3d {
             depth_load,
             double_sided,
             false,
-        ))
+        )
     }
 
     /// Draws one source-over transparent unlit mesh over an existing opaque
@@ -937,7 +938,7 @@ impl MeshRenderer3d {
     ) -> Result<MeshDrawStats, MeshRenderError> {
         let view_projection = camera.view_projection(frame.draw_size())?;
         let uniform = MeshUniform::from_matrix(model_matrix, color)?;
-        Ok(self.draw_uniform(
+        self.draw_uniform(
             frame,
             view_projection,
             mesh,
@@ -945,7 +946,7 @@ impl MeshRenderer3d {
             DepthLoad::Load,
             double_sided,
             true,
-        ))
+        )
     }
 
     /// Clears the frame-local depth attachment while preserving surface colour.
@@ -969,13 +970,17 @@ impl MeshRenderer3d {
         depth_load: DepthLoad,
         double_sided: bool,
         transparent: bool,
-    ) -> MeshDrawStats {
-        frame
-            .queue()
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
-        frame
-            .queue()
-            .write_buffer(&self.instance_buffer, 0, bytemuck::bytes_of(&uniform));
+    ) -> Result<MeshDrawStats, MeshRenderError> {
+        let camera_offset = self
+            .camera_uniforms
+            .write_for_frame(frame, view_projection)?;
+        let instance_offset = self
+            .instance_uniforms
+            .write_for_frame(frame, uniform)
+            .map_err(|overflow| MeshRenderError::UniformRingFull {
+                uniform: "unlit instance",
+                capacity: overflow.capacity,
+            })?;
         frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
             pass.set_pipeline(match (transparent, double_sided) {
                 (false, false) => &self.pipeline,
@@ -983,17 +988,17 @@ impl MeshRenderer3d {
                 (true, false) => &self.transparent_pipeline,
                 (true, true) => &self.transparent_double_sided_pipeline,
             });
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_bind_group(1, &self.instance_bind_group, &[0]);
+            pass.set_bind_group(0, self.camera_uniforms.bind_group(), &[camera_offset]);
+            pass.set_bind_group(1, self.instance_uniforms.bind_group(), &[instance_offset]);
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
             pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.index_count, 0, 0..1);
         });
-        MeshDrawStats {
+        Ok(MeshDrawStats {
             triangles: mesh.index_count / 3,
             draw_calls: 1,
             transient_uniform_buffer_allocations: 0,
-        }
+        })
     }
 
     #[allow(clippy::too_many_lines)] // Pipeline state is intentionally adjacent for review.
@@ -1005,23 +1010,12 @@ impl MeshRenderer3d {
     ) -> Self {
         let batch_capacity = batch_capacity.max(1);
         let instance_uniform_size = size_of::<MeshUniform>() as u64;
-        let instance_stride = aligned_uniform_stride(
-            device.limits().min_uniform_buffer_offset_alignment,
-            instance_uniform_size,
+        let camera_layout = dynamic_uniform_layout(
+            device,
+            "yuyib 3d camera layout",
+            wgpu::ShaderStages::VERTEX,
+            size_of::<[f32; 16]>() as u64,
         );
-        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("yuyib 3d camera layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
         let instance_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("yuyib 3d instance layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -1035,40 +1029,13 @@ impl MeshRenderer3d {
                 count: None,
             }],
         });
-        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("yuyib 3d camera"),
-            size: size_of::<[f32; 16]>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("yuyib 3d instance"),
-            size: instance_stride.saturating_mul(
-                u64::try_from(batch_capacity).expect("unlit batch capacity fits u64"),
-            ),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("yuyib 3d camera bind group"),
-            layout: &camera_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-        });
-        let instance_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("yuyib 3d instance bind group"),
-            layout: &instance_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &instance_buffer,
-                    offset: 0,
-                    size: NonZeroU64::new(instance_uniform_size),
-                }),
-            }],
-        });
+        let camera_uniforms = CameraUniformRing::new(device, "yuyib 3d camera", &camera_layout);
+        let instance_uniforms = DynamicUniformRing::new(
+            device,
+            "yuyib 3d instance",
+            &instance_layout,
+            batch_capacity,
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("yuyib unlit mesh WGSL"),
             source: wgpu::ShaderSource::Wgsl(UNLIT_MESH_WGSL.into()),
@@ -1229,12 +1196,9 @@ impl MeshRenderer3d {
             double_sided_pipeline,
             transparent_pipeline,
             transparent_double_sided_pipeline,
-            camera_buffer,
-            instance_buffer,
-            instance_stride,
+            camera_uniforms,
+            instance_uniforms,
             batch_capacity,
-            camera_bind_group,
-            instance_bind_group,
         }
     }
 
@@ -6555,6 +6519,13 @@ pub enum MeshRenderError {
         /// Maximum instances the renderer uploaded capacity for.
         capacity: usize,
     },
+    /// One frame recorded more distinct values than a persistent uniform ring holds.
+    UniformRingFull {
+        /// Semantic uniform stream that exhausted its bounded storage.
+        uniform: &'static str,
+        /// Number of distinct values accepted per frame.
+        capacity: usize,
+    },
 }
 
 impl fmt::Display for MeshRenderError {
@@ -6572,6 +6543,10 @@ impl fmt::Display for MeshRenderError {
             } => write!(
                 formatter,
                 "unlit batch has {requested} draws but capacity is {capacity}"
+            ),
+            Self::UniformRingFull { uniform, capacity } => write!(
+                formatter,
+                "{uniform} uniform ring exhausted its {capacity} per-frame slots"
             ),
         }
     }
@@ -6670,7 +6645,7 @@ const TEXTURED_SKINNED_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> =
     };
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct MeshUniform {
     model: [f32; 16],
     color: [f32; 4],
@@ -6966,12 +6941,12 @@ pub struct TexturedMeshRenderer3d {
     double_sided_pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
     transparent_double_sided_pipeline: wgpu::RenderPipeline,
-    camera_buffer: wgpu::Buffer,
-    instance_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    instance_bind_group: wgpu::BindGroup,
+    camera_uniforms: CameraUniformRing,
+    instance_uniforms: DynamicUniformRing<MeshUniform>,
     texture_layout: wgpu::BindGroupLayout,
 }
+
+const TEXTURED_MESH_INSTANCE_RING_CAPACITY: usize = 512;
 
 impl TexturedMeshRenderer3d {
     /// Creates a textured unlit renderer for `renderer`'s presentation format.
@@ -7163,12 +7138,19 @@ impl TexturedMeshRenderer3d {
                     },
                 ],
             });
-        frame
-            .queue()
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
-        frame
-            .queue()
-            .write_buffer(&self.instance_buffer, 0, bytemuck::bytes_of(&uniform));
+        let camera_offset = self
+            .camera_uniforms
+            .write_for_frame(frame, view_projection)
+            .map_err(TexturedMeshRenderError::Mesh)?;
+        let instance_offset = self
+            .instance_uniforms
+            .write_for_frame(frame, uniform)
+            .map_err(|overflow| {
+                TexturedMeshRenderError::Mesh(MeshRenderError::UniformRingFull {
+                    uniform: "textured instance",
+                    capacity: overflow.capacity,
+                })
+            })?;
         frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
             pass.set_pipeline(match (transparent, double_sided) {
                 (false, false) => &self.pipeline,
@@ -7176,8 +7158,8 @@ impl TexturedMeshRenderer3d {
                 (true, false) => &self.transparent_pipeline,
                 (true, true) => &self.transparent_double_sided_pipeline,
             });
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_bind_group(1, &self.instance_bind_group, &[]);
+            pass.set_bind_group(0, self.camera_uniforms.bind_group(), &[camera_offset]);
+            pass.set_bind_group(1, self.instance_uniforms.bind_group(), &[instance_offset]);
             pass.set_bind_group(2, &texture_bind_group, &[]);
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
             pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -7196,15 +7178,17 @@ impl TexturedMeshRenderer3d {
         format: wgpu::TextureFormat,
         depth_format: wgpu::TextureFormat,
     ) -> Self {
-        let camera_layout = uniform_layout(
+        let camera_layout = dynamic_uniform_layout(
             device,
             "yuyib textured mesh camera layout",
             wgpu::ShaderStages::VERTEX,
+            size_of::<[f32; 16]>() as u64,
         );
-        let instance_layout = uniform_layout(
+        let instance_layout = dynamic_uniform_layout(
             device,
             "yuyib textured mesh instance layout",
             wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            size_of::<MeshUniform>() as u64,
         );
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("yuyib textured mesh material layout"),
@@ -7227,27 +7211,13 @@ impl TexturedMeshRenderer3d {
                 },
             ],
         });
-        let camera_buffer = uniform_buffer(
-            device,
-            "yuyib textured mesh camera",
-            size_of::<[f32; 16]>() as u64,
-        );
-        let instance_buffer = uniform_buffer(
+        let camera_uniforms =
+            CameraUniformRing::new(device, "yuyib textured mesh camera", &camera_layout);
+        let instance_uniforms = DynamicUniformRing::new(
             device,
             "yuyib textured mesh instance",
-            size_of::<MeshUniform>() as u64,
-        );
-        let camera_bind_group = uniform_bind_group(
-            device,
-            "yuyib textured mesh camera bind group",
-            &camera_layout,
-            &camera_buffer,
-        );
-        let instance_bind_group = uniform_bind_group(
-            device,
-            "yuyib textured mesh instance bind group",
             &instance_layout,
-            &instance_buffer,
+            TEXTURED_MESH_INSTANCE_RING_CAPACITY,
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("yuyib textured unlit mesh WGSL"),
@@ -7356,10 +7326,8 @@ impl TexturedMeshRenderer3d {
             double_sided_pipeline,
             transparent_pipeline,
             transparent_double_sided_pipeline,
-            camera_buffer,
-            instance_buffer,
-            camera_bind_group,
-            instance_bind_group,
+            camera_uniforms,
+            instance_uniforms,
             texture_layout,
         }
     }
@@ -7541,11 +7509,10 @@ pub struct TexturedLitMeshRenderer3d {
     double_sided_pipeline: wgpu::RenderPipeline,
     mirrored_pipeline: wgpu::RenderPipeline,
     mirrored_double_sided_pipeline: wgpu::RenderPipeline,
-    camera_buffer: wgpu::Buffer,
+    camera_uniforms: CameraUniformRing,
     draw_buffer: wgpu::Buffer,
     draw_uniform_stride: u64,
     batch_capacity: usize,
-    camera_bind_group: wgpu::BindGroup,
     draw_bind_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
 }
@@ -7707,9 +7674,10 @@ impl TexturedLitMeshRenderer3d {
                 .map_err(TexturedLitMeshRenderError::Lit)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        frame
-            .queue()
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
+        let camera_offset = self
+            .camera_uniforms
+            .write_for_frame(frame, view_projection)
+            .map_err(TexturedLitMeshRenderError::Mesh)?;
         for (index, uniform) in uniforms.iter().enumerate() {
             let offset = u64::try_from(index)
                 .expect("batch capacity fits u64")
@@ -7719,7 +7687,7 @@ impl TexturedLitMeshRenderer3d {
                 .write_buffer(&self.draw_buffer, offset, bytemuck::bytes_of(uniform));
         }
         frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(0, self.camera_uniforms.bind_group(), &[camera_offset]);
             for (index, draw) in draws.iter().enumerate() {
                 pass.set_pipeline(self.pipeline_for(draw.instance.model_matrix, draw.double_sided));
                 let offset = u64::try_from(index)
@@ -7800,15 +7768,16 @@ impl TexturedLitMeshRenderer3d {
             LitMeshUniform::new(instance.model_matrix, instance.material, instance.lighting)
                 .map_err(TexturedLitMeshRenderError::Lit)?;
         let texture_bind_group = self.upload_material_for_frame(frame, texture);
-        frame
-            .queue()
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
+        let camera_offset = self
+            .camera_uniforms
+            .write_for_frame(frame, view_projection)
+            .map_err(TexturedLitMeshRenderError::Mesh)?;
         frame
             .queue()
             .write_buffer(&self.draw_buffer, 0, bytemuck::bytes_of(&uniform));
         frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
             pass.set_pipeline(self.pipeline_for(instance.model_matrix, double_sided));
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(0, self.camera_uniforms.bind_group(), &[camera_offset]);
             pass.set_bind_group(1, &self.draw_bind_group, &[0]);
             pass.set_bind_group(2, texture_bind_group.bind_group.as_ref(), &[]);
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -7830,10 +7799,11 @@ impl TexturedLitMeshRenderer3d {
         batch_capacity: usize,
     ) -> Self {
         let batch_capacity = batch_capacity.max(1);
-        let camera_layout = uniform_layout(
+        let camera_layout = dynamic_uniform_layout(
             device,
             "yuyib textured Lambert camera layout",
             wgpu::ShaderStages::VERTEX,
+            size_of::<[f32; 16]>() as u64,
         );
         let draw_layout = dynamic_uniform_layout(
             device,
@@ -7843,11 +7813,8 @@ impl TexturedLitMeshRenderer3d {
         );
         let texture_layout =
             textured_material_layout(device, "yuyib textured Lambert material layout");
-        let camera_buffer = uniform_buffer(
-            device,
-            "yuyib textured Lambert camera",
-            size_of::<[f32; 16]>() as u64,
-        );
+        let camera_uniforms =
+            CameraUniformRing::new(device, "yuyib textured Lambert camera", &camera_layout);
         let draw_uniform_stride = aligned_uniform_stride(
             device.limits().min_uniform_buffer_offset_alignment,
             size_of::<LitMeshUniform>() as u64,
@@ -7857,12 +7824,6 @@ impl TexturedLitMeshRenderer3d {
             "yuyib textured Lambert draw",
             draw_uniform_stride
                 .saturating_mul(u64::try_from(batch_capacity).expect("capacity fits u64")),
-        );
-        let camera_bind_group = uniform_bind_group(
-            device,
-            "yuyib textured Lambert camera bind group",
-            &camera_layout,
-            &camera_buffer,
         );
         let draw_bind_group = dynamic_uniform_bind_group(
             device,
@@ -7943,11 +7904,10 @@ impl TexturedLitMeshRenderer3d {
                 wgpu::FrontFace::Cw,
                 None,
             ),
-            camera_buffer,
+            camera_uniforms,
             draw_buffer,
             draw_uniform_stride,
             batch_capacity,
-            camera_bind_group,
             draw_bind_group,
             texture_layout,
         }
@@ -8418,6 +8378,141 @@ fn dynamic_uniform_layout(
 fn aligned_uniform_stride(alignment: u32, minimum_size: u64) -> u64 {
     let alignment = u64::from(alignment.max(1));
     minimum_size.div_ceil(alignment).saturating_mul(alignment)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UniformRingOverflow {
+    capacity: usize,
+}
+
+#[derive(Debug)]
+struct UniformRingCursor<T> {
+    frame_serial: Option<u64>,
+    values: Vec<T>,
+    capacity: usize,
+}
+
+impl<T: Copy + PartialEq> UniformRingCursor<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            frame_serial: None,
+            values: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn reserve(
+        &mut self,
+        frame_serial: u64,
+        value: T,
+    ) -> Result<(usize, bool), UniformRingOverflow> {
+        if self.frame_serial != Some(frame_serial) {
+            self.frame_serial = Some(frame_serial);
+            self.values.clear();
+        }
+        if let Some(slot) = self.values.iter().position(|candidate| *candidate == value) {
+            return Ok((slot, false));
+        }
+        if self.values.len() >= self.capacity {
+            return Err(UniformRingOverflow {
+                capacity: self.capacity,
+            });
+        }
+        let slot = self.values.len();
+        self.values.push(value);
+        Ok((slot, true))
+    }
+}
+
+struct DynamicUniformRing<T> {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    stride: u64,
+    cursor: RefCell<UniformRingCursor<T>>,
+}
+
+impl<T: Copy + PartialEq + Pod> DynamicUniformRing<T> {
+    fn new(
+        device: &wgpu::Device,
+        label: &'static str,
+        layout: &wgpu::BindGroupLayout,
+        capacity: usize,
+    ) -> Self {
+        let capacity = capacity.max(1);
+        let minimum_size = size_of::<T>() as u64;
+        let stride = aligned_uniform_stride(
+            device.limits().min_uniform_buffer_offset_alignment,
+            minimum_size,
+        );
+        let buffer = uniform_buffer(
+            device,
+            label,
+            stride.saturating_mul(u64::try_from(capacity).expect("uniform capacity fits u64")),
+        );
+        let bind_group = dynamic_uniform_bind_group(device, label, layout, &buffer, minimum_size);
+        Self {
+            buffer,
+            bind_group,
+            stride,
+            cursor: RefCell::new(UniformRingCursor::new(capacity)),
+        }
+    }
+
+    fn write_for_frame(
+        &self,
+        frame: &RenderFrame<'_>,
+        value: T,
+    ) -> Result<u32, UniformRingOverflow> {
+        let (slot, needs_write) = self
+            .cursor
+            .borrow_mut()
+            .reserve(frame.frame_serial(), value)?;
+        let offset = u64::try_from(slot)
+            .expect("uniform ring slot fits u64")
+            .saturating_mul(self.stride);
+        if needs_write {
+            frame
+                .queue()
+                .write_buffer(&self.buffer, offset, bytemuck::bytes_of(&value));
+        }
+        Ok(u32::try_from(offset).expect("dynamic uniform offset fits u32"))
+    }
+
+    const fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+}
+
+const CAMERA_UNIFORM_RING_CAPACITY: usize = 8;
+
+struct CameraUniformRing(DynamicUniformRing<[f32; 16]>);
+
+impl CameraUniformRing {
+    fn new(device: &wgpu::Device, label: &'static str, layout: &wgpu::BindGroupLayout) -> Self {
+        Self(DynamicUniformRing::new(
+            device,
+            label,
+            layout,
+            CAMERA_UNIFORM_RING_CAPACITY,
+        ))
+    }
+
+    fn write_for_frame(
+        &self,
+        frame: &RenderFrame<'_>,
+        view_projection: [f32; 16],
+    ) -> Result<u32, MeshRenderError> {
+        self.0
+            .write_for_frame(frame, view_projection)
+            .map_err(|overflow| MeshRenderError::UniformRingFull {
+                uniform: "camera",
+                capacity: overflow.capacity,
+            })
+    }
+
+    const fn bind_group(&self) -> &wgpu::BindGroup {
+        self.0.bind_group()
+    }
 }
 
 fn skin_palette_layout(device: &wgpu::Device, label: &'static str) -> wgpu::BindGroupLayout {
@@ -9928,6 +10023,20 @@ fn multiply_matrix4(left: [f32; 16], right: [f32; 16]) -> [f32; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uniform_ring_cursor_reuses_values_and_resets_on_next_frame() {
+        let mut cursor = UniformRingCursor::new(2);
+
+        assert_eq!(cursor.reserve(10, 7_u32), Ok((0, true)));
+        assert_eq!(cursor.reserve(10, 7_u32), Ok((0, false)));
+        assert_eq!(cursor.reserve(10, 9_u32), Ok((1, true)));
+        assert_eq!(
+            cursor.reserve(10, 11_u32),
+            Err(UniformRingOverflow { capacity: 2 })
+        );
+        assert_eq!(cursor.reserve(11, 11_u32), Ok((0, true)));
+    }
 
     #[test]
     fn skeletal_visibility_distinguishes_nodes_and_primitives() {

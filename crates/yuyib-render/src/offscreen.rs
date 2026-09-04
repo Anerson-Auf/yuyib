@@ -40,6 +40,7 @@ pub struct OffscreenRenderer {
     depth: DepthAttachment,
     viewport_depths: HashMap<RenderViewport, Arc<DepthAttachment>>,
     anisotropic_filtering_supported: bool,
+    frame_serial: u64,
 }
 
 /// Tightly packed RGBA8 pixels captured from an [`OffscreenRenderer`].
@@ -131,6 +132,7 @@ impl OffscreenRenderer {
             depth,
             viewport_depths: HashMap::new(),
             anisotropic_filtering_supported,
+            frame_serial: 0,
         })
     }
 
@@ -165,6 +167,10 @@ impl OffscreenRenderer {
     /// Does not present anything. Call [`Self::capture_rgba8`] afterwards (or
     /// use [`Self::render_and_capture_rgba8`]).
     pub fn render_frame(&mut self, clear: ClearColor, record: impl FnOnce(&mut RenderFrame<'_>)) {
+        self.frame_serial = self
+            .frame_serial
+            .checked_add(1)
+            .expect("offscreen frame serial exhausted u64");
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
@@ -183,6 +189,7 @@ impl OffscreenRenderer {
                 depth_view: &self.depth.view,
                 viewport_depths: &mut self.viewport_depths,
                 anisotropic_filtering_supported: self.anisotropic_filtering_supported,
+                frame_serial: self.frame_serial,
             };
             frame.with_surface_pass(LoadOp::Clear(clear.into()), |_| {});
             record(&mut frame);

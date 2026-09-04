@@ -202,6 +202,7 @@ pub struct Renderer {
     color_post_process: Option<ColorPostProcess>,
     post_process_resources: Option<post_process::PostProcessResources>,
     anisotropic_filtering_supported: bool,
+    frame_serial: u64,
 }
 
 /// The private depth texture paired with a configured presentation surface.
@@ -642,6 +643,7 @@ pub struct RenderFrame<'frame> {
     depth_view: &'frame TextureView,
     viewport_depths: &'frame mut HashMap<RenderViewport, Arc<DepthAttachment>>,
     anisotropic_filtering_supported: bool,
+    frame_serial: u64,
 }
 
 impl RenderFrame<'_> {
@@ -655,6 +657,17 @@ impl RenderFrame<'_> {
     #[must_use]
     pub const fn queue(&self) -> &Queue {
         self.queue
+    }
+
+    /// Monotonically increasing identifier of the currently recorded frame.
+    ///
+    /// Nested viewport and caller-owned render-target frames inherit the same
+    /// serial. Persistent GPU uniform rings can therefore reset their CPU
+    /// cursor once per submitted frame without treating offscreen passes as
+    /// independent submissions.
+    #[must_use]
+    pub const fn frame_serial(&self) -> u64 {
+        self.frame_serial
     }
 
     /// Returns whether the adapter reports active anisotropic sampling.
@@ -727,6 +740,7 @@ impl RenderFrame<'_> {
             depth_view: &depth.view,
             viewport_depths: &mut *self.viewport_depths,
             anisotropic_filtering_supported: self.anisotropic_filtering_supported,
+            frame_serial: self.frame_serial,
         };
         Ok(render(&mut nested))
     }
@@ -780,6 +794,7 @@ impl RenderFrame<'_> {
             depth_view: target.depth_view,
             viewport_depths: &mut target_viewport_depths,
             anisotropic_filtering_supported: self.anisotropic_filtering_supported,
+            frame_serial: self.frame_serial,
         };
         Ok(render(&mut nested))
     }
@@ -1026,6 +1041,7 @@ impl Renderer {
             color_post_process: None,
             post_process_resources: None,
             anisotropic_filtering_supported,
+            frame_serial: 0,
         })
     }
 
@@ -1198,6 +1214,10 @@ impl Renderer {
             resources.write_parameters(&self.queue, config);
         }
         {
+            self.frame_serial = self
+                .frame_serial
+                .checked_add(1)
+                .expect("renderer frame serial exhausted u64");
             let color_view = self
                 .post_process_resources
                 .as_ref()
@@ -1222,6 +1242,7 @@ impl Renderer {
                 depth_view: &self.depth.view,
                 viewport_depths: &mut self.viewport_depths,
                 anisotropic_filtering_supported: self.anisotropic_filtering_supported,
+                frame_serial: self.frame_serial,
             };
             frame.with_surface_pass(LoadOp::Clear(clear.into()), |_| {});
             record(&mut frame);
