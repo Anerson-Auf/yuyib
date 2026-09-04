@@ -1,8 +1,9 @@
 //! Safe texture-asset resolution for [`yuyib_model::Model`].
 //!
-//! A model stores external texture URIs or embedded encoded image bytes as
-//! renderer-neutral metadata. This crate resolves relative filesystem URIs
-//! under one canonical asset root, or decodes the embedded bytes directly,
+//! A model stores external texture URIs, embedded encoded image bytes, or
+//! importer-decoded RGBA8 pixels as renderer-neutral metadata. This crate
+//! resolves relative filesystem URIs under one canonical asset root, decodes
+//! encoded bytes, validates importer pixels,
 //! applies the [`DecodePolicy`], inserts typed CPU texture metadata, and uploads
 //! sampled GPU textures through [`TextureCache`]. The returned [`ModelTextureBindings`]
 //! maps every **material-referenced** [`ModelTextureIndex`] to the typed handle a
@@ -23,7 +24,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use yuyib_2d::{Texture, TextureColorSpace, TextureHandle};
+use yuyib_2d::{Texture, TextureColorSpace, TextureHandle, TextureSize};
 use yuyib_assets::Assets;
 use yuyib_image::{DecodePolicy, ImageImportError, decode_bytes, decode_path};
 use yuyib_model::{
@@ -151,6 +152,15 @@ pub enum ResolvedModelTextureSource {
         /// potentially large importer-owned image data.
         encoded_bytes: usize,
     },
+    /// Pixels decoded by the source-format importer before residency.
+    DecodedRgba8 {
+        /// Pixel width.
+        width: u32,
+        /// Pixel height.
+        height: u32,
+        /// Tightly packed source byte length.
+        bytes: usize,
+    },
 }
 
 impl ResolvedModelTexture {
@@ -178,7 +188,8 @@ impl ResolvedModelTexture {
     pub fn source_path(&self) -> Option<&Path> {
         match &self.source {
             ResolvedModelTextureSource::Path(path) => Some(path),
-            ResolvedModelTextureSource::Embedded { .. } => None,
+            ResolvedModelTextureSource::Embedded { .. }
+            | ResolvedModelTextureSource::DecodedRgba8 { .. } => None,
         }
     }
 
@@ -258,6 +269,13 @@ enum PreparedTextureKey {
     Embedded(
         std::sync::Arc<[u8]>,
         String,
+        ModelTextureColorSpace,
+        TextureSampler,
+    ),
+    DecodedRgba8(
+        std::sync::Arc<[u8]>,
+        u32,
+        u32,
         ModelTextureColorSpace,
         TextureSampler,
     ),
@@ -353,6 +371,17 @@ impl PreparedModelTextures {
                                 source,
                             }
                         }
+                        ResolvedModelTextureSource::DecodedRgba8 {
+                            width,
+                            height,
+                            bytes,
+                        } => ModelTextureLoadError::UploadDecodedRgba8 {
+                            index: slot.index,
+                            width: *width,
+                            height: *height,
+                            bytes: *bytes,
+                            source,
+                        },
                     });
                 }
                 self.resident.insert(slot.key.clone(), handle);
@@ -603,7 +632,7 @@ impl ModelTextureLoader {
                 let index = ModelTextureIndex::new(slot);
                 let color_space = color_spaces[slot];
                 let sampler = self.resolve_sampler(descriptor);
-                let (image, source, key) = match descriptor.source() {
+                let (metadata, pixels, source, key) = match descriptor.source() {
                     ModelTextureSource::ExternalUri(uri) => {
                         let path = self.resolve_uri(index, uri)?;
                         let image = decode_path(&path, self.decode_policy).map_err(|source| {
@@ -614,7 +643,15 @@ impl ModelTextureLoader {
                             }
                         })?;
                         let key = PreparedTextureKey::Path(path.clone(), color_space, sampler);
-                        (image, ResolvedModelTextureSource::Path(path), key)
+                        let metadata = Texture::new(image.texture().size())
+                            .with_alpha_mode(image.texture().alpha_mode())
+                            .with_color_space(color_space.into_texture_color_space());
+                        (
+                            metadata,
+                            image.into_pixels(),
+                            ResolvedModelTextureSource::Path(path),
+                            key,
+                        )
                     }
                     ModelTextureSource::Encoded { mime_type, bytes } => {
                         let image = decode_bytes(bytes, self.decode_policy).map_err(|source| {
@@ -630,8 +667,12 @@ impl ModelTextureLoader {
                             color_space,
                             sampler,
                         );
+                        let metadata = Texture::new(image.texture().size())
+                            .with_alpha_mode(image.texture().alpha_mode())
+                            .with_color_space(color_space.into_texture_color_space());
                         (
-                            image,
+                            metadata,
+                            image.into_pixels(),
                             ResolvedModelTextureSource::Embedded {
                                 mime_type: mime_type.clone(),
                                 encoded_bytes: bytes.len(),
@@ -639,11 +680,31 @@ impl ModelTextureLoader {
                             key,
                         )
                     }
+                    ModelTextureSource::DecodedRgba8 {
+                        width,
+                        height,
+                        pixels,
+                    } => {
+                        let metadata =
+                            decoded_rgba8_metadata(index, *width, *height, pixels, color_space)?;
+                        (
+                            metadata,
+                            pixels.to_vec(),
+                            ResolvedModelTextureSource::DecodedRgba8 {
+                                width: *width,
+                                height: *height,
+                                bytes: pixels.len(),
+                            },
+                            PreparedTextureKey::DecodedRgba8(
+                                pixels.clone(),
+                                *width,
+                                *height,
+                                color_space,
+                                sampler,
+                            ),
+                        )
+                    }
                 };
-                let metadata = Texture::new(image.texture().size())
-                    .with_alpha_mode(image.texture().alpha_mode())
-                    .with_color_space(color_space.into_texture_color_space());
-                let pixels = image.into_pixels();
                 let alpha = TextureAlphaSummary::from_rgba8(&pixels);
                 let gpu_upload = PreparedTextureUpload::rgba8_owned(&metadata, pixels, sampler)
                     .map_err(|error| prepared_texture_error(index, &source, error))?;
@@ -703,6 +764,16 @@ impl ModelTextureLoader {
             (
                 std::sync::Arc<[u8]>,
                 String,
+                ModelTextureColorSpace,
+                TextureSampler,
+            ),
+            (TextureHandle, TextureAlphaSummary),
+        >::new();
+        let mut decoded_cache = HashMap::<
+            (
+                std::sync::Arc<[u8]>,
+                u32,
+                u32,
                 ModelTextureColorSpace,
                 TextureSampler,
             ),
@@ -815,6 +886,57 @@ impl ModelTextureLoader {
                         alpha,
                     )
                 }
+                ModelTextureSource::DecodedRgba8 {
+                    width,
+                    height,
+                    pixels,
+                } => {
+                    let key = (pixels.clone(), *width, *height, color_space, sampler);
+                    let (handle, alpha) = if let Some(&resident) = decoded_cache.get(&key) {
+                        resident
+                    } else {
+                        let metadata = match decoded_rgba8_metadata(
+                            index,
+                            *width,
+                            *height,
+                            pixels,
+                            color_space,
+                        ) {
+                            Ok(metadata) => metadata,
+                            Err(error) => {
+                                rollback(&unique_handles, textures, gpu_textures);
+                                return Err(error);
+                            }
+                        };
+                        let alpha = TextureAlphaSummary::from_rgba8(pixels);
+                        let handle = textures.insert(metadata.clone());
+                        if let Err(source) =
+                            gpu_textures.upsert_rgba8(renderer, handle, &metadata, pixels, sampler)
+                        {
+                            let _ = textures.remove(handle);
+                            rollback(&unique_handles, textures, gpu_textures);
+                            return Err(ModelTextureLoadError::UploadDecodedRgba8 {
+                                index,
+                                width: *width,
+                                height: *height,
+                                bytes: pixels.len(),
+                                source,
+                            });
+                        }
+                        decoded_cache.insert(key, (handle, alpha));
+                        unique_handles.push(handle);
+                        (handle, alpha)
+                    };
+                    (
+                        handle,
+                        ResolvedModelTextureSource::DecodedRgba8 {
+                            width: *width,
+                            height: *height,
+                            bytes: pixels.len(),
+                        },
+                        alpha,
+                    )
+                }
             };
             resolved.push(ResolvedModelTexture {
                 index,
@@ -864,6 +986,16 @@ impl ModelTextureLoader {
             (
                 std::sync::Arc<[u8]>,
                 String,
+                ModelTextureColorSpace,
+                TextureSampler,
+            ),
+            (TextureHandle, TextureAlphaSummary),
+        >::new();
+        let mut decoded_cache = HashMap::<
+            (
+                std::sync::Arc<[u8]>,
+                u32,
+                u32,
                 ModelTextureColorSpace,
                 TextureSampler,
             ),
@@ -972,6 +1104,57 @@ impl ModelTextureLoader {
                         ResolvedModelTextureSource::Embedded {
                             mime_type: mime_type.clone(),
                             encoded_bytes: bytes.len(),
+                        },
+                        alpha,
+                    )
+                }
+                ModelTextureSource::DecodedRgba8 {
+                    width,
+                    height,
+                    pixels,
+                } => {
+                    let key = (pixels.clone(), *width, *height, color_space, sampler);
+                    let (handle, alpha) = if let Some(&resident) = decoded_cache.get(&key) {
+                        resident
+                    } else {
+                        let metadata = match decoded_rgba8_metadata(
+                            index,
+                            *width,
+                            *height,
+                            pixels,
+                            color_space,
+                        ) {
+                            Ok(metadata) => metadata,
+                            Err(error) => {
+                                rollback(&unique_handles, textures, gpu_textures);
+                                return Err(error);
+                            }
+                        };
+                        let alpha = TextureAlphaSummary::from_rgba8(pixels);
+                        let handle = textures.insert(metadata.clone());
+                        if let Err(source) = gpu_textures
+                            .upsert_rgba8_for_frame(frame, handle, &metadata, pixels, sampler)
+                        {
+                            let _ = textures.remove(handle);
+                            rollback(&unique_handles, textures, gpu_textures);
+                            return Err(ModelTextureLoadError::UploadDecodedRgba8 {
+                                index,
+                                width: *width,
+                                height: *height,
+                                bytes: pixels.len(),
+                                source,
+                            });
+                        }
+                        decoded_cache.insert(key, (handle, alpha));
+                        unique_handles.push(handle);
+                        (handle, alpha)
+                    };
+                    (
+                        handle,
+                        ResolvedModelTextureSource::DecodedRgba8 {
+                            width: *width,
+                            height: *height,
+                            bytes: pixels.len(),
                         },
                         alpha,
                     )
@@ -1195,7 +1378,52 @@ fn prepared_texture_error(
                 source: error,
             }
         }
+        ResolvedModelTextureSource::DecodedRgba8 {
+            width,
+            height,
+            bytes,
+        } => ModelTextureLoadError::UploadDecodedRgba8 {
+            index,
+            width: *width,
+            height: *height,
+            bytes: *bytes,
+            source: error,
+        },
     }
+}
+
+fn decoded_rgba8_metadata(
+    index: ModelTextureIndex,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    color_space: ModelTextureColorSpace,
+) -> Result<Texture, ModelTextureLoadError> {
+    let size = TextureSize::new(width, height).map_err(|_| {
+        ModelTextureLoadError::InvalidDecodedRgba8 {
+            index,
+            width,
+            height,
+            bytes: pixels.len(),
+        }
+    })?;
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4));
+    if expected != Some(pixels.len()) {
+        return Err(ModelTextureLoadError::InvalidDecodedRgba8 {
+            index,
+            width,
+            height,
+            bytes: pixels.len(),
+        });
+    }
+    Ok(Texture::new(size).with_color_space(color_space.into_texture_color_space()))
 }
 
 fn rollback(
@@ -1313,6 +1541,17 @@ pub enum ModelTextureLoadError {
         /// Decoder failure.
         source: ImageImportError,
     },
+    /// Importer-decoded pixels had invalid dimensions or byte length.
+    InvalidDecodedRgba8 {
+        /// Model-local texture slot.
+        index: ModelTextureIndex,
+        /// Declared pixel width.
+        width: u32,
+        /// Declared pixel height.
+        height: u32,
+        /// Supplied byte count.
+        bytes: usize,
+    },
     /// A decoded image could not become a GPU sampled texture.
     UploadTexture {
         /// Model-local texture slot.
@@ -1328,6 +1567,19 @@ pub enum ModelTextureLoadError {
         index: ModelTextureIndex,
         /// Declared source MIME type.
         mime_type: String,
+        /// GPU upload validation failure.
+        source: TextureUploadError,
+    },
+    /// Importer-decoded RGBA8 pixels could not become a GPU sampled texture.
+    UploadDecodedRgba8 {
+        /// Model-local texture slot.
+        index: ModelTextureIndex,
+        /// Pixel width.
+        width: u32,
+        /// Pixel height.
+        height: u32,
+        /// Pixel byte count.
+        bytes: usize,
         /// GPU upload validation failure.
         source: TextureUploadError,
     },
@@ -1374,6 +1626,16 @@ impl fmt::Display for ModelTextureLoadError {
                 "could not decode embedded model texture {} with MIME type {mime_type}",
                 index.get()
             ),
+            Self::InvalidDecodedRgba8 {
+                index,
+                width,
+                height,
+                bytes,
+            } => write!(
+                formatter,
+                "model texture {} has invalid decoded RGBA8 payload: {width}x{height}, {bytes} bytes",
+                index.get()
+            ),
             Self::UploadTexture { index, path, .. } => write!(
                 formatter,
                 "could not upload model texture {} at {}",
@@ -1387,6 +1649,17 @@ impl fmt::Display for ModelTextureLoadError {
                 "could not upload embedded model texture {} with MIME type {mime_type}",
                 index.get()
             ),
+            Self::UploadDecodedRgba8 {
+                index,
+                width,
+                height,
+                bytes,
+                ..
+            } => write!(
+                formatter,
+                "could not upload decoded model texture {} ({width}x{height}, {bytes} bytes)",
+                index.get()
+            ),
         }
     }
 }
@@ -1398,12 +1671,13 @@ impl Error for ModelTextureLoadError {
             Self::DecodeImage { source, .. } | Self::DecodeEmbeddedImage { source, .. } => {
                 Some(source)
             }
-            Self::UploadTexture { source, .. } | Self::UploadEmbeddedTexture { source, .. } => {
-                Some(source)
-            }
+            Self::UploadTexture { source, .. }
+            | Self::UploadEmbeddedTexture { source, .. }
+            | Self::UploadDecodedRgba8 { source, .. } => Some(source),
             Self::ConflictingColorSpace { .. }
             | Self::UnsupportedUri { .. }
-            | Self::UnsafeTexturePath { .. } => None,
+            | Self::UnsafeTexturePath { .. }
+            | Self::InvalidDecodedRgba8 { .. } => None,
         }
     }
 }

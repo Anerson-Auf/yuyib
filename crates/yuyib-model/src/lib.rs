@@ -635,8 +635,9 @@ impl ModelTextureIndex {
 
 /// The renderer-neutral source of one model texture.
 ///
-/// Importers preserve either a relative URI or the original encoded image
-/// bytes.  Decoding and GPU upload remain a separate asset-residency concern.
+/// Importers preserve a relative URI, original encoded image bytes, or already
+/// decoded RGBA8 pixels when their source format has its own decoder. GPU
+/// upload remains a separate asset-residency concern.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ModelTextureSource {
     /// A relative or virtual asset URI resolved by the application.
@@ -649,7 +650,51 @@ pub enum ModelTextureSource {
         /// references the same source image.
         bytes: Arc<[u8]>,
     },
+    /// Tightly packed decoded RGBA8 pixels owned by an importer.
+    DecodedRgba8 {
+        /// Pixel width.
+        width: u32,
+        /// Pixel height.
+        height: u32,
+        /// Four bytes per pixel in red, green, blue, alpha order.
+        pixels: Arc<[u8]>,
+    },
 }
+
+/// Invalid dimensions or byte length for decoded model texture pixels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelTextureRgba8Error {
+    /// Width or height was zero.
+    ZeroDimension,
+    /// `width * height * 4` overflowed `usize`.
+    SizeOverflow,
+    /// Pixel byte length did not match the dimensions.
+    ByteLength {
+        /// Required byte count.
+        expected: usize,
+        /// Supplied byte count.
+        actual: usize,
+    },
+}
+
+impl fmt::Display for ModelTextureRgba8Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroDimension => {
+                formatter.write_str("decoded RGBA8 texture dimensions must be non-zero")
+            }
+            Self::SizeOverflow => {
+                formatter.write_str("decoded RGBA8 texture dimensions overflow usize")
+            }
+            Self::ByteLength { expected, actual } => write!(
+                formatter,
+                "decoded RGBA8 texture requires {expected} bytes, got {actual}"
+            ),
+        }
+    }
+}
+
+impl Error for ModelTextureRgba8Error {}
 
 /// Metadata for one texture referenced by a model material.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -757,6 +802,50 @@ impl ModelTexture {
         }
     }
 
+    /// Creates a descriptor from tightly packed decoded RGBA8 pixels.
+    ///
+    /// This avoids an encode/decode round trip for importers such as Source VTF
+    /// that already own a bounded image decoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelTextureRgba8Error`] for zero/overflowing dimensions or a
+    /// byte count other than `width * height * 4`.
+    pub fn decoded_rgba8(
+        width: u32,
+        height: u32,
+        pixels: impl Into<Arc<[u8]>>,
+    ) -> Result<Self, ModelTextureRgba8Error> {
+        if width == 0 || height == 0 {
+            return Err(ModelTextureRgba8Error::ZeroDimension);
+        }
+        let expected = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(ModelTextureRgba8Error::SizeOverflow)?;
+        let pixels = pixels.into();
+        if pixels.len() != expected {
+            return Err(ModelTextureRgba8Error::ByteLength {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        Ok(Self {
+            label: None,
+            source: ModelTextureSource::DecodedRgba8 {
+                width,
+                height,
+                pixels,
+            },
+            sampler: None,
+        })
+    }
+
     /// Assigns an optional source/debug label.
     #[must_use]
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
@@ -798,7 +887,7 @@ impl ModelTexture {
     pub fn uri(&self) -> Option<&str> {
         match &self.source {
             ModelTextureSource::ExternalUri(uri) => Some(uri),
-            ModelTextureSource::Encoded { .. } => None,
+            ModelTextureSource::Encoded { .. } | ModelTextureSource::DecodedRgba8 { .. } => None,
         }
     }
 
@@ -806,8 +895,21 @@ impl ModelTexture {
     #[must_use]
     pub fn encoded(&self) -> Option<(&str, &[u8])> {
         match &self.source {
-            ModelTextureSource::ExternalUri(_) => None,
+            ModelTextureSource::ExternalUri(_) | ModelTextureSource::DecodedRgba8 { .. } => None,
             ModelTextureSource::Encoded { mime_type, bytes } => Some((mime_type, bytes)),
+        }
+    }
+
+    /// Returns decoded RGBA8 dimensions and pixels, when supplied by an importer.
+    #[must_use]
+    pub fn decoded_rgba8_pixels(&self) -> Option<(u32, u32, &[u8])> {
+        match &self.source {
+            ModelTextureSource::DecodedRgba8 {
+                width,
+                height,
+                pixels,
+            } => Some((*width, *height, pixels)),
+            ModelTextureSource::ExternalUri(_) | ModelTextureSource::Encoded { .. } => None,
         }
     }
 }

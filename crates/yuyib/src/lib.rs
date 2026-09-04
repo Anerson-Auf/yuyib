@@ -327,6 +327,11 @@ pub mod prelude {
     #[cfg(feature = "three-d")]
     pub use crate::scene::{SceneSelection, SpawnedScene, spawn_scene};
     #[cfg(feature = "source1")]
+    pub use crate::source1::{
+        LoadedSource1Model, Source1ModelImportError, Source1ModelImportOptions,
+        Source1ModelImportReport, Source1ModelLoader, Source1ModelMaterialPolicy,
+    };
+    #[cfg(feature = "source1")]
     pub use crate::source1_bsp::{
         LoadedSource1Bsp, Source1BspImportError, Source1BspImportOptions,
         Source1BspImportReport, Source1BspLoader, Source1BspMaterialDiagnostic,

@@ -9,6 +9,7 @@ description = "Bounded Source 1 VMF brush adapter and model compiler for Yuyib."
 
 [dependencies]
 yuyib-model = { path = "../yuyib-model" }
+yuyib-source1-assets = { path = "../yuyib-source1-assets" }
 yuyib-vmf = { path = "../yuyib-vmf" }
 yuyib-vmf-model = { path = "../yuyib-vmf-model" }
 

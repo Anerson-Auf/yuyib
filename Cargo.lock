@@ -6166,6 +6166,7 @@ name = "yuyib-source1"
 version = "0.1.0"
 dependencies = [
  "yuyib-model",
+ "yuyib-source1-assets",
  "yuyib-vmf",
  "yuyib-vmf-model",
 ]
@@ -6186,6 +6187,7 @@ dependencies = [
  "yuyib-model",
  "yuyib-physics",
  "yuyib-render-3d",
+ "yuyib-source1",
  "yuyib-source1-assets",
  "yuyib-vmt",
  "yuyib-vtf",

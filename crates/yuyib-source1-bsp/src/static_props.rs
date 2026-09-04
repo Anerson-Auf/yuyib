@@ -9,6 +9,10 @@ use std::{
 };
 
 use yuyib_bsp::{Bsp, BspError, BspStaticPropError, BspStaticPropLump};
+use yuyib_source1::Source1StudioModelFiles;
+
+/// Backward-compatible name for a BSP static prop's StudioModel sidecars.
+pub type Source1StaticPropModelFiles = Source1StudioModelFiles;
 
 /// Asset lookup policy for Source static-prop `StudioModel` files.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -16,21 +20,6 @@ pub struct Source1StaticPropAssetOptions {
     /// Optional loose Source content root containing the `models` directory.
     /// Embedded BSP PAKFILE entries always take precedence.
     pub external_content_root: Option<PathBuf>,
-}
-
-/// The real MDL/VVD/VTX files required to decode one static-prop model.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Source1StaticPropModelFiles {
-    /// Canonical model path from the `sprp` dictionary.
-    pub model_path: String,
-    /// Studio header and material/body-part declarations.
-    pub mdl: Arc<[u8]>,
-    /// Studio vertex data.
-    pub vvd: Arc<[u8]>,
-    /// Selected optimized index/strip data.
-    pub vtx: Arc<[u8]>,
-    /// Actual VTX variant selected, normally `.dx90.vtx`.
-    pub vtx_path: String,
 }
 
 /// Static-prop instances plus one resolved real model family per dictionary item.

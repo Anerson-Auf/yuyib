@@ -129,6 +129,7 @@ impl Model {
                 let (external, empty_embedded) = match texture.source() {
                     ModelTextureSource::ExternalUri(_) => (true, false),
                     ModelTextureSource::Encoded { bytes, .. } => (false, bytes.is_empty()),
+                    ModelTextureSource::DecodedRgba8 { pixels, .. } => (false, pixels.is_empty()),
                 };
                 ModelTextureUsageEntry {
                     index: ModelTextureIndex::new(index),

@@ -15,13 +15,12 @@
 )]
 
 mod static_props;
-mod studio;
 
 pub use static_props::{
     Source1StaticPropAssetError, Source1StaticPropAssetOptions, Source1StaticPropAssets,
     Source1StaticPropModelFiles, load_static_prop_assets,
 };
-pub use studio::{
+pub use yuyib_source1::{
     Source1StaticPropTransform, Source1StudioError, Source1StudioLimits, Source1StudioMaterial,
     Source1StudioMesh, Source1StudioModel, decode_studio_model,
 };

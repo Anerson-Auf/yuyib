@@ -3,12 +3,25 @@
 //! This decoder intentionally covers the static render subset used by Source
 //! MDL v48/v49, VVD v4 and optimized VTX v7 files: LOD 0 body-part models,
 //! triangle lists/strips, positions, normals, UV0, skin tables and material
-//! search paths. Animation, flexes, bone skinning, alternate body-group choice,
+//! search paths and one explicit body-group combination. Animation, flexes, bone skinning,
 //! collision PHY data and lower LOD selection are outside this module.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
-use super::Source1StaticPropModelFiles;
+/// Matching files that make one Source 1 StudioModel render asset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Source1StudioModelFiles {
+    /// Canonical model path relative to the Source content root.
+    pub model_path: String,
+    /// Studio header and material/body-part declarations.
+    pub mdl: Arc<[u8]>,
+    /// Studio vertex data.
+    pub vvd: Arc<[u8]>,
+    /// Selected optimized index/strip data.
+    pub vtx: Arc<[u8]>,
+    /// Actual VTX variant selected, normally `.dx90.vtx`.
+    pub vtx_path: String,
+}
 
 const MDL_HEADER_MIN_BYTES: usize = 240;
 const MDL_TEXTURE_BYTES: usize = 64;
@@ -346,8 +359,24 @@ impl Error for Source1StudioError {}
 ///
 /// Returns typed format, range, checksum, hierarchy and work-limit failures.
 pub fn decode_studio_model(
-    files: &Source1StaticPropModelFiles,
+    files: &Source1StudioModelFiles,
     limits: Source1StudioLimits,
+) -> Result<Source1StudioModel, Source1StudioError> {
+    decode_studio_model_with_body(files, limits, 0)
+}
+
+/// Decodes real LOD-0 render geometry for one Source body-group integer.
+///
+/// For each body part, Source selects `(body / base) % model_count`. Negative
+/// values select the default body (`0`).
+///
+/// # Errors
+///
+/// Returns typed format, range, checksum, hierarchy and work-limit failures.
+pub fn decode_studio_model_with_body(
+    files: &Source1StudioModelFiles,
+    limits: Source1StudioLimits,
+    body: i32,
 ) -> Result<Source1StudioModel, Source1StudioError> {
     check_file_limit("MDL", files.mdl.len(), limits.max_file_bytes)?;
     check_file_limit("VVD", files.vvd.len(), limits.max_file_bytes)?;
@@ -371,7 +400,7 @@ pub fn decode_studio_model(
 
     let (materials, skin_families) = decode_materials(&mdl, limits)?;
     let vvd_vertices = decode_vvd_lod0(&vvd, limits)?;
-    let meshes = decode_meshes(&mdl, &vtx, &vvd_vertices, limits)?;
+    let meshes = decode_meshes(&mdl, &vtx, &vvd_vertices, limits, body)?;
     Ok(Source1StudioModel {
         path: files.model_path.clone(),
         mdl_version,
@@ -762,6 +791,7 @@ fn decode_meshes(
     vtx: &Blob<'_>,
     vertices: &[StudioVertex],
     limits: Source1StudioLimits,
+    body: i32,
 ) -> Result<Vec<Source1StudioMesh>, Source1StudioError> {
     let mdl_body_count = mdl.non_negative(232, "body part count")?;
     bounded("body parts", mdl_body_count, limits.max_body_parts)?;
@@ -812,9 +842,9 @@ fn decode_meshes(
         same_count("body models", mdl_model_count, vtx_model_count)?;
         model_total = checked_total("models", model_total, mdl_model_count, limits.max_models)?;
 
-        // Static props have no body-group selector in sprp v10, so Source uses
-        // the default model (zero) for every body part.
-        for model_index in 0..mdl_model_count.min(1) {
+        let body_base = mdl.non_negative(mdl_body + 8, "body part base")?;
+        let selected_model = body_model_index(body, body_base, mdl_model_count);
+        for model_index in selected_model..selected_model.saturating_add(1) {
             let mdl_model = mdl_models + model_index * MDL_MODEL_BYTES;
             let vtx_model = vtx_models + model_index * VTX_MODEL_BYTES;
             let model_name = fixed_string(*mdl, mdl_model, 64, "model name")?;
@@ -914,6 +944,13 @@ fn decode_meshes(
     }
     let _ = model_total;
     Ok(output)
+}
+
+fn body_model_index(body: i32, base: usize, model_count: usize) -> usize {
+    if body < 0 || base == 0 || model_count == 0 {
+        return 0;
+    }
+    usize::try_from(body).unwrap_or(0) / base % model_count
 }
 
 #[allow(
@@ -1163,6 +1200,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn body_group_integer_selects_each_body_part_independently() {
+        assert_eq!(body_model_index(0, 1, 2), 0);
+        assert_eq!(body_model_index(1, 1, 2), 1);
+        assert_eq!(body_model_index(3, 2, 2), 1);
+        assert_eq!(body_model_index(15, 8, 2), 1);
+        assert_eq!(body_model_index(-1, 1, 2), 0);
+        assert_eq!(body_model_index(99, 0, 2), 0);
+    }
+
+    #[test]
     fn decodes_minimal_matching_static_studio_model() {
         let checksum = 0x1234_5678;
         let mut mdl = vec![0_u8; 610];
@@ -1249,7 +1296,7 @@ mod tests {
         put_i32(&mut vtx, 150, 0);
         put_i32(&mut vtx, 154, 0);
 
-        let files = Source1StaticPropModelFiles {
+        let files = Source1StudioModelFiles {
             model_path: "models/tree.mdl".to_owned(),
             mdl: Arc::from(mdl),
             vvd: Arc::from(vvd),

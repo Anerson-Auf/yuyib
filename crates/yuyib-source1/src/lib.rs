@@ -7,6 +7,19 @@
 
 #![forbid(unsafe_code)]
 
+mod model;
+mod studio;
+
+pub use model::{
+    LoadedSource1Model, Source1ModelImportError, Source1ModelImportOptions,
+    Source1ModelImportReport, Source1ModelLoader, Source1ModelMaterialPolicy,
+};
+pub use studio::{
+    Source1StaticPropTransform, Source1StudioError, Source1StudioLimits, Source1StudioMaterial,
+    Source1StudioMesh, Source1StudioModel, Source1StudioModelFiles, decode_studio_model,
+    decode_studio_model_with_body,
+};
+
 use std::{collections::BTreeSet, error::Error, fmt};
 
 use yuyib_model::Model;

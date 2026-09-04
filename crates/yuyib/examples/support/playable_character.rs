@@ -134,6 +134,12 @@ fn unbake_body_mat_diffuse(model: &mut Model) -> Result<(), Box<dyn Error>> {
                 );
                 return Ok(());
             }
+            ModelTextureSource::DecodedRgba8 { .. } => {
+                eprintln!(
+                    "body_mat diffuse is already decoded RGBA8; skipping runtime albedo unbake"
+                );
+                return Ok(());
+            }
         }
     };
     let decoded = decode_bytes(&encoded_bytes, DecodePolicy::default())?;
