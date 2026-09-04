@@ -1,6 +1,6 @@
 //! Source 1 VTF decoding into renderer-neutral RGBA8 pixels.
 //!
-//! Supports ordinary 2D, one-frame VTF 7.1 through 7.4 files and the common
+//! Supports ordinary 2D, one-frame VTF 7.0 through 7.4 files and the common
 //! RGBA8888, BGRA8888, BGR888, DXT1, DXT3 and DXT5 encodings.
 
 #![forbid(unsafe_code)]
@@ -9,7 +9,8 @@
 use std::{error::Error, fmt};
 
 const SIGNATURE: &[u8; 4] = b"VTF\0";
-const MIN_HEADER_SIZE: usize = 80;
+const LEGACY_HEADER_SIZE: usize = 64;
+const RESOURCE_HEADER_SIZE: usize = 80;
 const HIGH_RES_RESOURCE: [u8; 3] = [0x30, 0, 0];
 
 /// Bounds applied before decoding untrusted VTF bytes.
@@ -119,7 +120,7 @@ pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, V
     let header_size = usize::try_from(header.size).map_err(|_| VtfError::InvalidHeaderSize {
         actual: header.size,
     })?;
-    if header_size < MIN_HEADER_SIZE || header_size > bytes.len() {
+    if header_size < header.minimum_size() || header_size > bytes.len() {
         return Err(VtfError::InvalidHeaderSize {
             actual: header.size,
         });
@@ -198,10 +199,13 @@ struct Header {
     format: i32,
     mips: u8,
     depth: u16,
+    low_res_format: i32,
+    low_res_width: u8,
+    low_res_height: u8,
 }
 impl Header {
     fn read(bytes: &[u8]) -> Result<Self, VtfError> {
-        if bytes.len() < MIN_HEADER_SIZE {
+        if bytes.len() < LEGACY_HEADER_SIZE {
             return Err(VtfError::TruncatedHeader {
                 available: bytes.len(),
             });
@@ -209,20 +213,31 @@ impl Header {
         if bytes.get(..4) != Some(SIGNATURE.as_slice()) {
             return Err(VtfError::InvalidSignature);
         }
+        let major = u32_at(bytes, 4)?;
+        let minor = u32_at(bytes, 8)?;
         Ok(Self {
-            major: u32_at(bytes, 4)?,
-            minor: u32_at(bytes, 8)?,
+            major,
+            minor,
             size: u32_at(bytes, 12)?,
             width: u16_at(bytes, 16)?,
             height: u16_at(bytes, 18)?,
             frames: u16_at(bytes, 24)?,
             format: i32_at(bytes, 52)?,
             mips: byte_at(bytes, 56)?,
-            depth: u16_at(bytes, 63)?,
+            // Depth was added in VTF 7.2. Byte 63 is already image payload in
+            // a valid 64-byte VTF 7.0/7.1 header, so it must not be read there.
+            depth: if major == 7 && minor >= 2 {
+                u16_at(bytes, 63)?
+            } else {
+                1
+            },
+            low_res_format: i32_at(bytes, 57)?,
+            low_res_width: byte_at(bytes, 61)?,
+            low_res_height: byte_at(bytes, 62)?,
         })
     }
     fn validate(self, limits: VtfLimits) -> Result<(), VtfError> {
-        if self.major != 7 || !(1..=4).contains(&self.minor) {
+        if self.major != 7 || self.minor > 4 {
             return Err(VtfError::UnsupportedVersion {
                 major: self.major,
                 minor: self.minor,
@@ -253,14 +268,39 @@ impl Header {
         }
         Ok(())
     }
+    const fn minimum_size(self) -> usize {
+        if self.minor >= 2 {
+            RESOURCE_HEADER_SIZE
+        } else {
+            LEGACY_HEADER_SIZE
+        }
+    }
     fn high_res_offset(self, bytes: &[u8], header_size: usize) -> Result<usize, VtfError> {
         if self.minor < 3 {
-            return Ok(header_size);
+            let low_res_size = if self.low_res_width == 0 || self.low_res_height == 0 {
+                0
+            } else {
+                VtfHighResFormat::from_raw(self.low_res_format)?
+                    .mip_bytes(
+                        usize::from(self.low_res_width),
+                        usize::from(self.low_res_height),
+                    )
+                    .ok_or(VtfError::Overflow {
+                        field: "low-res image bytes",
+                    })?
+            };
+            return header_size
+                .checked_add(low_res_size)
+                .filter(|offset| *offset <= bytes.len())
+                .ok_or(VtfError::TruncatedPayload {
+                    expected: low_res_size,
+                    available: bytes.len().saturating_sub(header_size),
+                });
         }
         let count = usize::try_from(u32_at(bytes, 68)?).map_err(|_| VtfError::Overflow {
             field: "resource count",
         })?;
-        let end = MIN_HEADER_SIZE
+        let end = RESOURCE_HEADER_SIZE
             .checked_add(count.checked_mul(8).ok_or(VtfError::Overflow {
                 field: "resource table",
             })?)
@@ -271,7 +311,7 @@ impl Header {
             return Err(VtfError::InvalidResourceDirectory);
         }
         for item in 0..count {
-            let at = MIN_HEADER_SIZE + item * 8;
+            let at = RESOURCE_HEADER_SIZE + item * 8;
             if bytes.get(at..at + 3) == Some(HIGH_RES_RESOURCE.as_slice()) {
                 let value =
                     usize::try_from(u32_at(bytes, at + 4)?).map_err(|_| VtfError::Overflow {
@@ -576,5 +616,34 @@ mod tests {
             decode(&bytes).expect("v74").source_format(),
             VtfHighResFormat::Dxt1
         );
+    }
+
+    #[test]
+    fn reads_v70_legacy_header_after_low_res_thumbnail() {
+        let mut bytes = vec![0; LEGACY_HEADER_SIZE];
+        bytes[..4].copy_from_slice(b"VTF\0");
+        bytes[4..8].copy_from_slice(&7_u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&0_u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(
+            &u32::try_from(LEGACY_HEADER_SIZE)
+                .expect("legacy header size fits u32")
+                .to_le_bytes(),
+        );
+        bytes[16..18].copy_from_slice(&4_u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&4_u16.to_le_bytes());
+        bytes[24..26].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[52..56].copy_from_slice(&13_i32.to_le_bytes());
+        bytes[56] = 1;
+        bytes[57..61].copy_from_slice(&13_i32.to_le_bytes());
+        bytes[61] = 4;
+        bytes[62] = 4;
+
+        // The low-resolution thumbnail is blue; the actual largest mip is red.
+        bytes.extend([0x1f, 0, 0x1f, 0, 0, 0, 0, 0]);
+        bytes.extend([0, 0xf8, 0, 0xf8, 0, 0, 0, 0]);
+
+        let image = decode(&bytes).expect("VTF 7.0");
+        assert_eq!(image.source_format(), VtfHighResFormat::Dxt1);
+        assert_eq!(&image.pixels_rgba8()[..4], [255, 0, 0, 255]);
     }
 }
