@@ -12,7 +12,10 @@ use yuyib_model::{
     ModelTextureAddressMode, ModelTextureIndex, ModelTextureMagFilter, ModelTextureMinFilter,
     ModelTextureRgba8Error, ModelTextureSampler, TextureBinding,
 };
-use yuyib_source1_assets::{Source1AssetError, Source1BaseTexture, Source1MaterialResolver};
+use yuyib_source1_assets::{
+    Source1AssetError, Source1MaterialAlphaMode, Source1MaterialResolver,
+    Source1ResolvedMaterial,
+};
 
 use crate::{
     Source1StaticPropTransform, Source1StudioError, Source1StudioLimits, Source1StudioMaterial,
@@ -303,8 +306,8 @@ impl Source1ModelLoader {
         texture_index: ModelTextureIndex,
     ) -> Result<(Material, Option<ModelTexture>), Source1ModelImportError> {
         match self.resolve_material(material) {
-            Ok((candidate, texture)) => {
-                let alpha = texture.rgba8.chunks_exact(4).any(|pixel| pixel[3] < 255);
+            Ok((candidate, resolved)) => {
+                let texture = resolved.base_texture;
                 let descriptor = ModelTexture::decoded_rgba8(
                     u32::from(texture.width),
                     u32::from(texture.height),
@@ -317,9 +320,11 @@ impl Source1ModelLoader {
                     .with_name(material.name.clone())
                     .with_metallic_roughness(0.0, 0.8)
                     .with_base_color_texture(TextureBinding::new(texture_index, 0));
-                if alpha {
-                    output = output.with_alpha_mode(AlphaMode::Blend);
-                }
+                output = output.with_alpha_mode(match resolved.alpha_mode {
+                    Source1MaterialAlphaMode::Opaque => AlphaMode::Opaque,
+                    Source1MaterialAlphaMode::AlphaTest => AlphaMode::Mask { cutoff: 0.5 },
+                    Source1MaterialAlphaMode::Translucent => AlphaMode::Blend,
+                });
                 Ok((output, Some(descriptor)))
             }
             Err(_)
@@ -341,7 +346,7 @@ impl Source1ModelLoader {
     fn resolve_material(
         &self,
         material: &Source1StudioMaterial,
-    ) -> Result<(String, Source1BaseTexture), Source1ModelImportError> {
+    ) -> Result<(String, Source1ResolvedMaterial), Source1ModelImportError> {
         let candidates = if material.candidates.is_empty() {
             vec![material.name.clone()]
         } else {
@@ -349,7 +354,7 @@ impl Source1ModelLoader {
         };
         let mut last = None;
         for candidate in &candidates {
-            match self.materials.resolve_vmt_path(candidate) {
+            match self.materials.resolve_vmt_material_path(candidate) {
                 Ok(texture) => return Ok((candidate.clone(), texture)),
                 Err(source) => last = Some((candidate.clone(), source)),
             }
@@ -769,7 +774,8 @@ mod tests {
                 .texture(),
             ModelTextureIndex::new(1)
         );
-        assert_eq!(loaded.model().materials()[1].alpha_mode(), AlphaMode::Blend);
+        assert_eq!(loaded.model().materials()[0].alpha_mode(), AlphaMode::Opaque);
+        assert_eq!(loaded.model().materials()[1].alpha_mode(), AlphaMode::Opaque);
         for texture in loaded.model().textures() {
             let (width, height, pixels) = texture
                 .decoded_rgba8_pixels()

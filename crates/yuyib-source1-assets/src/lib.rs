@@ -36,6 +36,27 @@ pub struct Source1BaseTexture {
     pub rgba8: Vec<u8>,
 }
 
+/// Source material alpha contract declared by VMT properties.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Source1MaterialAlphaMode {
+    /// No `$translucent` or `$alphatest`; texture alpha does not change depth policy.
+    #[default]
+    Opaque,
+    /// `$alphatest 1`; fragments are coverage-tested and still write depth.
+    AlphaTest,
+    /// `$translucent 1`; fragments use source-over blending without depth writes.
+    Translucent,
+}
+
+/// Decoded base texture plus VMT-driven material alpha semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Source1ResolvedMaterial {
+    /// Decoded `$basetexture`.
+    pub base_texture: Source1BaseTexture,
+    /// Alpha/depth policy authored in the VMT.
+    pub alpha_mode: Source1MaterialAlphaMode,
+}
+
 /// Authored base-texture references resolved from one VMT include chain.
 ///
 /// `second` is populated by terrain shaders such as
@@ -105,8 +126,23 @@ impl Source1MaterialResolver {
         &self,
         relative_path: impl AsRef<Path>,
     ) -> Result<Source1BaseTexture, Source1AssetError> {
+        self.resolve_vmt_material_path(relative_path)
+            .map(|material| material.base_texture)
+    }
+
+    /// Reads one VMT and resolves both its base texture and authored alpha policy.
+    ///
+    /// Texture alpha alone never promotes an opaque Source material to blending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Source1AssetError`] for unsafe paths, I/O, VMT parsing or VTF decoding.
+    pub fn resolve_vmt_material_path(
+        &self,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<Source1ResolvedMaterial, Source1AssetError> {
         let path = self.resolve_material_path(relative_path.as_ref())?;
-        self.resolve_vmt_file(&path, 0)
+        self.resolve_vmt_material_file(&path, 0)
     }
 
     /// Reads a loose VMT and resolves its authored base-texture references.
@@ -143,11 +179,11 @@ impl Source1MaterialResolver {
         self.resolve_texture_authored(authored)
     }
 
-    fn resolve_vmt_file(
+    fn resolve_vmt_material_file(
         &self,
         path: &Path,
         patch_depth: usize,
-    ) -> Result<Source1BaseTexture, Source1AssetError> {
+    ) -> Result<Source1ResolvedMaterial, Source1AssetError> {
         if patch_depth >= 16 {
             return Err(Source1AssetError::PatchDepthExceeded);
         }
@@ -163,11 +199,16 @@ impl Source1MaterialResolver {
                 .ok_or(Source1AssetError::PatchMissingInclude)?;
             let included_path = self.resolve_material_path(Path::new(included))?;
             if let Some(base_texture) = patch_base_texture(material.block()) {
-                return self.resolve_texture_authored(base_texture);
+                let mut resolved = self.resolve_vmt_material_file(&included_path, patch_depth + 1)?;
+                resolved.base_texture = self.resolve_texture_authored(base_texture)?;
+                return Ok(resolved);
             }
-            return self.resolve_vmt_file(&included_path, patch_depth + 1);
+            return self.resolve_vmt_material_file(&included_path, patch_depth + 1);
         }
-        self.resolve(&material)
+        Ok(Source1ResolvedMaterial {
+            base_texture: self.resolve(&material)?,
+            alpha_mode: source_material_alpha_mode(&material),
+        })
     }
 
     fn resolve_vmt_references_file(
@@ -274,6 +315,16 @@ impl Source1MaterialResolver {
             });
         }
         Ok(path)
+    }
+}
+
+fn source_material_alpha_mode(material: &VmtMaterial) -> Source1MaterialAlphaMode {
+    if material.translucent() == Some(true) {
+        Source1MaterialAlphaMode::Translucent
+    } else if material.alpha_test() == Some(true) {
+        Source1MaterialAlphaMode::AlphaTest
+    } else {
+        Source1MaterialAlphaMode::Opaque
     }
 }
 
