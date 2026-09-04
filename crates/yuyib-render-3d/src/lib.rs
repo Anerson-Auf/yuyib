@@ -65,8 +65,8 @@ mod pbr;
 mod scene;
 mod shadow;
 mod skybox;
-mod ssao;
 mod source1_water;
+mod ssao;
 mod static_world;
 
 pub use equirect::{EquirectEnvironmentError, PreparedEquirectEnvironment3d};
@@ -99,15 +99,16 @@ pub use shadow::{
     TexturedShadowCasterDraw, shadow_coverage_contains, shadow_texel_world_size,
 };
 pub use skybox::{GpuSkybox3d, PreparedSkybox3d, SkyboxError, SkyboxRenderError, SkyboxRenderer3d};
-pub use ssao::{SsaoPolicy, SsaoPolicyError};
 pub use source1_water::{
     SOURCE1_WATER_DEFAULT_BATCH_CAPACITY, Source1WaterBatch3d, Source1WaterBatchError3d,
-    Source1WaterBuildStats3d, Source1WaterDrawStats3d, Source1WaterLimits3d,
-    Source1WaterMaterial3d, Source1WaterMaterialError3d, Source1WaterRenderError3d,
-    Source1WaterRenderer3d, Source1WaterRendererCreateError3d, Source1WaterTexture3d,
-    Source1WaterTextureError3d, Source1WaterUploadError3d, Source1WaterUploadStats3d,
-    Source1WaterWorld3d, Source1WaterWorldBuildError3d,
+    Source1WaterBuildStats3d, Source1WaterCompositorError3d, Source1WaterDrawStats3d,
+    Source1WaterLimits3d, Source1WaterMaterial3d, Source1WaterMaterialError3d,
+    Source1WaterReflectionCameraError3d, Source1WaterRenderError3d, Source1WaterRenderer3d,
+    Source1WaterRendererCreateError3d, Source1WaterTexture3d, Source1WaterTextureError3d,
+    Source1WaterUploadError3d, Source1WaterUploadStats3d, Source1WaterWorld3d,
+    Source1WaterWorldBuildError3d, mirror_camera_across_horizontal_plane,
 };
+pub use ssao::{SsaoPolicy, SsaoPolicyError};
 pub use static_world::{
     BlendedStaticWorldMeshUploadError3d, StaticWorld3d, StaticWorldBatch3d,
     StaticWorldBuildError3d, StaticWorldBuildStats3d, StaticWorldDrawStats3d,

@@ -2,12 +2,19 @@
 //!
 //! This module deliberately owns a separate render phase from the opaque
 //! static-world renderer. It provides repeating, scrolling normal maps,
-//! view-dependent tint and distance fog, but it does not claim to implement
-//! Source's `_rt_WaterReflection` / `_rt_WaterRefraction` render targets.
-//! Those effects require caller-owned scene-colour passes and are therefore an
-//! explicit future input rather than a fake opaque base texture.
+//! view-dependent tint and distance fog. [`Source1WaterRenderer3d`] also owns
+//! a bounded full-resolution compositor: applications capture the opaque scene
+//! and a mirrored reflection through ordinary renderer closures, then composite
+//! water without ever sampling the active colour attachment. The original
+//! tint-only draw remains available for callers that do not need scene capture.
 
-use std::{collections::HashMap, error::Error, fmt, mem::size_of, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    fmt,
+    mem::size_of,
+    sync::Arc,
+};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -16,7 +23,7 @@ use yuyib_2d::{
 };
 use yuyib_assets::Assets;
 use yuyib_model::MeshPrimitive;
-use yuyib_render::{RenderFrame, wgpu};
+use yuyib_render::{FrameRenderTarget, FrameRenderTargetError, RenderFrame, wgpu};
 use yuyib_render_texture::{
     PreparedTextureUpload, TextureCache, TextureSamplingPreset, TextureUploadError,
 };
@@ -145,6 +152,8 @@ pub struct Source1WaterMaterial3d {
     scroll_velocity: [f32; 2],
     fresnel_power: f32,
     reflectivity: f32,
+    refraction_distortion: f32,
+    reflection_distortion: f32,
 }
 
 impl Source1WaterMaterial3d {
@@ -164,6 +173,8 @@ impl Source1WaterMaterial3d {
             scroll_velocity: [0.07, 0.0],
             fresnel_power: 5.0,
             reflectivity: 0.09,
+            refraction_distortion: 0.09,
+            reflection_distortion: 0.09,
         }
     }
 
@@ -231,6 +242,22 @@ impl Source1WaterMaterial3d {
         self
     }
 
+    /// Sets Source-style screen-space offsets for refraction and reflection.
+    ///
+    /// Importers normally map `$refractamount` and `$reflectamount` here. The
+    /// values are applied in normalized screen UV space and should therefore
+    /// remain small.
+    #[must_use]
+    pub const fn with_scene_distortion(
+        mut self,
+        refraction_amount: f32,
+        reflection_amount: f32,
+    ) -> Self {
+        self.refraction_distortion = refraction_amount;
+        self.reflection_distortion = reflection_amount;
+        self
+    }
+
     /// Required repeating normal-map frames in source order.
     #[must_use]
     pub fn normal_map_frames(&self) -> &[Arc<Source1WaterTexture3d>] {
@@ -273,6 +300,12 @@ impl Source1WaterMaterial3d {
         self.scroll_velocity
     }
 
+    /// Normal-derived screen UV offsets as `[refraction, reflection]`.
+    #[must_use]
+    pub const fn scene_distortion(&self) -> [f32; 2] {
+        [self.refraction_distortion, self.reflection_distortion]
+    }
+
     /// Validates all GPU-facing scalar and vector values.
     pub fn validate(&self) -> Result<(), Source1WaterMaterialError3d> {
         if self.normal_map_frames.is_empty() {
@@ -288,6 +321,8 @@ impl Source1WaterMaterial3d {
         validate_finite("normal UV scale", self.normal_uv_scale)?;
         validate_finite("Fresnel power", self.fresnel_power)?;
         validate_finite("reflectivity", self.reflectivity)?;
+        validate_finite("refraction distortion", self.refraction_distortion)?;
+        validate_finite("reflection distortion", self.reflection_distortion)?;
         validate_finite("normal-map frame rate", self.normal_frame_rate)?;
         if self.tint.iter().any(|component| *component < 0.0) {
             return Err(Source1WaterMaterialError3d::Negative("tint"));
@@ -306,6 +341,16 @@ impl Source1WaterMaterial3d {
         }
         if self.normal_strength < 0.0 {
             return Err(Source1WaterMaterialError3d::Negative("normal strength"));
+        }
+        if self.refraction_distortion < 0.0 {
+            return Err(Source1WaterMaterialError3d::Negative(
+                "refraction distortion",
+            ));
+        }
+        if self.reflection_distortion < 0.0 {
+            return Err(Source1WaterMaterialError3d::Negative(
+                "reflection distortion",
+            ));
         }
         if self.normal_uv_scale <= 0.0 {
             return Err(Source1WaterMaterialError3d::NonPositive("normal UV scale"));
@@ -345,6 +390,12 @@ impl Source1WaterMaterial3d {
                 self.normal_uv_scale,
                 self.scroll_velocity[0],
                 self.scroll_velocity[1],
+                0.0,
+            ],
+            scene_distortion: [
+                self.refraction_distortion,
+                self.reflection_distortion,
+                0.0,
                 0.0,
             ],
         }
@@ -593,6 +644,7 @@ pub struct Source1WaterBuildStats3d {
 pub struct Source1WaterWorld3d {
     batches: Vec<Source1WaterBatch3d>,
     stats: Source1WaterBuildStats3d,
+    dominant_horizontal_plane_height: Option<f32>,
 }
 
 impl Source1WaterWorld3d {
@@ -639,6 +691,7 @@ impl Source1WaterWorld3d {
                 maximum: limits.max_unique_textures,
             });
         }
+        let dominant_horizontal_plane_height = dominant_horizontal_plane_height(&batches);
         let stats = Source1WaterBuildStats3d {
             batches: batches.len(),
             vertices,
@@ -646,7 +699,11 @@ impl Source1WaterWorld3d {
             triangles: indices / 3,
             unique_textures: textures.len(),
         };
-        Ok(Self { batches, stats })
+        Ok(Self {
+            batches,
+            stats,
+            dominant_horizontal_plane_height,
+        })
     }
 
     /// Validated batches in importer order.
@@ -660,6 +717,127 @@ impl Source1WaterWorld3d {
     pub const fn stats(&self) -> Source1WaterBuildStats3d {
         self.stats
     }
+
+    /// Representative horizontal water-plane height, weighted by visible area.
+    ///
+    /// Horizontal triangles are grouped into one-centimetre height buckets.
+    /// The bucket with the largest projected XZ area wins, so a small fountain
+    /// does not move the map-wide planar reflection away from a dominant canal
+    /// or lake. Returns `None` when no sufficiently horizontal triangle exists.
+    #[must_use]
+    pub const fn dominant_horizontal_plane_height(&self) -> Option<f32> {
+        self.dominant_horizontal_plane_height
+    }
+}
+
+/// Mirrors a camera across the horizontal plane `world_y = plane_height`.
+///
+/// Position, target and up direction receive the same reflection transform;
+/// projection and clip settings remain unchanged.
+///
+/// # Errors
+///
+/// Returns [`Source1WaterReflectionCameraError3d::NonFinitePlaneHeight`] when
+/// the requested plane cannot define a finite reflection.
+pub fn mirror_camera_across_horizontal_plane(
+    camera: Camera3d,
+    plane_height: f32,
+) -> Result<Camera3d, Source1WaterReflectionCameraError3d> {
+    if !plane_height.is_finite() {
+        return Err(Source1WaterReflectionCameraError3d::NonFinitePlaneHeight);
+    }
+    let mirror_y = |value: f32| plane_height * 2.0 - value;
+    Ok(Camera3d::new(
+        [
+            camera.position[0],
+            mirror_y(camera.position[1]),
+            camera.position[2],
+        ],
+        [
+            camera.target[0],
+            mirror_y(camera.target[1]),
+            camera.target[2],
+        ],
+        [camera.up[0], -camera.up[1], camera.up[2]],
+        camera.vertical_fov_radians,
+        camera.near,
+        camera.far,
+    ))
+}
+
+/// Invalid planar-reflection camera request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Source1WaterReflectionCameraError3d {
+    /// Plane height is NaN or infinite.
+    NonFinitePlaneHeight,
+}
+
+impl fmt::Display for Source1WaterReflectionCameraError3d {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFinitePlaneHeight => {
+                formatter.write_str("water reflection plane height must be finite")
+            }
+        }
+    }
+}
+
+impl Error for Source1WaterReflectionCameraError3d {}
+
+#[derive(Default)]
+struct HorizontalPlaneAccumulator {
+    projected_area: f64,
+    weighted_height: f64,
+}
+
+fn dominant_horizontal_plane_height(batches: &[Source1WaterBatch3d]) -> Option<f32> {
+    const HEIGHT_BUCKET_SIZE: f64 = 0.01;
+    const MINIMUM_UP_ALIGNMENT: f64 = 0.98;
+    let mut planes = BTreeMap::<i64, HorizontalPlaneAccumulator>::new();
+    for batch in batches {
+        let positions = batch.primitive.positions();
+        for triangle in batch.primitive.indices().chunks_exact(3) {
+            let a = positions[triangle[0] as usize];
+            let b = positions[triangle[1] as usize];
+            let c = positions[triangle[2] as usize];
+            let ab = [
+                f64::from(b[0] - a[0]),
+                f64::from(b[1] - a[1]),
+                f64::from(b[2] - a[2]),
+            ];
+            let ac = [
+                f64::from(c[0] - a[0]),
+                f64::from(c[1] - a[1]),
+                f64::from(c[2] - a[2]),
+            ];
+            let cross = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+            if length <= f64::EPSILON || cross[1].abs() / length < MINIMUM_UP_ALIGNMENT {
+                continue;
+            }
+            let projected_area = cross[1].abs() * 0.5;
+            let height = (f64::from(a[1]) + f64::from(b[1]) + f64::from(c[1])) / 3.0;
+            let key = (height / HEIGHT_BUCKET_SIZE).round() as i64;
+            let accumulator = planes.entry(key).or_default();
+            accumulator.projected_area += projected_area;
+            accumulator.weighted_height += height * projected_area;
+        }
+    }
+    planes
+        .into_iter()
+        .max_by(|(left_key, left), (right_key, right)| {
+            left.projected_area
+                .total_cmp(&right.projected_area)
+                .then_with(|| right_key.cmp(left_key))
+        })
+        .and_then(|(_, plane)| {
+            (plane.projected_area > f64::EPSILON)
+                .then_some((plane.weighted_height / plane.projected_area) as f32)
+        })
 }
 
 /// Aggregate resource-limit failure.
@@ -760,9 +938,33 @@ struct GpuWaterBatch {
     normal_frame_rate: f32,
 }
 
+struct WaterCaptureTarget {
+    _color: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    _depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+}
+
+struct WaterCompositorTargets {
+    size: [u32; 2],
+    color_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
+    opaque: WaterCaptureTarget,
+    reflection: WaterCaptureTarget,
+    _composite_color: wgpu::Texture,
+    composite_color_view: wgpu::TextureView,
+    scene_bind_group: wgpu::BindGroup,
+    composite_present_bind_group: wgpu::BindGroup,
+    opaque_captured: bool,
+    reflection_captured: bool,
+}
+
 /// Separate transparent GPU phase for static Source water surfaces.
 pub struct Source1WaterRenderer3d {
     pipeline: wgpu::RenderPipeline,
+    present_pipeline: wgpu::RenderPipeline,
+    camera_layout: wgpu::BindGroupLayout,
+    draw_layout: wgpu::BindGroupLayout,
     camera_buffer: wgpu::Buffer,
     draw_buffer: wgpu::Buffer,
     draw_uniform_stride: u64,
@@ -770,6 +972,13 @@ pub struct Source1WaterRenderer3d {
     camera_bind_group: wgpu::BindGroup,
     draw_bind_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
+    scene_layout: wgpu::BindGroupLayout,
+    scene_sampler: wgpu::Sampler,
+    _fallback_scene_texture: wgpu::Texture,
+    fallback_scene_bind_group: wgpu::BindGroup,
+    surface_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
+    compositor_targets: Option<WaterCompositorTargets>,
     texture_assets: Assets<Texture>,
     texture_cache: TextureCache,
     texture_handles: HashMap<String, TextureHandle>,
@@ -813,6 +1022,149 @@ impl Source1WaterRenderer3d {
     #[must_use]
     pub fn batch_count(&self) -> usize {
         self.batches.len()
+    }
+
+    /// Captures the opaque/refraction scene into renderer-owned colour/depth.
+    ///
+    /// The target is recreated when the active draw size or formats change and
+    /// is cleared before `render` runs. Existing 3D renderers can draw through
+    /// the nested [`RenderFrame`] without knowing that the target is offscreen.
+    pub fn capture_opaque_for_frame<Result>(
+        &mut self,
+        frame: &mut RenderFrame<'_>,
+        clear_color: wgpu::Color,
+        render: impl FnOnce(&mut RenderFrame<'_>) -> Result,
+    ) -> std::result::Result<Result, Source1WaterCompositorError3d> {
+        self.ensure_compositor_targets(frame)?;
+        let targets = self
+            .compositor_targets
+            .as_ref()
+            .expect("ensure_compositor_targets publishes targets");
+        let target = FrameRenderTarget::new(
+            &targets.opaque.color_view,
+            &targets.opaque.depth_view,
+            targets.size,
+            targets.color_format,
+            targets.depth_format,
+        )
+        .map_err(Source1WaterCompositorError3d::FrameTarget)?;
+        let result = frame
+            .with_render_target(target, |nested| {
+                nested.with_surface_pass_with_depth(
+                    wgpu::LoadOp::Clear(clear_color),
+                    wgpu::LoadOp::Clear(1.0),
+                    |_| {},
+                );
+                render(nested)
+            })
+            .map_err(Source1WaterCompositorError3d::FrameTarget)?;
+        self.compositor_targets
+            .as_mut()
+            .expect("capture target remains resident")
+            .opaque_captured = true;
+        Ok(result)
+    }
+
+    /// Captures a caller-rendered planar reflection into separate colour/depth.
+    ///
+    /// Use [`mirror_camera_across_horizontal_plane`] with
+    /// [`Source1WaterWorld3d::dominant_horizontal_plane_height`] to construct
+    /// the camera passed to the scene renderers inside `render`.
+    pub fn capture_reflection_for_frame<Result>(
+        &mut self,
+        frame: &mut RenderFrame<'_>,
+        clear_color: wgpu::Color,
+        render: impl FnOnce(&mut RenderFrame<'_>) -> Result,
+    ) -> std::result::Result<Result, Source1WaterCompositorError3d> {
+        self.ensure_compositor_targets(frame)?;
+        let targets = self
+            .compositor_targets
+            .as_ref()
+            .expect("ensure_compositor_targets publishes targets");
+        let target = FrameRenderTarget::new(
+            &targets.reflection.color_view,
+            &targets.reflection.depth_view,
+            targets.size,
+            targets.color_format,
+            targets.depth_format,
+        )
+        .map_err(Source1WaterCompositorError3d::FrameTarget)?;
+        let result = frame
+            .with_render_target(target, |nested| {
+                nested.with_surface_pass_with_depth(
+                    wgpu::LoadOp::Clear(clear_color),
+                    wgpu::LoadOp::Clear(1.0),
+                    |_| {},
+                );
+                render(nested)
+            })
+            .map_err(Source1WaterCompositorError3d::FrameTarget)?;
+        self.compositor_targets
+            .as_mut()
+            .expect("capture target remains resident")
+            .reflection_captured = true;
+        Ok(result)
+    }
+
+    /// Composites captured opaque colour, optional reflection and water, then
+    /// presents the finished full-screen colour into the active surface region.
+    ///
+    /// The active composite colour is distinct from both sampled captures.
+    /// Water depth-tests against the opaque capture's depth and keeps depth
+    /// writes disabled, eliminating attachment feedback and foreground leaks.
+    pub fn composite_captured_for_frame(
+        &mut self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        time_seconds: f32,
+    ) -> Result<Source1WaterDrawStats3d, Source1WaterCompositorError3d> {
+        self.ensure_compositor_targets(frame)?;
+        let targets = self
+            .compositor_targets
+            .as_ref()
+            .expect("ensure_compositor_targets publishes targets");
+        if !targets.opaque_captured {
+            return Err(Source1WaterCompositorError3d::OpaqueSceneNotCaptured);
+        }
+        let target = FrameRenderTarget::new(
+            &targets.composite_color_view,
+            &targets.opaque.depth_view,
+            targets.size,
+            targets.color_format,
+            targets.depth_format,
+        )
+        .map_err(Source1WaterCompositorError3d::FrameTarget)?;
+        let reflection_captured = targets.reflection_captured;
+        let scene_bind_group = &targets.scene_bind_group;
+        let draw = frame
+            .with_render_target(target, |nested| {
+                self.blit_to_active_target(
+                    nested,
+                    scene_bind_group,
+                    wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                );
+                self.draw_internal(
+                    nested,
+                    camera,
+                    time_seconds,
+                    DepthLoad::Load,
+                    scene_bind_group,
+                    true,
+                    reflection_captured,
+                )
+            })
+            .map_err(Source1WaterCompositorError3d::FrameTarget)?
+            .map_err(Source1WaterCompositorError3d::Render)?;
+        let targets = self
+            .compositor_targets
+            .as_ref()
+            .expect("composite targets remain resident");
+        self.blit_to_active_target(
+            frame,
+            &targets.composite_present_bind_group,
+            wgpu::LoadOp::Load,
+        );
+        Ok(draw)
     }
 
     /// Replaces the resident world only after every fallible upload succeeds.
@@ -957,6 +1309,27 @@ impl Source1WaterRenderer3d {
         time_seconds: f32,
         depth_load: DepthLoad,
     ) -> Result<Source1WaterDrawStats3d, Source1WaterRenderError3d> {
+        self.draw_internal(
+            frame,
+            camera,
+            time_seconds,
+            depth_load,
+            &self.fallback_scene_bind_group,
+            false,
+            false,
+        )
+    }
+
+    fn draw_internal(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        time_seconds: f32,
+        depth_load: DepthLoad,
+        scene_bind_group: &wgpu::BindGroup,
+        has_refraction: bool,
+        has_reflection: bool,
+    ) -> Result<Source1WaterDrawStats3d, Source1WaterRenderError3d> {
         if !time_seconds.is_finite() {
             return Err(Source1WaterRenderError3d::NonFiniteTime);
         }
@@ -974,6 +1347,12 @@ impl Source1WaterRenderer3d {
                 camera.position[2],
                 time_seconds,
             ],
+            viewport_inverse_scene: [
+                1.0 / frame.draw_size()[0] as f32,
+                1.0 / frame.draw_size()[1] as f32,
+                u32::from(has_refraction) as f32,
+                u32::from(has_reflection) as f32,
+            ],
         };
         frame
             .queue()
@@ -982,6 +1361,7 @@ impl Source1WaterRenderer3d {
         frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(3, scene_bind_group, &[]);
             for &batch_index in &order {
                 let batch = &self.batches[batch_index];
                 let offset = u64::try_from(batch_index)
@@ -1010,6 +1390,63 @@ impl Source1WaterRenderer3d {
                 .sum(),
             draw_calls: self.batches.len(),
         })
+    }
+
+    fn blit_to_active_target(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        bind_group: &wgpu::BindGroup,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) {
+        frame.with_surface_pass(load, |pass| {
+            pass.set_pipeline(&self.present_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        });
+    }
+
+    fn ensure_compositor_targets(
+        &mut self,
+        frame: &RenderFrame<'_>,
+    ) -> Result<(), Source1WaterCompositorError3d> {
+        let size = frame.draw_size();
+        if size.contains(&0) {
+            return Err(Source1WaterCompositorError3d::EmptyTarget { size });
+        }
+        let color_format = frame.surface_format();
+        let depth_format = frame.depth_format();
+        if self.surface_format != color_format || self.depth_format != depth_format {
+            self.pipeline = create_water_pipeline(
+                frame.device(),
+                color_format,
+                depth_format,
+                &self.camera_layout,
+                &self.draw_layout,
+                &self.texture_layout,
+                &self.scene_layout,
+            );
+            self.present_pipeline =
+                create_water_present_pipeline(frame.device(), color_format, &self.scene_layout);
+            self.surface_format = color_format;
+            self.depth_format = depth_format;
+            self.compositor_targets = None;
+        }
+        let recreate = self.compositor_targets.as_ref().is_none_or(|targets| {
+            targets.size != size
+                || targets.color_format != color_format
+                || targets.depth_format != depth_format
+        });
+        if recreate {
+            self.compositor_targets = Some(WaterCompositorTargets::new(
+                frame.device(),
+                size,
+                color_format,
+                depth_format,
+                &self.scene_layout,
+                &self.scene_sampler,
+            ));
+        }
+        Ok(())
     }
 
     fn create(
@@ -1050,6 +1487,34 @@ impl Source1WaterRenderer3d {
             size_of::<WaterDrawUniform>() as u64,
         );
         let texture_layout = water_texture_layout(device);
+        let scene_layout = water_scene_texture_layout(device);
+        let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("yuyib Source 1 water scene sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let fallback_scene_texture = create_water_color_texture(
+            device,
+            [1, 1],
+            wgpu::TextureFormat::Rgba8Unorm,
+            "yuyib Source 1 water fallback scene",
+            wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let fallback_scene_view =
+            fallback_scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let fallback_scene_bind_group = create_water_scene_bind_group(
+            device,
+            &scene_layout,
+            &scene_sampler,
+            &fallback_scene_view,
+            &fallback_scene_view,
+            "yuyib Source 1 water fallback scene bind group",
+        );
         let camera_buffer = uniform_buffer(
             device,
             "yuyib Source 1 water camera",
@@ -1069,57 +1534,21 @@ impl Source1WaterRenderer3d {
             &draw_buffer,
             size_of::<WaterDrawUniform>() as u64,
         );
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("yuyib Source 1 water WGSL"),
-            source: wgpu::ShaderSource::Wgsl(SOURCE1_WATER_WGSL.into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("yuyib Source 1 water pipeline layout"),
-            bind_group_layouts: &[
-                Some(&camera_layout),
-                Some(&draw_layout),
-                Some(&texture_layout),
-            ],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("yuyib Source 1 water pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(WATER_VERTEX_LAYOUT)],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = create_water_pipeline(
+            device,
+            format,
+            depth_format,
+            &camera_layout,
+            &draw_layout,
+            &texture_layout,
+            &scene_layout,
+        );
+        let present_pipeline = create_water_present_pipeline(device, format, &scene_layout);
         Ok(Self {
             pipeline,
+            present_pipeline,
+            camera_layout,
+            draw_layout,
             camera_buffer,
             draw_buffer,
             draw_uniform_stride,
@@ -1127,12 +1556,274 @@ impl Source1WaterRenderer3d {
             camera_bind_group,
             draw_bind_group,
             texture_layout,
+            scene_layout,
+            scene_sampler,
+            _fallback_scene_texture: fallback_scene_texture,
+            fallback_scene_bind_group,
+            surface_format: format,
+            depth_format,
+            compositor_targets: None,
             texture_assets: Assets::new(),
             texture_cache: TextureCache::new(),
             texture_handles: HashMap::new(),
             batches: Vec::new(),
         })
     }
+}
+
+impl WaterCompositorTargets {
+    fn new(
+        device: &wgpu::Device,
+        size: [u32; 2],
+        color_format: wgpu::TextureFormat,
+        depth_format: wgpu::TextureFormat,
+        scene_layout: &wgpu::BindGroupLayout,
+        scene_sampler: &wgpu::Sampler,
+    ) -> Self {
+        let opaque = create_water_capture_target(
+            device,
+            size,
+            color_format,
+            depth_format,
+            "yuyib Source 1 water opaque capture",
+        );
+        let reflection = create_water_capture_target(
+            device,
+            size,
+            color_format,
+            depth_format,
+            "yuyib Source 1 water reflection capture",
+        );
+        let composite_color = create_water_color_texture(
+            device,
+            size,
+            color_format,
+            "yuyib Source 1 water composite color",
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let composite_color_view =
+            composite_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene_bind_group = create_water_scene_bind_group(
+            device,
+            scene_layout,
+            scene_sampler,
+            &opaque.color_view,
+            &reflection.color_view,
+            "yuyib Source 1 water captured scene bind group",
+        );
+        let composite_present_bind_group = create_water_scene_bind_group(
+            device,
+            scene_layout,
+            scene_sampler,
+            &composite_color_view,
+            &composite_color_view,
+            "yuyib Source 1 water composite present bind group",
+        );
+        Self {
+            size,
+            color_format,
+            depth_format,
+            opaque,
+            reflection,
+            _composite_color: composite_color,
+            composite_color_view,
+            scene_bind_group,
+            composite_present_bind_group,
+            opaque_captured: false,
+            reflection_captured: false,
+        }
+    }
+}
+
+fn create_water_capture_target(
+    device: &wgpu::Device,
+    size: [u32; 2],
+    color_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
+    label: &'static str,
+) -> WaterCaptureTarget {
+    let color = create_water_color_texture(
+        device,
+        size,
+        color_format,
+        label,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let depth = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: depth_format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+    WaterCaptureTarget {
+        _color: color,
+        color_view,
+        _depth: depth,
+        depth_view,
+    }
+}
+
+fn create_water_color_texture(
+    device: &wgpu::Device,
+    size: [u32; 2],
+    format: wgpu::TextureFormat,
+    label: &'static str,
+    usage: wgpu::TextureUsages,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage,
+        view_formats: &[],
+    })
+}
+
+fn create_water_scene_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    refraction: &wgpu::TextureView,
+    reflection: &wgpu::TextureView,
+    label: &'static str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(refraction),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(reflection),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+fn create_water_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
+    camera_layout: &wgpu::BindGroupLayout,
+    draw_layout: &wgpu::BindGroupLayout,
+    texture_layout: &wgpu::BindGroupLayout,
+    scene_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("yuyib Source 1 water WGSL"),
+        source: wgpu::ShaderSource::Wgsl(SOURCE1_WATER_WGSL.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("yuyib Source 1 water pipeline layout"),
+        bind_group_layouts: &[
+            Some(camera_layout),
+            Some(draw_layout),
+            Some(texture_layout),
+            Some(scene_layout),
+        ],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("yuyib Source 1 water pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Some(WATER_VERTEX_LAYOUT)],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: depth_format,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_water_present_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    scene_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("yuyib Source 1 water present WGSL"),
+        source: wgpu::ShaderSource::Wgsl(SOURCE1_WATER_PRESENT_WGSL.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("yuyib Source 1 water present pipeline layout"),
+        bind_group_layouts: &[Some(scene_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("yuyib Source 1 water present pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Renderer allocation/configuration failure.
@@ -1243,6 +1934,49 @@ impl Error for Source1WaterRenderError3d {
     }
 }
 
+/// Failure while capturing or compositing the offscreen water scene.
+#[derive(Debug)]
+pub enum Source1WaterCompositorError3d {
+    /// Active draw region cannot allocate a render target.
+    EmptyTarget {
+        /// Rejected physical dimensions.
+        size: [u32; 2],
+    },
+    /// Caller-owned render-target seam rejected compositor metadata.
+    FrameTarget(FrameRenderTargetError),
+    /// Composition was requested before the opaque scene capture.
+    OpaqueSceneNotCaptured,
+    /// Transparent water recording failed.
+    Render(Source1WaterRenderError3d),
+}
+
+impl fmt::Display for Source1WaterCompositorError3d {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyTarget { size } => write!(
+                formatter,
+                "water compositor target is empty: {}x{}",
+                size[0], size[1]
+            ),
+            Self::FrameTarget(source) => write!(formatter, "invalid water render target: {source}"),
+            Self::OpaqueSceneNotCaptured => formatter.write_str(
+                "water composition requires capture_opaque_for_frame in the current target generation",
+            ),
+            Self::Render(source) => write!(formatter, "cannot composite Source 1 water: {source}"),
+        }
+    }
+}
+
+impl Error for Source1WaterCompositorError3d {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::FrameTarget(source) => Some(source),
+            Self::Render(source) => Some(source),
+            Self::EmptyTarget { .. } | Self::OpaqueSceneNotCaptured => None,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct WaterVertex {
@@ -1278,6 +2012,7 @@ const WATER_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBuffe
 struct WaterCameraUniform {
     view_projection: [f32; 16],
     position_time: [f32; 4],
+    viewport_inverse_scene: [f32; 4],
 }
 
 #[repr(C)]
@@ -1287,6 +2022,7 @@ struct WaterDrawUniform {
     fog_color_start: [f32; 4],
     fog_end_normal_fresnel_reflectivity: [f32; 4],
     uv_scale_scroll: [f32; 4],
+    scene_distortion: [f32; 4],
 }
 
 fn water_vertices(batch: &Source1WaterBatch3d) -> Vec<WaterVertex> {
@@ -1381,6 +2117,35 @@ fn water_texture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+fn water_scene_texture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("yuyib Source 1 water scene texture layout"),
+        entries: &[
+            water_sampled_texture_entry(0),
+            water_sampled_texture_entry(1),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+const fn water_sampled_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
 fn validate_finite(name: &'static str, value: f32) -> Result<(), Source1WaterMaterialError3d> {
     if value.is_finite() {
         Ok(())
@@ -1415,17 +2180,22 @@ const SOURCE1_WATER_WGSL: &str = r#"
 struct Camera {
     view_projection: mat4x4<f32>,
     position_time: vec4<f32>,
+    viewport_inverse_scene: vec4<f32>,
 };
 struct Draw {
     tint_opacity: vec4<f32>,
     fog_color_start: vec4<f32>,
     fog_end_normal_fresnel_reflectivity: vec4<f32>,
     uv_scale_scroll: vec4<f32>,
+    scene_distortion: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> draw: Draw;
 @group(2) @binding(0) var normal_texture: texture_2d<f32>;
 @group(2) @binding(1) var normal_sampler: sampler;
+@group(3) @binding(0) var refraction_texture: texture_2d<f32>;
+@group(3) @binding(1) var reflection_texture: texture_2d<f32>;
+@group(3) @binding(2) var scene_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -1450,6 +2220,7 @@ struct VertexOutput {
 
 @fragment fn fs_main(
     input: VertexOutput,
+    @builtin(position) fragment_position: vec4<f32>,
     @builtin(front_facing) front_facing: bool,
 ) -> @location(0) vec4<f32> {
     let time = camera.position_time.w;
@@ -1482,17 +2253,80 @@ struct VertexOutput {
     let reflectivity = draw.fog_end_normal_fresnel_reflectivity.w;
     let fresnel = reflectivity + (1.0 - reflectivity) * pow(1.0 - view_dot, fresnel_power);
 
-    // View-dependent pale tint is intentional. No scene-colour texture is
-    // sampled here, so this is not presented as reflection or refraction.
     let facing_light = 0.72 + max(normal.y, 0.0) * 0.28;
     let base = draw.tint_opacity.rgb * facing_light;
-    let surface = mix(base, vec3<f32>(0.82, 0.92, 0.95), fresnel * 0.38);
+    let pale_reflection = mix(base, vec3<f32>(0.82, 0.92, 0.95), fresnel * 0.38);
     let fog_start = draw.fog_color_start.w;
     let fog_end = draw.fog_end_normal_fresnel_reflectivity.x;
     let fog_amount = smoothstep(fog_start, fog_end, distance_to_camera);
-    let color = mix(surface, draw.fog_color_start.rgb, fog_amount);
+    let has_refraction = camera.viewport_inverse_scene.z > 0.5;
+    let has_reflection = camera.viewport_inverse_scene.w > 0.5;
+    if has_refraction {
+        let screen_uv = clamp(
+            fragment_position.xy * camera.viewport_inverse_scene.xy,
+            vec2<f32>(0.0),
+            vec2<f32>(1.0),
+        );
+        let refraction_uv = clamp(
+            screen_uv + mapped.xy * draw.scene_distortion.x,
+            vec2<f32>(0.0),
+            vec2<f32>(1.0),
+        );
+        let reflection_uv = clamp(
+            screen_uv - mapped.xy * draw.scene_distortion.y,
+            vec2<f32>(0.0),
+            vec2<f32>(1.0),
+        );
+        let refracted = textureSample(refraction_texture, scene_sampler, refraction_uv).rgb;
+        var reflected = pale_reflection;
+        if has_reflection {
+            reflected = textureSample(reflection_texture, scene_sampler, reflection_uv).rgb;
+        }
+        let filtered_refraction = refracted * mix(
+            vec3<f32>(1.0),
+            clamp(draw.tint_opacity.rgb + vec3<f32>(0.55), vec3<f32>(0.0), vec3<f32>(1.5)),
+            0.22,
+        );
+        let scene_surface = mix(filtered_refraction, reflected, clamp(fresnel, 0.0, 1.0));
+        let scene_color = mix(scene_surface, draw.fog_color_start.rgb, fog_amount);
+        // Refraction already contains the opaque background. Alpha one avoids
+        // blending that background into itself a second time.
+        return vec4<f32>(scene_color, 1.0);
+    }
+    let color = mix(pale_reflection, draw.fog_color_start.rgb, fog_amount);
     let alpha = clamp(draw.tint_opacity.a + fresnel * 0.12, 0.0, 1.0);
     return vec4<f32>(color, alpha);
+}
+"#;
+
+const SOURCE1_WATER_PRESENT_WGSL: &str = r#"
+@group(0) @binding(0) var source_texture: texture_2d<f32>;
+@group(0) @binding(2) var source_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) tex_coord: vec2<f32>,
+};
+
+@vertex fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    let positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -3.0),
+        vec2<f32>(3.0, 1.0),
+        vec2<f32>(-1.0, 1.0),
+    );
+    let tex_coords = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 2.0),
+        vec2<f32>(2.0, 0.0),
+        vec2<f32>(0.0, 0.0),
+    );
+    var output: VertexOutput;
+    output.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    output.tex_coord = tex_coords[vertex_index];
+    return output;
+}
+
+@fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(source_texture, source_sampler, input.tex_coord);
 }
 "#;
 
@@ -1527,6 +2361,23 @@ mod tests {
         } else {
             primitive
         }
+    }
+
+    fn horizontal_primitive(height: f32, extent: f32) -> MeshPrimitive {
+        MeshPrimitive::new(
+            vec![
+                [0.0, height, 0.0],
+                [extent, height, 0.0],
+                [extent, height, extent],
+                [0.0, height, extent],
+            ],
+            vec![0, 2, 1, 0, 3, 2],
+        )
+        .expect("horizontal fixture geometry must be valid")
+        .with_normals(vec![[0.0, 1.0, 0.0]; 4])
+        .expect("horizontal fixture normals must match")
+        .with_tex_coords_0(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+        .expect("horizontal fixture UVs must match")
     }
 
     #[test]
@@ -1641,7 +2492,8 @@ mod tests {
             .with_normal_strength(0.5)
             .with_normal_uv_scale(0.35)
             .with_scroll_velocity([0.07, -0.02])
-            .with_fresnel(4.0, 0.09);
+            .with_fresnel(4.0, 0.09)
+            .with_scene_distortion(0.08, 0.04);
         material.validate().expect("material must be valid");
         let uniform = material.uniform();
         assert_eq!(uniform.tint_opacity, [0.2, 0.3, 0.4, 0.6]);
@@ -1651,6 +2503,8 @@ mod tests {
             [40.0, 0.5, 4.0, 0.09]
         );
         assert_eq!(uniform.uv_scale_scroll, [0.35, 0.07, -0.02, 0.0]);
+        assert_eq!(uniform.scene_distortion, [0.08, 0.04, 0.0, 0.0]);
+        assert_eq!(material.scene_distortion(), [0.08, 0.04]);
     }
 
     #[test]
@@ -1690,5 +2544,53 @@ mod tests {
                 "animated normal-map frame rate"
             ))
         );
+    }
+
+    #[test]
+    fn dominant_plane_uses_horizontal_projected_area() {
+        let small_high = Source1WaterBatch3d::new(
+            horizontal_primitive(10.0, 1.0),
+            Source1WaterMaterial3d::new(texture("water/high")),
+        )
+        .expect("small high plane must be valid");
+        let large_low = Source1WaterBatch3d::new(
+            horizontal_primitive(3.0, 4.0),
+            Source1WaterMaterial3d::new(texture("water/low")),
+        )
+        .expect("large low plane must be valid");
+        let world =
+            Source1WaterWorld3d::new(vec![small_high, large_low], Source1WaterLimits3d::default())
+                .expect("fixture world must fit limits");
+        assert_eq!(world.dominant_horizontal_plane_height(), Some(3.0));
+    }
+
+    #[test]
+    fn reflection_camera_mirrors_position_target_and_up() {
+        let camera = Camera3d::new(
+            [2.0, 7.0, 4.0],
+            [5.0, 2.0, 8.0],
+            [0.0, 1.0, 0.0],
+            1.0,
+            0.1,
+            500.0,
+        );
+        let mirrored =
+            mirror_camera_across_horizontal_plane(camera, 1.0).expect("finite plane must mirror");
+        assert_eq!(mirrored.position, [2.0, -5.0, 4.0]);
+        assert_eq!(mirrored.target, [5.0, 0.0, 8.0]);
+        assert_eq!(mirrored.up, [0.0, -1.0, 0.0]);
+        assert_eq!(mirrored.vertical_fov_radians, camera.vertical_fov_radians);
+        assert_eq!(
+            mirror_camera_across_horizontal_plane(camera, f32::NAN),
+            Err(Source1WaterReflectionCameraError3d::NonFinitePlaneHeight)
+        );
+    }
+
+    #[test]
+    fn scene_shader_samples_non_aliasing_refraction_and_reflection() {
+        assert!(SOURCE1_WATER_WGSL.contains("@group(3) @binding(0) var refraction_texture"));
+        assert!(SOURCE1_WATER_WGSL.contains("@group(3) @binding(1) var reflection_texture"));
+        assert!(SOURCE1_WATER_WGSL.contains("return vec4<f32>(scene_color, 1.0)"));
+        assert!(SOURCE1_WATER_PRESENT_WGSL.contains("textureSample(source_texture"));
     }
 }

@@ -1387,7 +1387,8 @@ fn prepare_water_material(
         .with_normal_strength((refract_amount * 4.0).clamp(0.12, 0.6))
         .with_normal_uv_scale(uv_scale)
         .with_scroll_velocity(scroll_velocity)
-        .with_fresnel(5.0, reflect_amount);
+        .with_fresnel(5.0, reflect_amount)
+        .with_scene_distortion(refract_amount, reflect_amount);
     if frames.len() > 1 {
         material = material.with_normal_animation(frames, frame_rate);
     }
@@ -1931,6 +1932,23 @@ impl Error for Source1BspImportError {
 mod tests {
     use super::*;
 
+    fn single_pixel_bgr_vtf(bgr: [u8; 3]) -> Vec<u8> {
+        let mut bytes = vec![0; 80];
+        bytes[..4].copy_from_slice(b"VTF\0");
+        bytes[4..8].copy_from_slice(&7_u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&80_u32.to_le_bytes());
+        bytes[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[24..26].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[52..56].copy_from_slice(&3_i32.to_le_bytes());
+        bytes[56] = 1;
+        bytes[57..61].copy_from_slice(&(-1_i32).to_le_bytes());
+        bytes[63..65].copy_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&bgr);
+        bytes
+    }
+
     fn entities_from_text(text: &str) -> Vec<BspEntity> {
         const HEADER_BYTES: usize = 8 + 64 * 16 + 4;
         let mut bytes = vec![0; HEADER_BYTES];
@@ -2078,6 +2096,30 @@ mod tests {
 
         assert_eq!(references.first, "terrain/grass");
         assert_eq!(references.second.as_deref(), Some("terrain/dirt"));
+    }
+
+    #[test]
+    fn water_vmt_maps_refraction_and_reflection_distortion_in_source_order() {
+        let vmt = parse_vmt(
+            r#"Water {
+                "$normalmap" "water/test_normal"
+                "$refractamount" "0.17"
+                "$reflectamount" "0.03"
+                "$fogstart" "150"
+                "$fogend" "304"
+            }"#,
+        )
+        .expect("valid Water VMT");
+        let pak = HashMap::from([(
+            "materials/water/test_normal.vtf".to_owned(),
+            single_pixel_bgr_vtf([255, 128, 128]),
+        )]);
+        let mut cache = HashMap::new();
+
+        let material = prepare_water_material(&vmt, &pak, None, &mut cache)
+            .expect("Water material with embedded normal map");
+
+        assert_eq!(material.scene_distortion(), [0.17, 0.03]);
     }
 
     #[test]

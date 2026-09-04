@@ -474,6 +474,143 @@ impl fmt::Display for RenderViewportError {
 
 impl Error for RenderViewportError {}
 
+/// Borrowed colour/depth attachments for one nested scene render.
+///
+/// Both textures remain caller-owned. They must be single-sampled 2D textures
+/// whose physical extent and formats match the supplied metadata. The colour
+/// texture normally uses `RENDER_ATTACHMENT | TEXTURE_BINDING` so a later
+/// material can sample the completed scene capture. The depth texture needs
+/// `RENDER_ATTACHMENT` and must use [`Renderer::depth_format`].
+#[derive(Clone, Copy)]
+pub struct FrameRenderTarget<'target> {
+    color_view: &'target TextureView,
+    depth_view: &'target TextureView,
+    size: [u32; 2],
+    color_format: TextureFormat,
+    depth_format: TextureFormat,
+}
+
+impl<'target> FrameRenderTarget<'target> {
+    /// Describes caller-owned attachments for [`RenderFrame::with_render_target`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameRenderTargetError::Empty`] for a zero target dimension.
+    /// Format compatibility with the active frame is checked when the target
+    /// is entered.
+    pub fn new(
+        color_view: &'target TextureView,
+        depth_view: &'target TextureView,
+        size: [u32; 2],
+        color_format: TextureFormat,
+        depth_format: TextureFormat,
+    ) -> Result<Self, FrameRenderTargetError> {
+        validate_frame_render_target_metadata(size, color_format, depth_format, None, None)?;
+        Ok(Self {
+            color_view,
+            depth_view,
+            size,
+            color_format,
+            depth_format,
+        })
+    }
+
+    /// Physical target dimensions.
+    #[must_use]
+    pub const fn size(self) -> [u32; 2] {
+        self.size
+    }
+
+    /// Colour format declared by the owner.
+    #[must_use]
+    pub const fn color_format(self) -> TextureFormat {
+        self.color_format
+    }
+
+    /// Depth format declared by the owner.
+    #[must_use]
+    pub const fn depth_format(self) -> TextureFormat {
+        self.depth_format
+    }
+}
+
+/// Invalid or frame-incompatible nested render-target metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameRenderTargetError {
+    /// Width or height was zero.
+    Empty {
+        /// Rejected physical dimensions.
+        size: [u32; 2],
+    },
+    /// The colour attachment cannot use pipelines compiled for this frame.
+    ColorFormatMismatch {
+        /// Active frame colour format.
+        expected: TextureFormat,
+        /// Caller-declared target colour format.
+        actual: TextureFormat,
+    },
+    /// The depth attachment cannot use pipelines compiled for this frame.
+    DepthFormatMismatch {
+        /// Active frame depth format.
+        expected: TextureFormat,
+        /// Caller-declared target depth format.
+        actual: TextureFormat,
+    },
+}
+
+impl fmt::Display for FrameRenderTargetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { size } => {
+                write!(
+                    formatter,
+                    "frame render target is empty: {}x{}",
+                    size[0], size[1]
+                )
+            }
+            Self::ColorFormatMismatch { expected, actual } => write!(
+                formatter,
+                "frame render-target colour format is {actual:?}; active pipelines require {expected:?}"
+            ),
+            Self::DepthFormatMismatch { expected, actual } => write!(
+                formatter,
+                "frame render-target depth format is {actual:?}; active pipelines require {expected:?}"
+            ),
+        }
+    }
+}
+
+impl Error for FrameRenderTargetError {}
+
+fn validate_frame_render_target_metadata(
+    size: [u32; 2],
+    color_format: TextureFormat,
+    depth_format: TextureFormat,
+    expected_color_format: Option<TextureFormat>,
+    expected_depth_format: Option<TextureFormat>,
+) -> Result<(), FrameRenderTargetError> {
+    if size.contains(&0) {
+        return Err(FrameRenderTargetError::Empty { size });
+    }
+    if let Some(expected) = expected_color_format
+        && color_format != expected
+    {
+        return Err(FrameRenderTargetError::ColorFormatMismatch {
+            expected,
+            actual: color_format,
+        });
+    }
+    if let Some(expected) = expected_depth_format
+        && depth_format != expected
+    {
+        return Err(FrameRenderTargetError::DepthFormatMismatch {
+            expected,
+            actual: depth_format,
+        });
+    }
+    Ok(())
+}
+
 fn apply_render_viewport(pass: &mut wgpu::RenderPass<'_>, viewport: RenderViewport) {
     // WGPU's viewport API is float-based. The source values are already
     // validated physical u32 surface coordinates.
@@ -526,7 +663,10 @@ impl RenderFrame<'_> {
         self.anisotropic_filtering_supported
     }
 
-    /// Returns the physical presentation size in pixels.
+    /// Returns the active colour-target size in physical pixels.
+    ///
+    /// This is the presentation size for an ordinary frame and the caller-owned
+    /// attachment size inside [`Self::with_render_target`].
     #[must_use]
     pub const fn surface_size(&self) -> [u32; 2] {
         [self.width, self.height]
@@ -591,7 +731,60 @@ impl RenderFrame<'_> {
         Ok(render(&mut nested))
     }
 
-    /// Returns the presentation texture format selected for this frame.
+    /// Runs rendering code against caller-owned colour and depth attachments.
+    ///
+    /// The callback receives a nested frame, so existing scene renderers keep
+    /// using [`Self::with_surface_pass`] and
+    /// [`Self::with_surface_pass_with_depth`] without knowing whether they are
+    /// drawing to the presentation scene or a sampled reflection/refraction
+    /// target. Its surface and draw sizes equal the target size, and its
+    /// initial viewport covers the complete target.
+    ///
+    /// Formats must equal the active frame formats. This preserves compatibility
+    /// with pipelines already compiled for [`Self::surface_format`] and
+    /// [`Self::depth_format`]. Attachment usage, physical extent and sample
+    /// count cannot be recovered from a WGPU view; the caller must uphold the
+    /// [`FrameRenderTarget`] contract.
+    ///
+    /// Scoped viewport depth attachments are kept in a target-local cache and
+    /// dropped before this method returns. They cannot alias presentation or
+    /// sibling render-target depth caches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameRenderTargetError`] before invoking the callback when the
+    /// target is empty or declares a colour/depth format incompatible with the
+    /// active frame.
+    pub fn with_render_target<Result>(
+        &mut self,
+        target: FrameRenderTarget<'_>,
+        render: impl FnOnce(&mut RenderFrame<'_>) -> Result,
+    ) -> std::result::Result<Result, FrameRenderTargetError> {
+        validate_frame_render_target_metadata(
+            target.size,
+            target.color_format,
+            target.depth_format,
+            Some(self.format),
+            Some(self.depth_format()),
+        )?;
+        let mut target_viewport_depths = HashMap::new();
+        let mut nested = RenderFrame {
+            device: self.device,
+            queue: self.queue,
+            encoder: &mut *self.encoder,
+            surface_view: target.color_view,
+            width: target.size[0],
+            height: target.size[1],
+            viewport: RenderViewport::full(target.size),
+            format: target.color_format,
+            depth_view: target.depth_view,
+            viewport_depths: &mut target_viewport_depths,
+            anisotropic_filtering_supported: self.anisotropic_filtering_supported,
+        };
+        Ok(render(&mut nested))
+    }
+
+    /// Returns the active colour-target format selected for this frame.
     ///
     /// GPU helpers that create a render pipeline inside an application
     /// callback should use this format, rather than guessing a platform
@@ -1072,11 +1265,68 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{DepthAttachment, RenderViewport, RenderViewportError, TextureFormat};
+    use super::{
+        DepthAttachment, FrameRenderTargetError, RenderViewport, RenderViewportError,
+        TextureFormat, validate_frame_render_target_metadata,
+    };
 
     #[test]
     fn surface_depth_format_is_depth32_float() {
         assert_eq!(DepthAttachment::FORMAT, TextureFormat::Depth32Float);
+    }
+
+    #[test]
+    fn frame_render_target_metadata_rejects_empty_and_mismatched_attachments() {
+        assert_eq!(
+            validate_frame_render_target_metadata(
+                [0, 720],
+                TextureFormat::Rgba16Float,
+                TextureFormat::Depth32Float,
+                None,
+                None,
+            ),
+            Err(FrameRenderTargetError::Empty { size: [0, 720] })
+        );
+        assert_eq!(
+            validate_frame_render_target_metadata(
+                [1280, 720],
+                TextureFormat::Rgba8Unorm,
+                TextureFormat::Depth32Float,
+                Some(TextureFormat::Rgba16Float),
+                Some(TextureFormat::Depth32Float),
+            ),
+            Err(FrameRenderTargetError::ColorFormatMismatch {
+                expected: TextureFormat::Rgba16Float,
+                actual: TextureFormat::Rgba8Unorm,
+            })
+        );
+        assert_eq!(
+            validate_frame_render_target_metadata(
+                [1280, 720],
+                TextureFormat::Rgba16Float,
+                TextureFormat::Depth24Plus,
+                Some(TextureFormat::Rgba16Float),
+                Some(TextureFormat::Depth32Float),
+            ),
+            Err(FrameRenderTargetError::DepthFormatMismatch {
+                expected: TextureFormat::Depth32Float,
+                actual: TextureFormat::Depth24Plus,
+            })
+        );
+    }
+
+    #[test]
+    fn frame_render_target_metadata_accepts_pipeline_compatible_formats() {
+        assert_eq!(
+            validate_frame_render_target_metadata(
+                [960, 540],
+                TextureFormat::Rgba16Float,
+                TextureFormat::Depth32Float,
+                Some(TextureFormat::Rgba16Float),
+                Some(TextureFormat::Depth32Float),
+            ),
+            Ok(())
+        );
     }
 
     #[test]
