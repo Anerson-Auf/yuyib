@@ -244,6 +244,49 @@ impl Source1ModelLoader {
         Ok(loaded)
     }
 
+    /// Loads one render model and merges sequences from supplemental animation MDLs.
+    ///
+    /// Supplemental models only need a readable `.mdl` and optional `.ani`; their
+    /// VVD/VTX geometry and materials are not loaded. Sequence bones are remapped
+    /// by case-insensitive Source bone name, while bones absent from a supplemental
+    /// skeleton retain the owning model's bind transform.
+    ///
+    /// Missing supplemental models are non-fatal and are listed in
+    /// [`Source1ModelImportReport::missing_animation_models`], matching authored
+    /// `$includemodel` behaviour.
+    ///
+    /// # Errors
+    ///
+    /// Returns typed path, I/O, animation decode or bounded-work failures.
+    pub fn load_with_animation_models<I, P>(
+        &self,
+        model_path: impl AsRef<Path>,
+        animation_models: I,
+    ) -> Result<LoadedSource1Model, Source1ModelImportError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut loaded = self.load(model_path)?;
+        let mut visited = HashSet::from([loaded.report.model_path.clone()]);
+        visited.extend(loaded.report.included_animation_models.iter().cloned());
+        let mut resolved = Vec::new();
+        let mut missing = Vec::new();
+        for authored in animation_models {
+            self.merge_animation_model(
+                &mut loaded.animations,
+                authored.as_ref(),
+                &mut visited,
+                &mut resolved,
+                &mut missing,
+            )?;
+        }
+        loaded.report.animation_clips = loaded.animations.clips().len();
+        loaded.report.included_animation_models.extend(resolved);
+        loaded.report.missing_animation_models.extend(missing);
+        Ok(loaded)
+    }
+
     /// Converts an already decoded `StudioModel` using this loader's material root.
     ///
     /// # Errors
@@ -496,63 +539,80 @@ impl Source1ModelLoader {
     ) -> Result<(), Source1ModelImportError> {
         let includes = target.included_models().to_vec();
         for authored in includes {
-            let relative = normalize_source_model_name(&authored);
-            if !visited.insert(relative.clone()) {
-                continue;
-            }
-            if visited.len() > self.options.studio_limits.max_included_models {
-                return Err(Source1ModelImportError::Studio(
-                    Source1StudioError::RecordLimit {
-                        section: "recursive include models",
-                        actual: visited.len(),
-                        limit: self.options.studio_limits.max_included_models,
-                    },
-                ));
-            }
-            let path = Path::new(&relative);
-            if path.is_absolute()
-                || path
-                    .components()
-                    .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-            {
-                return Err(Source1ModelImportError::UnsafePath {
-                    path: path.to_path_buf(),
-                });
-            }
-            let mdl_path = self.content_root.join(path);
-            let mdl = match fs::read(&mdl_path) {
-                Ok(bytes) => bytes,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                    missing.push(relative);
-                    continue;
-                }
-                Err(source) => {
-                    return Err(Source1ModelImportError::Read {
-                        kind: "included MDL",
-                        path: mdl_path,
-                        source,
-                    });
-                }
-            };
-            let canonical =
-                fs::canonicalize(&mdl_path).map_err(|source| Source1ModelImportError::Read {
-                    kind: "included MDL",
-                    path: mdl_path.clone(),
-                    source,
-                })?;
-            if !canonical.starts_with(&self.content_root) {
-                return Err(Source1ModelImportError::UnsafePath {
-                    path: path.to_path_buf(),
-                });
-            }
-            let ani = self.read_animation_sidecar(&mdl_path, &mdl)?;
-            let mut included_set =
-                crate::decode_studio_animations(&mdl, ani.as_deref(), self.options.studio_limits)
-                    .map_err(Source1ModelImportError::Studio)?;
-            self.merge_included_animations(&mut included_set, visited, resolved, missing)?;
-            target.merge_included(&included_set);
-            resolved.push(relative);
+            self.merge_animation_model(target, Path::new(&authored), visited, resolved, missing)?;
         }
+        Ok(())
+    }
+
+    fn merge_animation_model(
+        &self,
+        target: &mut Source1AnimationSet,
+        authored: &Path,
+        visited: &mut HashSet<String>,
+        resolved: &mut Vec<String>,
+        missing: &mut Vec<String>,
+    ) -> Result<(), Source1ModelImportError> {
+        let authored = authored
+            .to_str()
+            .ok_or_else(|| Source1ModelImportError::UnsafePath {
+                path: authored.to_path_buf(),
+            })?;
+        let relative = normalize_source_model_name(authored);
+        if !visited.insert(relative.clone()) {
+            return Ok(());
+        }
+        if visited.len() > self.options.studio_limits.max_included_models {
+            return Err(Source1ModelImportError::Studio(
+                Source1StudioError::RecordLimit {
+                    section: "recursive include models",
+                    actual: visited.len(),
+                    limit: self.options.studio_limits.max_included_models,
+                },
+            ));
+        }
+        let path = Path::new(&relative);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(Source1ModelImportError::UnsafePath {
+                path: path.to_path_buf(),
+            });
+        }
+        let mdl_path = self.content_root.join(path);
+        let mdl = match fs::read(&mdl_path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(relative);
+                return Ok(());
+            }
+            Err(source) => {
+                return Err(Source1ModelImportError::Read {
+                    kind: "animation MDL",
+                    path: mdl_path,
+                    source,
+                });
+            }
+        };
+        let canonical =
+            fs::canonicalize(&mdl_path).map_err(|source| Source1ModelImportError::Read {
+                kind: "animation MDL",
+                path: mdl_path.clone(),
+                source,
+            })?;
+        if !canonical.starts_with(&self.content_root) {
+            return Err(Source1ModelImportError::UnsafePath {
+                path: path.to_path_buf(),
+            });
+        }
+        let ani = self.read_animation_sidecar(&mdl_path, &mdl)?;
+        let mut included_set =
+            crate::decode_studio_animations(&mdl, ani.as_deref(), self.options.studio_limits)
+                .map_err(Source1ModelImportError::Studio)?;
+        self.merge_included_animations(&mut included_set, visited, resolved, missing)?;
+        target.merge_included(&included_set);
+        resolved.push(relative);
         Ok(())
     }
 
