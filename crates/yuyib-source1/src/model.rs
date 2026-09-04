@@ -228,7 +228,7 @@ impl Source1ModelLoader {
         )
         .map_err(Source1ModelImportError::Studio)?;
         let mut loaded = self.cook(&studio)?;
-        let ani = read_optional(&mdl_path.with_extension("ani"))?;
+        let ani = self.read_animation_sidecar(&mdl_path, &files.mdl)?;
         let mut animations =
             crate::decode_studio_animations(&files.mdl, ani.as_deref(), self.options.studio_limits)
                 .map_err(Source1ModelImportError::Studio)?;
@@ -545,7 +545,7 @@ impl Source1ModelLoader {
                     path: path.to_path_buf(),
                 });
             }
-            let ani = read_optional(&mdl_path.with_extension("ani"))?;
+            let ani = self.read_animation_sidecar(&mdl_path, &mdl)?;
             let mut included_set =
                 crate::decode_studio_animations(&mdl, ani.as_deref(), self.options.studio_limits)
                     .map_err(Source1ModelImportError::Studio)?;
@@ -554,6 +554,67 @@ impl Source1ModelLoader {
             resolved.push(relative);
         }
         Ok(())
+    }
+
+    fn read_animation_sidecar(
+        &self,
+        mdl_path: &Path,
+        mdl: &[u8],
+    ) -> Result<Option<Vec<u8>>, Source1ModelImportError> {
+        let mut candidates = Vec::new();
+        if let Some(offset_bytes) = mdl.get(348..352) {
+            let offset = i32::from_le_bytes(offset_bytes.try_into().expect("four-byte slice"));
+            if let Ok(offset) = usize::try_from(offset)
+                && offset != 0
+                && let Some(available) = mdl.get(offset..)
+                && let Some(end) = available.iter().position(|byte| *byte == 0)
+                && let Ok(authored) = std::str::from_utf8(&available[..end])
+                && !authored.is_empty()
+            {
+                let relative = authored.replace('\\', "/");
+                let path = Path::new(relative.trim_start_matches('/'));
+                if path.is_absolute()
+                    || path.components().any(|component| {
+                        !matches!(component, Component::Normal(_) | Component::CurDir)
+                    })
+                {
+                    return Err(Source1ModelImportError::UnsafePath {
+                        path: path.to_path_buf(),
+                    });
+                }
+                candidates.push(self.content_root.join(path));
+            }
+        }
+        let conventional = mdl_path.with_extension("ani");
+        if !candidates.contains(&conventional) {
+            candidates.push(conventional);
+        }
+        for candidate in candidates {
+            match fs::read(&candidate) {
+                Ok(bytes) => {
+                    let canonical = fs::canonicalize(&candidate).map_err(|source| {
+                        Source1ModelImportError::Read {
+                            kind: "ANI",
+                            path: candidate.clone(),
+                            source,
+                        }
+                    })?;
+                    if !canonical.starts_with(&self.content_root) {
+                        return Err(Source1ModelImportError::UnsafePath { path: candidate });
+                    }
+                    return Ok(Some(bytes));
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(Source1ModelImportError::Read {
+                        kind: "ANI",
+                        path: candidate,
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -591,18 +652,6 @@ fn read_file(kind: &'static str, path: &Path) -> Result<Vec<u8>, Source1ModelImp
         path: path.to_path_buf(),
         source,
     })
-}
-
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, Source1ModelImportError> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(Source1ModelImportError::Read {
-            kind: "ANI",
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
 }
 
 fn normalize_source_model_name(value: &str) -> String {
