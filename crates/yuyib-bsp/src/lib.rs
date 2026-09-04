@@ -25,6 +25,13 @@ use std::{
 
 use zip::ZipArchive;
 
+mod static_props;
+
+pub use static_props::{
+    BspGameLumpEntry, BspStaticProp, BspStaticPropError, BspStaticPropLump, GAME_LUMP_STATIC_PROPS,
+    parse_static_prop_game_lump,
+};
+
 const BSP_MAGIC: &[u8; 4] = b"VBSP";
 const HEADER_BYTES: usize = 8 + 64 * 16 + 4;
 const LUMP_COUNT: usize = 64;
@@ -43,6 +50,7 @@ pub const LUMP_BRUSHSIDES: usize = 19;
 pub const LUMP_DISPINFO: usize = 26;
 pub const LUMP_DISP_VERTS: usize = 33;
 pub const LUMP_GAME_LUMP: usize = 35;
+pub const LUMP_LEAFWATERDATA: usize = 36;
 pub const LUMP_PAKFILE: usize = 40;
 pub const LUMP_TEXDATA_STRING_DATA: usize = 43;
 pub const LUMP_TEXDATA_STRING_TABLE: usize = 44;
@@ -275,6 +283,42 @@ impl Bsp {
             .collect())
     }
 
+    /// Reads BSP render models and validates every model's face range.
+    ///
+    /// Model zero is the world. Brush entities refer to later records through
+    /// their `model` key (`*1`, `*2`, ...).
+    pub fn models(&self) -> Result<Vec<BspModel>, BspError> {
+        let face_count = self.records(LUMP_FACES, 56)?.len() / 56;
+        let bytes = self.records(LUMP_MODELS, 48)?;
+        let mut models = Vec::with_capacity(bytes.len() / 48);
+        for (index, record) in bytes.chunks_exact(48).enumerate() {
+            let first_face = i32_at(record, 40);
+            let model_face_count = i32_at(record, 44);
+            let valid_range = usize::try_from(first_face)
+                .ok()
+                .zip(usize::try_from(model_face_count).ok())
+                .and_then(|(first, count)| first.checked_add(count))
+                .is_some_and(|end| end <= face_count);
+            if !valid_range {
+                return Err(BspError::InvalidModelFaceRange {
+                    model: index,
+                    first_face,
+                    face_count: model_face_count,
+                    available_faces: face_count,
+                });
+            }
+            models.push(BspModel {
+                mins: [f32_at(record, 0), f32_at(record, 4), f32_at(record, 8)],
+                maxs: [f32_at(record, 12), f32_at(record, 16), f32_at(record, 20)],
+                origin: [f32_at(record, 24), f32_at(record, 28), f32_at(record, 32)],
+                head_node: i32_at(record, 36),
+                first_face,
+                face_count: model_face_count,
+            });
+        }
+        Ok(models)
+    }
+
     pub fn tex_info(&self) -> Result<Vec<BspTexInfo>, BspError> {
         let bytes = self.records(LUMP_TEXINFO, 72)?;
         Ok(bytes
@@ -406,6 +450,36 @@ impl Bsp {
                 alpha: f32_at(record, 16),
             })
             .collect())
+    }
+
+    /// Reads per-water-volume surface and minimum heights.
+    ///
+    /// Each record references the texture info used by its water surface. The
+    /// reference is validated against [`LUMP_TEXINFO`] before any record is
+    /// returned.
+    pub fn leaf_water_data(&self) -> Result<Vec<BspLeafWaterData>, BspError> {
+        let tex_info_count = self.records(LUMP_TEXINFO, 72)?.len() / 72;
+        let bytes = self.records(LUMP_LEAFWATERDATA, 12)?;
+        let mut records = Vec::with_capacity(bytes.len() / 12);
+        for (record_index, record) in bytes.chunks_exact(12).enumerate() {
+            let surface_tex_info = i16_at(record, 8);
+            let valid_tex_info = usize::try_from(surface_tex_info)
+                .ok()
+                .is_some_and(|index| index < tex_info_count);
+            if !valid_tex_info {
+                return Err(BspError::InvalidLeafWaterTexInfo {
+                    record: record_index,
+                    tex_info: surface_tex_info,
+                    available_tex_info: tex_info_count,
+                });
+            }
+            records.push(BspLeafWaterData {
+                surface_z: f32_at(record, 0),
+                min_z: f32_at(record, 4),
+                surface_tex_info,
+            });
+        }
+        Ok(records)
     }
 
     /// Parses the entity lump's quoted key/value dictionaries.
@@ -593,6 +667,16 @@ pub struct BspFace {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BspModel {
+    pub mins: [f32; 3],
+    pub maxs: [f32; 3],
+    pub origin: [f32; 3],
+    pub head_node: i32,
+    pub first_face: i32,
+    pub face_count: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BspTexInfo {
     pub texture_vectors: [[f32; 4]; 2],
     pub lightmap_vectors: [[f32; 4]; 2],
@@ -638,6 +722,13 @@ pub struct BspDisplacementVertex {
     pub vector: [f32; 3],
     pub distance: f32,
     pub alpha: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BspLeafWaterData {
+    pub surface_z: f32,
+    pub min_z: f32,
+    pub surface_tex_info: i16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -852,6 +943,17 @@ pub enum BspError {
         length: usize,
         stride: usize,
     },
+    InvalidModelFaceRange {
+        model: usize,
+        first_face: i32,
+        face_count: i32,
+        available_faces: usize,
+    },
+    InvalidLeafWaterTexInfo {
+        record: usize,
+        tex_info: i16,
+        available_tex_info: usize,
+    },
     RecordLimit {
         lump: usize,
         actual: usize,
@@ -895,6 +997,10 @@ pub enum BspError {
 }
 
 impl fmt::Display for BspError {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive formatter keeps the public binary-validation error vocabulary explicit"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InputLimit { actual, limit } => {
@@ -943,6 +1049,23 @@ impl fmt::Display for BspError {
             } => write!(
                 formatter,
                 "BSP lump {lump} length {length} is not divisible by record size {stride}"
+            ),
+            Self::InvalidModelFaceRange {
+                model,
+                first_face,
+                face_count,
+                available_faces,
+            } => write!(
+                formatter,
+                "BSP model {model} face range {first_face}+{face_count} is outside {available_faces} faces"
+            ),
+            Self::InvalidLeafWaterTexInfo {
+                record,
+                tex_info,
+                available_tex_info,
+            } => write!(
+                formatter,
+                "BSP leaf-water record {record} references texture info {tex_info}, but only {available_tex_info} records exist"
             ),
             Self::RecordLimit {
                 lump,
@@ -1051,6 +1174,45 @@ mod tests {
         bytes
     }
 
+    fn append_lump(bytes: &mut Vec<u8>, lump: usize, data: &[u8]) {
+        let offset = bytes.len();
+        bytes.extend_from_slice(data);
+        let descriptor = 8 + lump * 16;
+        bytes[descriptor..descriptor + 4]
+            .copy_from_slice(&i32::try_from(offset).expect("offset").to_le_bytes());
+        bytes[descriptor + 4..descriptor + 8]
+            .copy_from_slice(&i32::try_from(data.len()).expect("length").to_le_bytes());
+    }
+
+    fn model_record(first_face: i32, face_count: i32) -> [u8; 48] {
+        let mut record = [0; 48];
+        for (offset, value) in [
+            (0, -1.0_f32),
+            (4, -2.0),
+            (8, -3.0),
+            (12, 4.0),
+            (16, 5.0),
+            (20, 6.0),
+            (24, 100.0),
+            (28, 200.0),
+            (32, 300.0),
+        ] {
+            record[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        record[36..40].copy_from_slice(&7_i32.to_le_bytes());
+        record[40..44].copy_from_slice(&first_face.to_le_bytes());
+        record[44..48].copy_from_slice(&face_count.to_le_bytes());
+        record
+    }
+
+    fn leaf_water_record(surface_z: f32, min_z: f32, surface_tex_info: i16) -> [u8; 12] {
+        let mut record = [0; 12];
+        record[0..4].copy_from_slice(&surface_z.to_le_bytes());
+        record[4..8].copy_from_slice(&min_z.to_le_bytes());
+        record[8..10].copy_from_slice(&surface_tex_info.to_le_bytes());
+        record
+    }
+
     #[test]
     fn validates_header_and_empty_lumps() {
         let bsp = Bsp::parse(empty_bsp(), BspLimits::default()).expect("empty BSP header");
@@ -1087,5 +1249,83 @@ mod tests {
         let entities = bsp.entities().expect("entities");
         assert_eq!(entities[0].classname(), Some("info_player_start"));
         assert_eq!(entities[0].property("origin"), Some("1 2 3"));
+    }
+
+    #[test]
+    fn parses_models_and_validates_face_ranges() {
+        let mut bytes = empty_bsp();
+        append_lump(&mut bytes, LUMP_FACES, &[0; 3 * 56]);
+        append_lump(&mut bytes, LUMP_MODELS, &model_record(1, 2));
+        let bsp = Bsp::parse(bytes, BspLimits::default()).expect("BSP");
+
+        assert_eq!(
+            bsp.models().expect("models"),
+            vec![BspModel {
+                mins: [-1.0, -2.0, -3.0],
+                maxs: [4.0, 5.0, 6.0],
+                origin: [100.0, 200.0, 300.0],
+                head_node: 7,
+                first_face: 1,
+                face_count: 2,
+            }]
+        );
+
+        let mut bytes = empty_bsp();
+        append_lump(&mut bytes, LUMP_FACES, &[0; 3 * 56]);
+        append_lump(&mut bytes, LUMP_MODELS, &model_record(2, 2));
+        let bsp = Bsp::parse(bytes, BspLimits::default()).expect("BSP");
+        assert!(matches!(
+            bsp.models(),
+            Err(BspError::InvalidModelFaceRange {
+                model: 0,
+                first_face: 2,
+                face_count: 2,
+                available_faces: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_leaf_water_data_and_validates_tex_info() {
+        let mut bytes = empty_bsp();
+        append_lump(&mut bytes, LUMP_TEXINFO, &[0; 9 * 72]);
+        let mut water = Vec::new();
+        water.extend_from_slice(&leaf_water_record(11_104.0, 10_832.0, 8));
+        water.extend_from_slice(&leaf_water_record(11_247.0, 11_189.0, 8));
+        append_lump(&mut bytes, LUMP_LEAFWATERDATA, &water);
+        let bsp = Bsp::parse(bytes, BspLimits::default()).expect("BSP");
+
+        assert_eq!(
+            bsp.leaf_water_data().expect("leaf water data"),
+            vec![
+                BspLeafWaterData {
+                    surface_z: 11_104.0,
+                    min_z: 10_832.0,
+                    surface_tex_info: 8,
+                },
+                BspLeafWaterData {
+                    surface_z: 11_247.0,
+                    min_z: 11_189.0,
+                    surface_tex_info: 8,
+                },
+            ]
+        );
+
+        let mut bytes = empty_bsp();
+        append_lump(&mut bytes, LUMP_TEXINFO, &[0; 9 * 72]);
+        append_lump(
+            &mut bytes,
+            LUMP_LEAFWATERDATA,
+            &leaf_water_record(1.0, 0.0, 9),
+        );
+        let bsp = Bsp::parse(bytes, BspLimits::default()).expect("BSP");
+        assert!(matches!(
+            bsp.leaf_water_data(),
+            Err(BspError::InvalidLeafWaterTexInfo {
+                record: 0,
+                tex_info: 9,
+                available_tex_info: 9,
+            })
+        ));
     }
 }

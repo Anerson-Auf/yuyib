@@ -36,6 +36,19 @@ pub struct Source1BaseTexture {
     pub rgba8: Vec<u8>,
 }
 
+/// Authored base-texture references resolved from one VMT include chain.
+///
+/// `second` is populated by terrain shaders such as
+/// `WorldVertexTransition`; its blend factor comes from BSP displacement
+/// vertex alpha rather than from the VTF image alpha channel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Source1MaterialTextureReferences {
+    /// Texture selected at a blend weight of zero.
+    pub first: String,
+    /// Optional texture selected at a blend weight of one.
+    pub second: Option<String>,
+}
+
 /// Canonical-root Source 1 material resolver.
 #[derive(Clone, Debug)]
 pub struct Source1MaterialResolver {
@@ -96,6 +109,24 @@ impl Source1MaterialResolver {
         self.resolve_vmt_file(&path, 0)
     }
 
+    /// Reads a loose VMT and resolves its authored base-texture references.
+    ///
+    /// Patch includes are followed with the same bounded, root-confined policy
+    /// as [`Self::resolve_vmt_path`]. Both `$basetexture` and
+    /// `$basetexture2` overrides from `insert`/`replace` blocks are honoured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Source1AssetError`] for unsafe paths, I/O, UTF-8/VMT parsing,
+    /// missing `$basetexture`, or an excessive Patch include chain.
+    pub fn resolve_vmt_texture_references(
+        &self,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<Source1MaterialTextureReferences, Source1AssetError> {
+        let path = self.resolve_material_path(relative_path.as_ref())?;
+        self.resolve_vmt_references_file(&path, 0)
+    }
+
     /// Resolves and decodes one authored `$basetexture` reference directly.
     ///
     /// This is used by container formats such as BSP when the VMT is embedded
@@ -137,6 +168,44 @@ impl Source1MaterialResolver {
             return self.resolve_vmt_file(&included_path, patch_depth + 1);
         }
         self.resolve(&material)
+    }
+
+    fn resolve_vmt_references_file(
+        &self,
+        path: &Path,
+        patch_depth: usize,
+    ) -> Result<Source1MaterialTextureReferences, Source1AssetError> {
+        if patch_depth >= 16 {
+            return Err(Source1AssetError::PatchDepthExceeded);
+        }
+        let text = fs::read_to_string(path).map_err(|source| Source1AssetError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let material = parse(&text).map_err(Source1AssetError::Vmt)?;
+        if material.shader().eq_ignore_ascii_case("patch") {
+            let included = material
+                .block()
+                .property("include")
+                .ok_or(Source1AssetError::PatchMissingInclude)?;
+            let included_path = self.resolve_material_path(Path::new(included))?;
+            let mut references =
+                self.resolve_vmt_references_file(&included_path, patch_depth + 1)?;
+            if let Some(first) = patch_texture_property(material.block(), "$basetexture") {
+                references.first = first.to_owned();
+            }
+            if let Some(second) = patch_texture_property(material.block(), "$basetexture2") {
+                references.second = Some(second.to_owned());
+            }
+            return Ok(references);
+        }
+        Ok(Source1MaterialTextureReferences {
+            first: material
+                .base_texture()
+                .ok_or(Source1AssetError::MissingBaseTexture)?
+                .to_owned(),
+            second: material.base_texture2().map(str::to_owned),
+        })
     }
 
     fn resolve_material_path(&self, relative: &Path) -> Result<PathBuf, Source1AssetError> {
@@ -219,6 +288,17 @@ fn patch_base_texture(block: &VmtBlock) -> Option<&str> {
         }
     }
     None
+}
+
+fn patch_texture_property<'a>(block: &'a VmtBlock, property: &str) -> Option<&'a str> {
+    block
+        .blocks()
+        .iter()
+        .filter(|block| {
+            block.name().eq_ignore_ascii_case("replace")
+                || block.name().eq_ignore_ascii_case("insert")
+        })
+        .find_map(|block| block.property(property))
 }
 
 fn strip_materials_prefix(path: &Path) -> &Path {
@@ -406,5 +486,42 @@ mod tests {
             resolver.resolve(&material),
             Err(Source1AssetError::MissingBaseTexture)
         ));
+    }
+
+    #[test]
+    fn loose_patch_retains_both_world_vertex_transition_textures() {
+        let root = std::env::temp_dir().join(format!(
+            "yuyib-source1-assets-references-{}",
+            std::process::id()
+        ));
+        let materials = root.join("materials");
+        let textures = root.join("textures");
+        fs::create_dir_all(materials.join("terrain")).expect("materials directory");
+        fs::create_dir_all(&textures).expect("textures directory");
+        fs::write(
+            materials.join("terrain/base.vmt"),
+            r#"WorldVertexTransition {
+                "$basetexture" "terrain/grass"
+                "$basetexture2" "terrain/dirt"
+            }"#,
+        )
+        .expect("base VMT");
+        fs::write(
+            materials.join("terrain/override.vmt"),
+            r#"Patch {
+                "include" "terrain/base"
+                "replace" { "$basetexture2" "terrain/rock" }
+            }"#,
+        )
+        .expect("patch VMT");
+        let resolver =
+            Source1MaterialResolver::new(&materials, &textures).expect("canonical roots");
+
+        let references = resolver
+            .resolve_vmt_texture_references("terrain/override")
+            .expect("two texture references");
+
+        assert_eq!(references.first, "terrain/grass");
+        assert_eq!(references.second.as_deref(), Some("terrain/rock"));
     }
 }

@@ -9,8 +9,11 @@
 //! This deliberately supports opaque, factor-only materials. It is a world
 //! geometry path, not a replacement for glTF/PBR or dynamic character assets.
 
-use std::{collections::HashMap, error::Error, fmt, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt, mem::size_of, sync::Arc};
 
+use bytemuck::{Pod, Zeroable};
+
+use wgpu::util::DeviceExt;
 use yuyib_2d::{Texture, TextureHandle, TextureSize, TextureSizeError};
 use yuyib_assets::Assets;
 use yuyib_model::{AlphaMode, Material, MaterialIndex, MeshPrimitive, Model};
@@ -20,10 +23,12 @@ use yuyib_render_texture::{
 };
 
 use crate::{
-    Camera3d, DepthLoad, GpuMesh, GpuTexturedLitMaterial, GpuTexturedLitMesh, LambertLighting3d,
-    LitMaterial3d, LitMeshInstance3d, MeshRenderError, MeshRenderer3d, MeshUploadError,
-    TexturedLitBatchDraw, TexturedLitMeshRenderError, TexturedLitMeshRenderer3d,
-    TexturedLitMeshUploadError,
+    Camera3d, DepthLoad, GpuMesh, GpuTexture, GpuTexturedLitMaterial, GpuTexturedLitMesh,
+    LambertLighting3d, LitMaterial3d, LitMeshInstance3d, LitMeshUniform, MeshDrawStats,
+    MeshRenderError, MeshRenderer3d, MeshUploadError, TexturedLitBatchDraw,
+    TexturedLitMeshRenderError, TexturedLitMeshRenderer3d, TexturedLitMeshUploadError,
+    aligned_uniform_stride, dynamic_uniform_bind_group, dynamic_uniform_layout, uniform_bind_group,
+    uniform_buffer, uniform_layout,
 };
 
 /// CPU-side immutable world geometry grouped by material.
@@ -326,6 +331,7 @@ impl StaticWorldRenderer3d {
     /// # Errors
     ///
     /// Returns the exact batch whose GPU upload failed.
+    #[allow(clippy::too_many_lines)]
     pub fn upload_for_frame(
         &mut self,
         frame: &RenderFrame<'_>,
@@ -558,7 +564,7 @@ impl Error for StaticWorldTextureError3d {
 
 /// Material decision made while cooking a [`TexturedStaticWorld3d`].
 ///
-/// This explicit three-way policy is important for Source maps: ordinary
+/// This explicit policy is important for Source maps: ordinary
 /// unresolved materials can remain visible as a factor fallback, while editor
 /// surfaces such as `toolsnodraw` must be omitted rather than rendered as
 /// opaque fallback geometry.
@@ -571,6 +577,15 @@ pub enum TexturedStaticWorldMaterial3d {
         /// Shared CPU-prepared source. Cloning the `Arc` does not duplicate mips.
         texture: Arc<StaticWorldTexture3d>,
         /// Linear RGBA material multiplier.
+        factor: [f32; 4],
+    },
+    /// Blend two sampled textures using each vertex's texture-blend weight.
+    BlendTextures {
+        /// Texture selected at a blend weight of zero.
+        first: Arc<StaticWorldTexture3d>,
+        /// Texture selected at a blend weight of one.
+        second: Arc<StaticWorldTexture3d>,
+        /// Linear RGBA material multiplier applied after blending.
         factor: [f32; 4],
     },
     /// Do not include this material in render geometry.
@@ -589,6 +604,20 @@ impl TexturedStaticWorldMaterial3d {
     pub fn texture(material: &Material, texture: Arc<StaticWorldTexture3d>) -> Self {
         Self::Texture {
             texture,
+            factor: material.base_color_factor(),
+        }
+    }
+
+    /// Uses two textures blended by [`MeshPrimitive::texture_blend_weights`].
+    #[must_use]
+    pub fn blend_textures(
+        material: &Material,
+        first: Arc<StaticWorldTexture3d>,
+        second: Arc<StaticWorldTexture3d>,
+    ) -> Self {
+        Self::BlendTextures {
+            first,
+            second,
             factor: material.base_color_factor(),
         }
     }
@@ -615,6 +644,12 @@ enum TexturedStaticWorldBatch3d {
         texture: Arc<StaticWorldTexture3d>,
         color: [f32; 4],
     },
+    BlendTextures {
+        primitive: MeshPrimitive,
+        first: Arc<StaticWorldTexture3d>,
+        second: Arc<StaticWorldTexture3d>,
+        color: [f32; 4],
+    },
 }
 
 /// Reduction metrics for a mixed static-world cook.
@@ -628,6 +663,10 @@ pub struct TexturedStaticWorldBuildStats3d {
     pub factor_batches: usize,
     /// Resulting sampled-texture batches.
     pub textured_batches: usize,
+    /// Sampled-texture batches that use per-vertex two-texture blending.
+    ///
+    /// This is a subset of [`Self::textured_batches`].
+    pub blended_batches: usize,
     /// Source primitives omitted by explicit material policy.
     pub skipped_primitives: usize,
 }
@@ -727,6 +766,20 @@ impl TexturedStaticWorld3d {
                         color: factor,
                     });
                 }
+                TexturedStaticWorldMaterial3d::BlendTextures {
+                    first,
+                    second,
+                    factor,
+                } => {
+                    stats.textured_batches += 1;
+                    stats.blended_batches += 1;
+                    batches.push(TexturedStaticWorldBatch3d::BlendTextures {
+                        primitive,
+                        first,
+                        second,
+                        color: factor,
+                    });
+                }
                 TexturedStaticWorldMaterial3d::Skip => {
                     unreachable!("skipped materials have no bucket")
                 }
@@ -747,6 +800,7 @@ struct TexturedBuildBucket {
     indices: Vec<u32>,
     normals: Vec<[f32; 3]>,
     tex_coords: Vec<[f32; 2]>,
+    texture_blend_weights: Vec<f32>,
     material: TexturedStaticWorldMaterial3d,
 }
 
@@ -757,6 +811,7 @@ impl TexturedBuildBucket {
             indices: Vec::new(),
             normals: Vec::new(),
             tex_coords: Vec::new(),
+            texture_blend_weights: Vec::new(),
             material,
         }
     }
@@ -768,7 +823,15 @@ impl TexturedBuildBucket {
         primitive_index: usize,
         batch: usize,
     ) -> Result<(), TexturedStaticWorldBuildError3d> {
-        let textured = matches!(self.material, TexturedStaticWorldMaterial3d::Texture { .. });
+        let textured = matches!(
+            self.material,
+            TexturedStaticWorldMaterial3d::Texture { .. }
+                | TexturedStaticWorldMaterial3d::BlendTextures { .. }
+        );
+        let blended = matches!(
+            self.material,
+            TexturedStaticWorldMaterial3d::BlendTextures { .. }
+        );
         let normals =
             if textured {
                 Some(primitive.normals().ok_or(
@@ -790,6 +853,16 @@ impl TexturedBuildBucket {
         } else {
             None
         };
+        let texture_blend_weights = if blended {
+            Some(primitive.texture_blend_weights().ok_or(
+                TexturedStaticWorldBuildError3d::MissingTextureBlendWeights {
+                    mesh,
+                    primitive: primitive_index,
+                },
+            )?)
+        } else {
+            None
+        };
         let vertex_base = u32::try_from(self.positions.len())
             .map_err(|_| TexturedStaticWorldBuildError3d::TooManyVertices { batch })?;
         self.positions.extend_from_slice(primitive.positions());
@@ -798,6 +871,10 @@ impl TexturedBuildBucket {
         }
         if let Some(tex_coords) = tex_coords {
             self.tex_coords.extend_from_slice(tex_coords);
+        }
+        if let Some(texture_blend_weights) = texture_blend_weights {
+            self.texture_blend_weights
+                .extend_from_slice(texture_blend_weights);
         }
         for &index in primitive.indices() {
             self.indices.push(
@@ -819,9 +896,18 @@ impl TexturedBuildBucket {
             indices,
             normals,
             tex_coords,
+            texture_blend_weights,
             material,
         } = self;
-        let textured = matches!(material, TexturedStaticWorldMaterial3d::Texture { .. });
+        let textured = matches!(
+            material,
+            TexturedStaticWorldMaterial3d::Texture { .. }
+                | TexturedStaticWorldMaterial3d::BlendTextures { .. }
+        );
+        let blended = matches!(
+            material,
+            TexturedStaticWorldMaterial3d::BlendTextures { .. }
+        );
         let mut primitive = MeshPrimitive::new(positions, indices).map_err(|source| {
             TexturedStaticWorldBuildError3d::CombinedGeometry { batch, source }
         })?;
@@ -832,6 +918,14 @@ impl TexturedBuildBucket {
             primitive = primitive.with_tex_coords_0(tex_coords).map_err(|source| {
                 TexturedStaticWorldBuildError3d::CombinedGeometry { batch, source }
             })?;
+        }
+        if blended {
+            primitive = primitive
+                .with_texture_blend_weights(texture_blend_weights)
+                .map_err(|source| TexturedStaticWorldBuildError3d::CombinedGeometry {
+                    batch,
+                    source,
+                })?;
         }
         Ok((primitive, material))
     }
@@ -858,6 +952,13 @@ pub enum TexturedStaticWorldBuildError3d {
     },
     /// Textured geometry had no authored primary UV stream.
     MissingTexCoords0 {
+        /// Source mesh index.
+        mesh: usize,
+        /// Source primitive index.
+        primitive: usize,
+    },
+    /// A blended material had no authored per-vertex blend stream.
+    MissingTextureBlendWeights {
         /// Source mesh index.
         mesh: usize,
         /// Source primitive index.
@@ -908,6 +1009,10 @@ impl fmt::Display for TexturedStaticWorldBuildError3d {
                 formatter,
                 "textured static world mesh {mesh}, primitive {primitive} has no UV0"
             ),
+            Self::MissingTextureBlendWeights { mesh, primitive } => write!(
+                formatter,
+                "blended static world mesh {mesh}, primitive {primitive} has no texture blend weights"
+            ),
             Self::NonOpaqueMaterial {
                 mesh,
                 primitive,
@@ -947,6 +1052,7 @@ impl Error for TexturedStaticWorldBuildError3d {
 pub struct TexturedStaticWorldRenderer3d {
     factor_renderer: MeshRenderer3d,
     textured_renderer: TexturedLitMeshRenderer3d,
+    blended_renderer: BlendedStaticWorldRenderer3d,
     texture_assets: Assets<Texture>,
     texture_cache: TextureCache,
     texture_handles: HashMap<String, TextureHandle>,
@@ -961,6 +1067,11 @@ enum TexturedStaticWorldGpuBatch3d {
     Texture {
         mesh: GpuTexturedLitMesh,
         material: GpuTexturedLitMaterial,
+        color: [f32; 4],
+    },
+    BlendTextures {
+        mesh: GpuBlendedStaticWorldMesh,
+        material: GpuBlendedStaticWorldMaterial,
         color: [f32; 4],
     },
 }
@@ -981,6 +1092,7 @@ impl TexturedStaticWorldRenderer3d {
         Self {
             factor_renderer: MeshRenderer3d::new_for_frame(frame),
             textured_renderer: TexturedLitMeshRenderer3d::new_for_frame(frame),
+            blended_renderer: BlendedStaticWorldRenderer3d::new_for_frame(frame, 1),
             texture_assets: Assets::new(),
             texture_cache: TextureCache::new(),
             texture_handles: HashMap::new(),
@@ -1007,6 +1119,12 @@ impl TexturedStaticWorldRenderer3d {
             .filter(|batch| matches!(batch, TexturedStaticWorldBatch3d::Factor { .. }))
             .count();
         let textured_count = world.batches.len() - factor_count;
+        let blended_count = world
+            .batches
+            .iter()
+            .filter(|batch| matches!(batch, TexturedStaticWorldBatch3d::BlendTextures { .. }))
+            .count();
+        let single_textured_count = textured_count - blended_count;
         let factor_renderer = MeshRenderer3d::new_for_frame_with_batch_capacity(
             frame,
             resident_batch_capacity(factor_count, MeshRenderer3d::DEFAULT_BATCH_CAPACITY),
@@ -1014,14 +1132,20 @@ impl TexturedStaticWorldRenderer3d {
         let textured_renderer = TexturedLitMeshRenderer3d::new_for_frame_with_batch_capacity(
             frame,
             resident_batch_capacity(
-                textured_count,
+                single_textured_count,
                 TexturedLitMeshRenderer3d::DEFAULT_BATCH_CAPACITY,
             ),
+        );
+        let blended_renderer = BlendedStaticWorldRenderer3d::new_for_frame(
+            frame,
+            resident_batch_capacity(blended_count, 32),
         );
         let mut texture_assets = Assets::new();
         let mut texture_cache = TextureCache::new();
         let mut texture_handles = HashMap::<String, TextureHandle>::new();
         let mut material_cache = HashMap::<String, GpuTexturedLitMaterial>::new();
+        let mut blended_material_cache =
+            HashMap::<(String, String), GpuBlendedStaticWorldMaterial>::new();
         let mut batches = Vec::with_capacity(world.batches.len());
 
         for (batch, source) in world.batches.iter().enumerate() {
@@ -1081,6 +1205,60 @@ impl TexturedStaticWorldRenderer3d {
                         color: *color,
                     });
                 }
+                TexturedStaticWorldBatch3d::BlendTextures {
+                    primitive,
+                    first,
+                    second,
+                    color,
+                } => {
+                    let first_key = first.cache_key().to_owned();
+                    let second_key = second.cache_key().to_owned();
+                    let first_handle = cache_static_world_texture(
+                        frame,
+                        first,
+                        &mut texture_assets,
+                        &mut texture_cache,
+                        &mut texture_handles,
+                    )?;
+                    let second_handle = cache_static_world_texture(
+                        frame,
+                        second,
+                        &mut texture_assets,
+                        &mut texture_cache,
+                        &mut texture_handles,
+                    )?;
+                    let material_key = (first_key.clone(), second_key.clone());
+                    let material = if let Some(material) = blended_material_cache.get(&material_key)
+                    {
+                        material.clone()
+                    } else {
+                        let first_gpu = texture_cache.get(first_handle).ok_or_else(|| {
+                            TexturedStaticWorldUploadError3d::MissingCachedTexture {
+                                cache_key: first_key.clone(),
+                            }
+                        })?;
+                        let second_gpu = texture_cache.get(second_handle).ok_or_else(|| {
+                            TexturedStaticWorldUploadError3d::MissingCachedTexture {
+                                cache_key: second_key.clone(),
+                            }
+                        })?;
+                        let material = blended_renderer
+                            .upload_material_for_frame(frame, first_gpu, second_gpu);
+                        blended_material_cache.insert(material_key, material.clone());
+                        material
+                    };
+                    let mesh =
+                        BlendedStaticWorldRenderer3d::upload_mesh_for_frame(frame, primitive)
+                            .map_err(|source| TexturedStaticWorldUploadError3d::BlendedMesh {
+                                batch,
+                                source,
+                            })?;
+                    batches.push(TexturedStaticWorldGpuBatch3d::BlendTextures {
+                        mesh,
+                        material,
+                        color: *color,
+                    });
+                }
             }
         }
 
@@ -1090,6 +1268,7 @@ impl TexturedStaticWorldRenderer3d {
         };
         self.factor_renderer = factor_renderer;
         self.textured_renderer = textured_renderer;
+        self.blended_renderer = blended_renderer;
         self.texture_assets = texture_assets;
         self.texture_cache = texture_cache;
         self.texture_handles = texture_handles;
@@ -1125,7 +1304,8 @@ impl TexturedStaticWorldRenderer3d {
                 TexturedStaticWorldGpuBatch3d::Factor { mesh, color } => {
                     Some((mesh, identity_matrix(), *color))
                 }
-                TexturedStaticWorldGpuBatch3d::Texture { .. } => None,
+                TexturedStaticWorldGpuBatch3d::Texture { .. }
+                | TexturedStaticWorldGpuBatch3d::BlendTextures { .. } => None,
             })
             .collect();
         let mut stats = StaticWorldDrawStats3d::default();
@@ -1155,7 +1335,8 @@ impl TexturedStaticWorldRenderer3d {
                     material,
                     true,
                 )),
-                TexturedStaticWorldGpuBatch3d::Factor { .. } => None,
+                TexturedStaticWorldGpuBatch3d::Factor { .. }
+                | TexturedStaticWorldGpuBatch3d::BlendTextures { .. } => None,
             })
             .collect();
         if !textured.is_empty() {
@@ -1171,10 +1352,572 @@ impl TexturedStaticWorldRenderer3d {
             stats.batches += textured.len();
             stats.triangles += u64::from(draw.triangles);
             stats.draw_calls += u64::from(draw.draw_calls);
+            has_depth = true;
+        }
+
+        let blended: Vec<_> = self
+            .batches
+            .iter()
+            .filter_map(|batch| match batch {
+                TexturedStaticWorldGpuBatch3d::BlendTextures {
+                    mesh,
+                    material,
+                    color,
+                } => Some(BlendedStaticWorldBatchDraw {
+                    mesh,
+                    material,
+                    color: *color,
+                }),
+                TexturedStaticWorldGpuBatch3d::Factor { .. }
+                | TexturedStaticWorldGpuBatch3d::Texture { .. } => None,
+            })
+            .collect();
+        if !blended.is_empty() {
+            let depth_load = if has_depth {
+                DepthLoad::Load
+            } else {
+                DepthLoad::Clear
+            };
+            let draw = self
+                .blended_renderer
+                .draw_batch_with_depth_load(frame, camera, lighting, &blended, depth_load)
+                .map_err(TexturedStaticWorldRenderError3d::Blended)?;
+            stats.batches += blended.len();
+            stats.triangles += u64::from(draw.triangles);
+            stats.draw_calls += u64::from(draw.draw_calls);
         }
         Ok(stats)
     }
 }
+
+fn cache_static_world_texture(
+    frame: &RenderFrame<'_>,
+    texture: &Arc<StaticWorldTexture3d>,
+    texture_assets: &mut Assets<Texture>,
+    texture_cache: &mut TextureCache,
+    texture_handles: &mut HashMap<String, TextureHandle>,
+) -> Result<TextureHandle, TexturedStaticWorldUploadError3d> {
+    let key = texture.cache_key().to_owned();
+    if let Some(handle) = texture_handles.get(&key).copied() {
+        return Ok(handle);
+    }
+    let handle = texture_assets.insert(texture.metadata.clone());
+    texture_cache
+        .upsert_prepared_for_frame(frame, handle, &texture.prepared)
+        .map_err(|source| TexturedStaticWorldUploadError3d::Texture {
+            cache_key: key.clone(),
+            source,
+        })?;
+    texture_handles.insert(key, handle);
+    Ok(handle)
+}
+
+struct GpuBlendedStaticWorldMesh {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+#[derive(Clone)]
+struct GpuBlendedStaticWorldMaterial {
+    bind_group: Arc<wgpu::BindGroup>,
+}
+
+struct BlendedStaticWorldBatchDraw<'a> {
+    mesh: &'a GpuBlendedStaticWorldMesh,
+    material: &'a GpuBlendedStaticWorldMaterial,
+    color: [f32; 4],
+}
+
+struct BlendedStaticWorldRenderer3d {
+    pipeline: wgpu::RenderPipeline,
+    camera_buffer: wgpu::Buffer,
+    draw_buffer: wgpu::Buffer,
+    draw_uniform_stride: u64,
+    batch_capacity: usize,
+    camera_bind_group: wgpu::BindGroup,
+    draw_bind_group: wgpu::BindGroup,
+    texture_layout: wgpu::BindGroupLayout,
+}
+
+impl BlendedStaticWorldRenderer3d {
+    fn new_for_frame(frame: &RenderFrame<'_>, batch_capacity: usize) -> Self {
+        Self::create(
+            frame.device(),
+            frame.surface_format(),
+            frame.depth_format(),
+            batch_capacity,
+        )
+    }
+
+    fn upload_material_for_frame(
+        &self,
+        frame: &RenderFrame<'_>,
+        first: &GpuTexture,
+        second: &GpuTexture,
+    ) -> GpuBlendedStaticWorldMaterial {
+        GpuBlendedStaticWorldMaterial {
+            bind_group: Arc::new(
+                frame
+                    .device()
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("yuyib blended static-world material bind group"),
+                        layout: &self.texture_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(first.view()),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(first.sampler()),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(second.view()),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(second.sampler()),
+                            },
+                        ],
+                    }),
+            ),
+        }
+    }
+
+    fn upload_mesh_for_frame(
+        frame: &RenderFrame<'_>,
+        primitive: &MeshPrimitive,
+    ) -> Result<GpuBlendedStaticWorldMesh, BlendedStaticWorldMeshUploadError3d> {
+        let normals = primitive
+            .normals()
+            .ok_or(BlendedStaticWorldMeshUploadError3d::MissingNormals)?;
+        let tex_coords = primitive
+            .tex_coords_0()
+            .ok_or(BlendedStaticWorldMeshUploadError3d::MissingTexCoords0)?;
+        let blend_weights = primitive
+            .texture_blend_weights()
+            .ok_or(BlendedStaticWorldMeshUploadError3d::MissingTextureBlendWeights)?;
+        let index_count = u32::try_from(primitive.indices().len()).map_err(|_| {
+            BlendedStaticWorldMeshUploadError3d::TooManyIndices {
+                actual: primitive.indices().len(),
+            }
+        })?;
+        let vertices = primitive
+            .positions()
+            .iter()
+            .copied()
+            .zip(normals.iter().copied())
+            .zip(tex_coords.iter().copied())
+            .zip(blend_weights.iter().copied())
+            .enumerate()
+            .map(|(index, (((position, normal), tex_coord), blend_weight))| {
+                if !position.iter().all(|value| value.is_finite()) {
+                    return Err(BlendedStaticWorldMeshUploadError3d::NonFinitePosition { index });
+                }
+                if !normal.iter().all(|value| value.is_finite()) {
+                    return Err(BlendedStaticWorldMeshUploadError3d::NonFiniteNormal { index });
+                }
+                let normal_length_squared = normal.iter().map(|value| value * value).sum::<f32>();
+                if normal_length_squared <= f32::EPSILON {
+                    return Err(BlendedStaticWorldMeshUploadError3d::DegenerateNormal { index });
+                }
+                if !tex_coord.iter().all(|value| value.is_finite()) {
+                    return Err(BlendedStaticWorldMeshUploadError3d::NonFiniteTexCoords0 { index });
+                }
+                if !blend_weight.is_finite() {
+                    return Err(
+                        BlendedStaticWorldMeshUploadError3d::NonFiniteTextureBlendWeight { index },
+                    );
+                }
+                Ok(BlendedStaticWorldVertex {
+                    position,
+                    normal,
+                    tex_coord,
+                    blend_weight,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let device = frame.device();
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("yuyib blended static-world vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("yuyib blended static-world indices"),
+            contents: bytemuck::cast_slice(primitive.indices()),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Ok(GpuBlendedStaticWorldMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count,
+        })
+    }
+
+    fn draw_batch_with_depth_load(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        lighting: LambertLighting3d,
+        draws: &[BlendedStaticWorldBatchDraw<'_>],
+        depth_load: DepthLoad,
+    ) -> Result<MeshDrawStats, TexturedLitMeshRenderError> {
+        if draws.len() > self.batch_capacity {
+            return Err(TexturedLitMeshRenderError::BatchTooLarge {
+                actual: draws.len(),
+                maximum: self.batch_capacity,
+            });
+        }
+        if draws.is_empty() {
+            return Ok(MeshDrawStats::default());
+        }
+        let view_projection = camera
+            .view_projection(frame.draw_size())
+            .map_err(TexturedLitMeshRenderError::Mesh)?;
+        let uniforms = draws
+            .iter()
+            .map(|draw| {
+                LitMeshUniform::new(identity_matrix(), LitMaterial3d::new(draw.color), lighting)
+                    .map_err(TexturedLitMeshRenderError::Lit)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        frame
+            .queue()
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
+        for (index, uniform) in uniforms.iter().enumerate() {
+            let offset = u64::try_from(index)
+                .expect("batch capacity fits u64")
+                .saturating_mul(self.draw_uniform_stride);
+            frame
+                .queue()
+                .write_buffer(&self.draw_buffer, offset, bytemuck::bytes_of(uniform));
+        }
+        frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            for (index, draw) in draws.iter().enumerate() {
+                let offset = u64::try_from(index)
+                    .expect("batch capacity fits u64")
+                    .saturating_mul(self.draw_uniform_stride);
+                let offset = u32::try_from(offset).expect("blended static-world offset fits u32");
+                pass.set_bind_group(1, &self.draw_bind_group, &[offset]);
+                pass.set_bind_group(2, draw.material.bind_group.as_ref(), &[]);
+                pass.set_vertex_buffer(0, draw.mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(draw.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..draw.mesh.index_count, 0, 0..1);
+            }
+        });
+        Ok(MeshDrawStats {
+            triangles: draws.iter().map(|draw| draw.mesh.index_count / 3).sum(),
+            draw_calls: u32::try_from(draws.len()).expect("batch capacity fits u32"),
+            transient_uniform_buffer_allocations: 0,
+        })
+    }
+
+    fn create(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        depth_format: wgpu::TextureFormat,
+        batch_capacity: usize,
+    ) -> Self {
+        let batch_capacity = batch_capacity.max(1);
+        let camera_layout = uniform_layout(
+            device,
+            "yuyib blended static-world camera layout",
+            wgpu::ShaderStages::VERTEX,
+        );
+        let draw_layout = dynamic_uniform_layout(
+            device,
+            "yuyib blended static-world draw layout",
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            size_of::<LitMeshUniform>() as u64,
+        );
+        let texture_layout = blended_static_world_texture_layout(device);
+        let camera_buffer = uniform_buffer(
+            device,
+            "yuyib blended static-world camera",
+            size_of::<[f32; 16]>() as u64,
+        );
+        let draw_uniform_stride = aligned_uniform_stride(
+            device.limits().min_uniform_buffer_offset_alignment,
+            size_of::<LitMeshUniform>() as u64,
+        );
+        let draw_buffer = uniform_buffer(
+            device,
+            "yuyib blended static-world draws",
+            draw_uniform_stride
+                .saturating_mul(u64::try_from(batch_capacity).expect("batch capacity fits u64")),
+        );
+        let camera_bind_group = uniform_bind_group(
+            device,
+            "yuyib blended static-world camera bind group",
+            &camera_layout,
+            &camera_buffer,
+        );
+        let draw_bind_group = dynamic_uniform_bind_group(
+            device,
+            "yuyib blended static-world draw bind group",
+            &draw_layout,
+            &draw_buffer,
+            size_of::<LitMeshUniform>() as u64,
+        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("yuyib blended static-world WGSL"),
+            source: wgpu::ShaderSource::Wgsl(BLENDED_STATIC_WORLD_WGSL.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("yuyib blended static-world pipeline layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&draw_layout),
+                Some(&texture_layout),
+            ],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("yuyib blended static-world pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Some(BLENDED_STATIC_WORLD_VERTEX_LAYOUT)],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            pipeline,
+            camera_buffer,
+            draw_buffer,
+            draw_uniform_stride,
+            batch_capacity,
+            camera_bind_group,
+            draw_bind_group,
+            texture_layout,
+        }
+    }
+}
+
+fn blended_static_world_texture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("yuyib blended static-world texture layout"),
+        entries: &[
+            sampled_texture_layout_entry(0),
+            filtering_sampler_layout_entry(1),
+            sampled_texture_layout_entry(2),
+            filtering_sampler_layout_entry(3),
+        ],
+    })
+}
+
+const fn sampled_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+const fn filtering_sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BlendedStaticWorldVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    tex_coord: [f32; 2],
+    blend_weight: f32,
+}
+
+const BLENDED_STATIC_WORLD_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> =
+    wgpu::VertexBufferLayout {
+        array_stride: size_of::<BlendedStaticWorldVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: size_of::<[f32; 3]>() as u64,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: size_of::<[f32; 3]>() as u64 * 2,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: size_of::<[f32; 3]>() as u64 * 2 + size_of::<[f32; 2]>() as u64,
+                shader_location: 3,
+            },
+        ],
+    };
+
+const BLENDED_STATIC_WORLD_WGSL: &str = r"
+struct Camera { view_projection: mat4x4<f32>, };
+struct Draw {
+    model: mat4x4<f32>, normal_matrix: mat3x3<f32>, base_color: vec4<f32>,
+    light_direction: vec4<f32>, light_color: vec4<f32>, ambient: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(1) @binding(0) var<uniform> draw: Draw;
+@group(2) @binding(0) var first_texture: texture_2d<f32>;
+@group(2) @binding(1) var first_sampler: sampler;
+@group(2) @binding(2) var second_texture: texture_2d<f32>;
+@group(2) @binding(3) var second_sampler: sampler;
+struct VertexInput {
+    @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
+    @location(2) tex_coord: vec2<f32>, @location(3) blend_weight: f32,
+};
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>, @location(0) normal: vec3<f32>,
+    @location(1) tex_coord: vec2<f32>, @location(2) blend_weight: f32,
+};
+@vertex fn vs_main(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    output.clip_position = camera.view_projection * draw.model * vec4<f32>(input.position, 1.0);
+    output.normal = normalize(draw.normal_matrix * input.normal);
+    output.tex_coord = input.tex_coord;
+    output.blend_weight = input.blend_weight;
+    return output;
+}
+@fragment fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    let normal = select(-normalize(input.normal), normalize(input.normal), front_facing);
+    let diffuse = max(dot(normal, normalize(-draw.light_direction.xyz)), 0.0);
+    let light = draw.ambient.xyz + draw.light_color.xyz * diffuse;
+    let first = textureSample(first_texture, first_sampler, input.tex_coord);
+    let second = textureSample(second_texture, second_sampler, input.tex_coord);
+    let base = mix(first, second, clamp(input.blend_weight, 0.0, 1.0)) * draw.base_color;
+    return vec4<f32>(base.rgb * light, base.a);
+}
+";
+
+/// Failure while uploading a two-texture blended static-world mesh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlendedStaticWorldMeshUploadError3d {
+    /// The source mesh has no normal stream.
+    MissingNormals,
+    /// The source mesh has no primary UV stream.
+    MissingTexCoords0,
+    /// The source mesh has no per-vertex texture blend weights.
+    MissingTextureBlendWeights,
+    /// A position was non-finite.
+    NonFinitePosition {
+        /// Vertex stream index.
+        index: usize,
+    },
+    /// A normal was non-finite.
+    NonFiniteNormal {
+        /// Vertex stream index.
+        index: usize,
+    },
+    /// A normal had zero length.
+    DegenerateNormal {
+        /// Vertex stream index.
+        index: usize,
+    },
+    /// A texture coordinate was non-finite.
+    NonFiniteTexCoords0 {
+        /// Vertex stream index.
+        index: usize,
+    },
+    /// A texture blend weight was non-finite.
+    NonFiniteTextureBlendWeight {
+        /// Vertex stream index.
+        index: usize,
+    },
+    /// Index count cannot be represented by WGPU.
+    TooManyIndices {
+        /// Observed index count.
+        actual: usize,
+    },
+}
+
+impl fmt::Display for BlendedStaticWorldMeshUploadError3d {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingNormals => {
+                formatter.write_str("blended static-world mesh requires normals")
+            }
+            Self::MissingTexCoords0 => {
+                formatter.write_str("blended static-world mesh requires UV0")
+            }
+            Self::MissingTextureBlendWeights => {
+                formatter.write_str("blended static-world mesh requires texture blend weights")
+            }
+            Self::NonFinitePosition { index } => write!(
+                formatter,
+                "blended static-world position at index {index} is not finite"
+            ),
+            Self::NonFiniteNormal { index } => write!(
+                formatter,
+                "blended static-world normal at index {index} is not finite"
+            ),
+            Self::DegenerateNormal { index } => write!(
+                formatter,
+                "blended static-world normal at index {index} has zero length"
+            ),
+            Self::NonFiniteTexCoords0 { index } => write!(
+                formatter,
+                "blended static-world UV0 at index {index} is not finite"
+            ),
+            Self::NonFiniteTextureBlendWeight { index } => write!(
+                formatter,
+                "blended static-world texture blend weight at index {index} is not finite"
+            ),
+            Self::TooManyIndices { actual } => write!(
+                formatter,
+                "blended static-world mesh has {actual} indices; WGPU accepts at most u32::MAX"
+            ),
+        }
+    }
+}
+
+impl Error for BlendedStaticWorldMeshUploadError3d {}
 
 /// Failure while publishing a mixed static world to one GPU device.
 #[derive(Debug)]
@@ -1192,6 +1935,13 @@ pub enum TexturedStaticWorldUploadError3d {
         batch: usize,
         /// Textured vertex upload failure.
         source: TexturedLitMeshUploadError,
+    },
+    /// Two-texture blended geometry upload failed.
+    BlendedMesh {
+        /// Combined batch index.
+        batch: usize,
+        /// Blended vertex upload failure.
+        source: BlendedStaticWorldMeshUploadError3d,
     },
     /// Prepared texture publication failed.
     Texture {
@@ -1220,6 +1970,10 @@ impl fmt::Display for TexturedStaticWorldUploadError3d {
                 formatter,
                 "cannot upload textured static-world batch {batch}: {source}"
             ),
+            Self::BlendedMesh { batch, source } => write!(
+                formatter,
+                "cannot upload blended static-world batch {batch}: {source}"
+            ),
             Self::Texture { cache_key, source } => write!(
                 formatter,
                 "cannot upload static-world texture {cache_key}: {source}"
@@ -1237,6 +1991,7 @@ impl Error for TexturedStaticWorldUploadError3d {
         match self {
             Self::FactorMesh { source, .. } => Some(source),
             Self::TexturedMesh { source, .. } => Some(source),
+            Self::BlendedMesh { source, .. } => Some(source),
             Self::Texture { source, .. } => Some(source),
             Self::MissingCachedTexture { .. } => None,
         }
@@ -1250,6 +2005,8 @@ pub enum TexturedStaticWorldRenderError3d {
     Factor(MeshRenderError),
     /// Sampled-texture phase failed.
     Textured(TexturedLitMeshRenderError),
+    /// Two-texture blended phase failed.
+    Blended(TexturedLitMeshRenderError),
 }
 
 impl fmt::Display for TexturedStaticWorldRenderError3d {
@@ -1259,6 +2016,9 @@ impl fmt::Display for TexturedStaticWorldRenderError3d {
             Self::Textured(source) => {
                 write!(formatter, "cannot draw textured static world: {source}")
             }
+            Self::Blended(source) => {
+                write!(formatter, "cannot draw blended static world: {source}")
+            }
         }
     }
 }
@@ -1267,7 +2027,7 @@ impl Error for TexturedStaticWorldRenderError3d {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Factor(source) => Some(source),
-            Self::Textured(source) => Some(source),
+            Self::Textured(source) | Self::Blended(source) => Some(source),
         }
     }
 }
@@ -1341,6 +2101,12 @@ mod tests {
         .with_tex_coords_0(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
         .expect("UV0")
         .with_material(MaterialIndex::new(material))
+    }
+
+    fn blended_triangle(material: usize) -> MeshPrimitive {
+        textured_triangle(material, 0.0)
+            .with_texture_blend_weights(vec![0.0, 0.35, 1.0])
+            .expect("blend weights")
     }
 
     #[test]
@@ -1428,5 +2194,85 @@ mod tests {
                 primitive: 0
             }
         ));
+    }
+
+    #[test]
+    fn textured_world_preserves_two_texture_blend_weights() {
+        let model = Model::new(
+            vec![Mesh::new(None, vec![blended_triangle(0)]).expect("mesh")],
+            vec![Material::new().with_name("nature/blendgrassdirt")],
+            Vec::new(),
+        )
+        .expect("model");
+        let grass = Arc::new(
+            StaticWorldTexture3d::rgba8_repeating("grass.vtf", 1, 1, vec![0, 255, 0, 255])
+                .expect("grass"),
+        );
+        let dirt = Arc::new(
+            StaticWorldTexture3d::rgba8_repeating("dirt.vtf", 1, 1, vec![96, 48, 0, 255])
+                .expect("dirt"),
+        );
+
+        let world = TexturedStaticWorld3d::from_model_with_materials(&model, |_, material| {
+            TexturedStaticWorldMaterial3d::blend_textures(
+                material,
+                Arc::clone(&grass),
+                Arc::clone(&dirt),
+            )
+        })
+        .expect("blended world");
+
+        assert_eq!(world.stats().textured_batches, 1);
+        assert_eq!(world.stats().blended_batches, 1);
+        assert_eq!(world.stats().batches(), 1);
+        let TexturedStaticWorldBatch3d::BlendTextures { primitive, .. } = &world.batches[0] else {
+            panic!("material must retain its two-texture pipeline");
+        };
+        assert_eq!(
+            primitive.texture_blend_weights(),
+            Some(&[0.0, 0.35, 1.0][..])
+        );
+    }
+
+    #[test]
+    fn blended_world_rejects_missing_blend_stream() {
+        let model = Model::new(
+            vec![Mesh::new(None, vec![textured_triangle(0, 0.0)]).expect("mesh")],
+            vec![Material::new().with_name("nature/blendgrassdirt")],
+            Vec::new(),
+        )
+        .expect("model");
+        let first =
+            Arc::new(StaticWorldTexture3d::rgba8("first.vtf", 1, 1, vec![255; 4]).expect("first"));
+        let second = Arc::new(
+            StaticWorldTexture3d::rgba8("second.vtf", 1, 1, vec![255; 4]).expect("second"),
+        );
+
+        let error = match TexturedStaticWorld3d::from_model_with_materials(&model, |_, material| {
+            TexturedStaticWorldMaterial3d::blend_textures(
+                material,
+                Arc::clone(&first),
+                Arc::clone(&second),
+            )
+        }) {
+            Ok(_) => panic!("blend stream is required"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            TexturedStaticWorldBuildError3d::MissingTextureBlendWeights {
+                mesh: 0,
+                primitive: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn blended_shader_interpolates_two_sampled_textures() {
+        assert!(BLENDED_STATIC_WORLD_WGSL.contains("textureSample(first_texture"));
+        assert!(BLENDED_STATIC_WORLD_WGSL.contains("textureSample(second_texture"));
+        assert!(BLENDED_STATIC_WORLD_WGSL.contains("mix(first, second"));
+        assert!(BLENDED_STATIC_WORLD_WGSL.contains("clamp(input.blend_weight, 0.0, 1.0)"));
     }
 }

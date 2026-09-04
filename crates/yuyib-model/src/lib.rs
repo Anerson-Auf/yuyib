@@ -309,6 +309,8 @@ pub struct MeshPrimitive {
     normals: Option<Vec<Vec3>>,
     tangents: Option<Vec<Vec4>>,
     tex_coords: [Option<Vec<Vec2>>; MAX_TEX_COORD_SETS],
+    #[serde(default)]
+    texture_blend_weights: Option<Vec<f32>>,
     material: Option<MaterialIndex>,
 }
 
@@ -330,6 +332,7 @@ impl MeshPrimitive {
             normals: None,
             tangents: None,
             tex_coords: std::array::from_fn(|_| None),
+            texture_blend_weights: None,
             material: None,
         };
         primitive.validate()?;
@@ -398,6 +401,26 @@ impl MeshPrimitive {
         Ok(self)
     }
 
+    /// Attaches one scalar texture-blend weight per position.
+    ///
+    /// Zero selects a material's first base-colour texture and one selects its
+    /// second texture. Intermediate values are linearly interpolated by a
+    /// compatible renderer. Keeping this stream explicit avoids overloading
+    /// vertex colour alpha with Source-style terrain/displacement semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MeshValidationError::AttributeCountMismatch`] when the count
+    /// differs from the position count.
+    pub fn with_texture_blend_weights(
+        mut self,
+        texture_blend_weights: Vec<f32>,
+    ) -> Result<Self, MeshValidationError> {
+        self.texture_blend_weights = Some(texture_blend_weights);
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Assigns the material slot used by this primitive.
     #[must_use]
     pub const fn with_material(mut self, material: MaterialIndex) -> Self {
@@ -441,6 +464,12 @@ impl MeshPrimitive {
         self.tex_coords
             .get(usize::from(set))
             .and_then(Option::as_deref)
+    }
+
+    /// Returns the optional per-vertex texture-blend stream.
+    #[must_use]
+    pub fn texture_blend_weights(&self) -> Option<&[f32]> {
+        self.texture_blend_weights.as_deref()
     }
 
     /// Returns the optional material slot.
@@ -543,6 +572,10 @@ impl MeshPrimitive {
                 tex_coords.as_ref().map(Vec::len),
             )?;
         }
+        self.validate_attribute(
+            AttributeKind::TextureBlendWeights,
+            self.texture_blend_weights.as_ref().map(Vec::len),
+        )?;
         Ok(())
     }
 
@@ -1252,6 +1285,8 @@ pub enum AttributeKind {
     Tangents,
     /// UV stream with its authored set number.
     TexCoords(u8),
+    /// Scalar texture-blend stream.
+    TextureBlendWeights,
 }
 impl fmt::Display for AttributeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1259,6 +1294,7 @@ impl fmt::Display for AttributeKind {
             Self::Normals => f.write_str("normals"),
             Self::Tangents => f.write_str("tangents"),
             Self::TexCoords(set) => write!(f, "tex_coords_{set}"),
+            Self::TextureBlendWeights => f.write_str("texture_blend_weights"),
         }
     }
 }
@@ -1422,6 +1458,37 @@ mod tests {
             MeshValidationError::AttributeCountMismatch {
                 attribute: AttributeKind::Normals,
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn primitive_retains_texture_blend_weights() {
+        let primitive = MeshPrimitive::new(vec![[0.0; 3]; 3], vec![0, 1, 2])
+            .expect("valid triangle")
+            .with_texture_blend_weights(vec![0.0, 0.35, 1.0])
+            .expect("one blend weight per position");
+
+        assert_eq!(
+            primitive.texture_blend_weights(),
+            Some(&[0.0, 0.35, 1.0][..])
+        );
+    }
+
+    #[test]
+    fn texture_blend_weights_must_match_positions() {
+        let primitive =
+            MeshPrimitive::new(vec![[0.0; 3]; 3], vec![0, 1, 2]).expect("valid triangle");
+        let error = primitive
+            .with_texture_blend_weights(vec![0.0, 1.0])
+            .expect_err("two blend weights do not match three positions");
+
+        assert!(matches!(
+            error,
+            MeshValidationError::AttributeCountMismatch {
+                attribute: AttributeKind::TextureBlendWeights,
+                expected: 3,
+                actual: 2,
             }
         ));
     }

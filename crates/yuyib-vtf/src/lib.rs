@@ -1,6 +1,6 @@
 //! Source 1 VTF decoding into renderer-neutral RGBA8 pixels.
 //!
-//! Supports ordinary 2D, one-frame VTF 7.0 through 7.5 files and the common
+//! Supports ordinary 2D, multi-frame VTF 7.0 through 7.5 files and the common
 //! RGBA8888, BGRA8888, BGR888, DXT1, DXT3 and DXT5 encodings.
 
 #![forbid(unsafe_code)]
@@ -19,7 +19,9 @@ pub struct VtfLimits {
     pub max_input_bytes: usize,
     pub max_dimension: u16,
     pub max_mip_count: u8,
+    pub max_frames: u16,
     pub max_decoded_bytes: usize,
+    pub max_decoded_total_bytes: usize,
 }
 impl Default for VtfLimits {
     fn default() -> Self {
@@ -27,7 +29,9 @@ impl Default for VtfLimits {
             max_input_bytes: 256 * 1024 * 1024,
             max_dimension: 16_384,
             max_mip_count: 15,
+            max_frames: 256,
             max_decoded_bytes: 256 * 1024 * 1024,
+            max_decoded_total_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -96,6 +100,60 @@ impl VtfImage {
     }
 }
 
+/// Every decoded largest-mip frame from one ordinary 2D VTF.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VtfFrames {
+    width: u16,
+    height: u16,
+    frames_rgba8: Vec<Vec<u8>>,
+    source_format: VtfHighResFormat,
+    mip_count: u8,
+}
+
+impl VtfFrames {
+    /// Largest-mip width shared by every frame.
+    #[must_use]
+    pub const fn width(&self) -> u16 {
+        self.width
+    }
+
+    /// Largest-mip height shared by every frame.
+    #[must_use]
+    pub const fn height(&self) -> u16 {
+        self.height
+    }
+
+    /// Number of decoded animation frames.
+    #[must_use]
+    pub fn frame_count(&self) -> usize {
+        self.frames_rgba8.len()
+    }
+
+    /// Returns one decoded largest-mip RGBA8 frame by zero-based index.
+    #[must_use]
+    pub fn frame_rgba8(&self, frame: usize) -> Option<&[u8]> {
+        self.frames_rgba8.get(frame).map(Vec::as_slice)
+    }
+
+    /// Returns all decoded largest-mip RGBA8 frames in source order.
+    #[must_use]
+    pub fn frames_rgba8(&self) -> &[Vec<u8>] {
+        &self.frames_rgba8
+    }
+
+    /// Original high-resolution encoding shared by every frame.
+    #[must_use]
+    pub const fn source_format(&self) -> VtfHighResFormat {
+        self.source_format
+    }
+
+    /// Number of encoded mip levels per frame.
+    #[must_use]
+    pub const fn mip_count(&self) -> u8 {
+        self.mip_count
+    }
+}
+
 /// Decodes a supported Source 1 VTF with default bounds.
 ///
 /// # Errors
@@ -108,6 +166,41 @@ pub fn decode(bytes: &[u8]) -> Result<VtfImage, VtfError> {
 /// # Errors
 /// Returns a structured error for malformed, over-budget or unsupported data.
 pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, VtfError> {
+    let frames = decode_frames_with_limits(bytes, limits)?;
+    let pixels = frames
+        .frames_rgba8
+        .into_iter()
+        .next()
+        .ok_or(VtfError::InvalidFrameCount { frame_count: 0 })?;
+    Ok(VtfImage {
+        width: frames.width,
+        height: frames.height,
+        pixels,
+        source_format: frames.source_format,
+        mip_count: frames.mip_count,
+    })
+}
+
+/// Decodes every largest-mip frame with default bounds.
+///
+/// Encoded smaller mips are validated and skipped without decoding. VTF stores
+/// every frame of a mip contiguously before advancing to the next larger mip.
+///
+/// # Errors
+/// Returns a structured error for malformed, over-budget or unsupported data.
+pub fn decode_frames(bytes: &[u8]) -> Result<VtfFrames, VtfError> {
+    decode_frames_with_limits(bytes, VtfLimits::default())
+}
+
+/// Decodes every largest-mip frame with explicit bounds.
+///
+/// # Errors
+/// Returns a structured error for malformed, over-budget or unsupported data.
+#[allow(
+    clippy::too_many_lines,
+    reason = "frame-aware VTF validation keeps header, mip-major layout and aggregate budgets in one auditable path"
+)]
+pub fn decode_frames_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfFrames, VtfError> {
     if bytes.len() > limits.max_input_bytes {
         return Err(VtfError::LimitExceeded {
             limit: VtfLimit::InputBytes,
@@ -126,8 +219,12 @@ pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, V
         });
     }
     let levels = mip_layout(header.width, header.height, header.mips, format)?;
+    let frame_count = usize::from(header.frames);
     let total = levels.iter().try_fold(0_usize, |sum, level| {
-        sum.checked_add(*level).ok_or(VtfError::Overflow {
+        let all_frames = level.checked_mul(frame_count).ok_or(VtfError::Overflow {
+            field: "mip frame payload bytes",
+        })?;
+        sum.checked_add(all_frames).ok_or(VtfError::Overflow {
             field: "mip payload bytes",
         })
     })?;
@@ -146,6 +243,15 @@ pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, V
             maximum: limits.max_decoded_bytes,
         });
     }
+    let decoded_total = decoded.checked_mul(frame_count).ok_or(VtfError::Overflow {
+        field: "decoded total pixel bytes",
+    })?;
+    if decoded_total > limits.max_decoded_total_bytes {
+        return Err(VtfError::LimitExceeded {
+            limit: VtfLimit::DecodedTotalBytes,
+            maximum: limits.max_decoded_total_bytes,
+        });
+    }
     let start = header.high_res_offset(bytes, header_size)?;
     let available = bytes
         .len()
@@ -160,29 +266,54 @@ pub fn decode_with_limits(bytes: &[u8], limits: VtfLimits) -> Result<VtfImage, V
             available,
         });
     }
+    let largest_mip_all_frames = high_size
+        .checked_mul(frame_count)
+        .ok_or(VtfError::Overflow {
+            field: "largest mip frame payload bytes",
+        })?;
     let high_start = start
-        .checked_add(total.checked_sub(high_size).ok_or(VtfError::Overflow {
-            field: "high-res mip offset",
-        })?)
+        .checked_add(
+            total
+                .checked_sub(largest_mip_all_frames)
+                .ok_or(VtfError::Overflow {
+                    field: "high-res mip offset",
+                })?,
+        )
         .ok_or(VtfError::Overflow {
             field: "high-res mip offset",
         })?;
-    let source =
-        bytes
-            .get(high_start..high_start + high_size)
+    let mut frames_rgba8 = Vec::with_capacity(frame_count);
+    for frame in 0..frame_count {
+        let frame_offset = high_size.checked_mul(frame).ok_or(VtfError::Overflow {
+            field: "largest mip frame offset",
+        })?;
+        let frame_start = high_start
+            .checked_add(frame_offset)
+            .ok_or(VtfError::Overflow {
+                field: "largest mip frame offset",
+            })?;
+        let frame_end = frame_start
+            .checked_add(high_size)
+            .ok_or(VtfError::Overflow {
+                field: "largest mip frame end",
+            })?;
+        let source = bytes
+            .get(frame_start..frame_end)
             .ok_or(VtfError::TruncatedPayload {
                 expected: total,
                 available,
             })?;
-    Ok(VtfImage {
-        width: header.width,
-        height: header.height,
-        pixels: decode_level(
+        frames_rgba8.push(decode_level(
             source,
             usize::from(header.width),
             usize::from(header.height),
             format,
-        )?,
+        )?);
+    }
+    Ok(VtfFrames {
+        width: header.width,
+        height: header.height,
+        frames_rgba8,
         source_format: format,
         mip_count: header.mips,
     })
@@ -253,9 +384,15 @@ impl Header {
                 height: self.height,
             });
         }
-        if self.frames != 1 {
-            return Err(VtfError::UnsupportedFrames {
-                frames: self.frames,
+        if self.frames == 0 {
+            return Err(VtfError::InvalidFrameCount {
+                frame_count: self.frames,
+            });
+        }
+        if self.frames > limits.max_frames {
+            return Err(VtfError::LimitExceeded {
+                limit: VtfLimit::Frames,
+                maximum: usize::from(limits.max_frames),
             });
         }
         if self.depth != 1 {
@@ -529,19 +666,49 @@ fn i32_at(bytes: &[u8], at: usize) -> Result<i32, VtfError> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VtfError {
     InvalidSignature,
-    TruncatedHeader { available: usize },
-    UnsupportedVersion { major: u32, minor: u32 },
-    InvalidHeaderSize { actual: u32 },
-    InvalidDimensions { width: u16, height: u16 },
-    UnsupportedFrames { frames: u16 },
-    UnsupportedDepth { depth: u16 },
-    InvalidMipCount { mip_count: u8 },
-    UnsupportedHighResFormat { format: i32 },
+    TruncatedHeader {
+        available: usize,
+    },
+    UnsupportedVersion {
+        major: u32,
+        minor: u32,
+    },
+    InvalidHeaderSize {
+        actual: u32,
+    },
+    InvalidDimensions {
+        width: u16,
+        height: u16,
+    },
+    /// Retained for source compatibility with the former one-frame decoder.
+    UnsupportedFrames {
+        frames: u16,
+    },
+    InvalidFrameCount {
+        frame_count: u16,
+    },
+    UnsupportedDepth {
+        depth: u16,
+    },
+    InvalidMipCount {
+        mip_count: u8,
+    },
+    UnsupportedHighResFormat {
+        format: i32,
+    },
     MissingHighResResource,
     InvalidResourceDirectory,
-    TruncatedPayload { expected: usize, available: usize },
-    Overflow { field: &'static str },
-    LimitExceeded { limit: VtfLimit, maximum: usize },
+    TruncatedPayload {
+        expected: usize,
+        available: usize,
+    },
+    Overflow {
+        field: &'static str,
+    },
+    LimitExceeded {
+        limit: VtfLimit,
+        maximum: usize,
+    },
 }
 impl fmt::Display for VtfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -553,7 +720,9 @@ impl Error for VtfError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VtfLimit {
     InputBytes,
+    Frames,
     DecodedBytes,
+    DecodedTotalBytes,
 }
 #[cfg(test)]
 mod tests {
@@ -572,6 +741,20 @@ mod tests {
         bytes[57..61].copy_from_slice(&(-1_i32).to_le_bytes());
         bytes[63..65].copy_from_slice(&1_u16.to_le_bytes());
         bytes.extend_from_slice(pixels);
+        bytes
+    }
+
+    fn multi_frame_vtf(
+        format: i32,
+        w: u16,
+        h: u16,
+        frames: u16,
+        mips: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut bytes = vtf(format, w, h, payload);
+        bytes[24..26].copy_from_slice(&frames.to_le_bytes());
+        bytes[56] = mips;
         bytes
     }
     #[test]
@@ -598,6 +781,89 @@ mod tests {
         assert_eq!(
             &decode(&vtf(15, 4, 4, &dxt5)).expect("DXT5").pixels_rgba8()[..4],
             [255, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn decodes_largest_mip_frames_from_mip_major_payload() {
+        let small_frame_0 = [255, 0, 0];
+        let small_frame_1 = [0, 255, 255];
+        let large_frame_0 = [0, 0, 255].repeat(4);
+        let large_frame_1 = [0, 255, 0].repeat(4);
+        let payload = [
+            small_frame_0.as_slice(),
+            small_frame_1.as_slice(),
+            large_frame_0.as_slice(),
+            large_frame_1.as_slice(),
+        ]
+        .concat();
+        let bytes = multi_frame_vtf(3, 2, 2, 2, 2, &payload);
+
+        let frames = decode_frames(&bytes).expect("two-frame BGR888 VTF");
+
+        assert_eq!(frames.width(), 2);
+        assert_eq!(frames.height(), 2);
+        assert_eq!(frames.frame_count(), 2);
+        assert_eq!(frames.mip_count(), 2);
+        assert_eq!(frames.source_format(), VtfHighResFormat::Bgr888);
+        assert_eq!(
+            &frames.frame_rgba8(0).expect("frame zero")[..4],
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            &frames.frame_rgba8(1).expect("frame one")[..4],
+            [0, 255, 0, 255]
+        );
+        assert!(frames.frame_rgba8(2).is_none());
+
+        let compatible = decode(&bytes).expect("legacy frame-zero API");
+        assert_eq!(&compatible.pixels_rgba8()[..4], [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn multi_frame_decode_enforces_frame_and_total_output_budgets() {
+        let payload = [[0, 0, 255].repeat(4), [0, 255, 0].repeat(4)].concat();
+        let bytes = multi_frame_vtf(3, 2, 2, 2, 1, &payload);
+
+        let frame_error = decode_frames_with_limits(
+            &bytes,
+            VtfLimits {
+                max_frames: 1,
+                ..VtfLimits::default()
+            },
+        )
+        .expect_err("frame count must be bounded");
+        assert_eq!(
+            frame_error,
+            VtfError::LimitExceeded {
+                limit: VtfLimit::Frames,
+                maximum: 1,
+            }
+        );
+
+        let total_error = decode_frames_with_limits(
+            &bytes,
+            VtfLimits {
+                max_decoded_total_bytes: 31,
+                ..VtfLimits::default()
+            },
+        )
+        .expect_err("aggregate decoded bytes must be bounded");
+        assert_eq!(
+            total_error,
+            VtfError::LimitExceeded {
+                limit: VtfLimit::DecodedTotalBytes,
+                maximum: 31,
+            }
+        );
+    }
+
+    #[test]
+    fn zero_frame_header_is_rejected() {
+        let bytes = multi_frame_vtf(3, 1, 1, 0, 1, &[]);
+        assert_eq!(
+            decode_frames(&bytes),
+            Err(VtfError::InvalidFrameCount { frame_count: 0 })
         );
     }
     #[test]

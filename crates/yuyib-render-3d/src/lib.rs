@@ -66,13 +66,12 @@ mod scene;
 mod shadow;
 mod skybox;
 mod ssao;
+mod source1_water;
 mod static_world;
 
 pub use equirect::{EquirectEnvironmentError, PreparedEquirectEnvironment3d};
 pub use ggx_cook::{GgxCookConfig, GgxCookError, cook_ggx_specular_ibl};
-pub use ibl::{
-    GpuSpecularIbl3d, PreparedSpecularIbl3d, SPECULAR_IBL_FACE_COUNT, SpecularIblError,
-};
+pub use ibl::{GpuSpecularIbl3d, PreparedSpecularIbl3d, SPECULAR_IBL_FACE_COUNT, SpecularIblError};
 pub use loading::{
     GltfAnimationPreviewGpu, GltfAnimationPreviewGpuError, GltfSceneColliderLayer3d,
     GltfSceneColliderLayerId3d, GltfSceneCollisionConfig3d, GltfSceneCollisionConfigError3d,
@@ -99,13 +98,20 @@ pub use shadow::{
     DirectionalShadowError, DirectionalShadowPolicy, FactorShadowCasterDraw, GpuDirectionalShadow,
     TexturedShadowCasterDraw, shadow_coverage_contains, shadow_texel_world_size,
 };
-pub use skybox::{
-    GpuSkybox3d, PreparedSkybox3d, SkyboxError, SkyboxRenderError, SkyboxRenderer3d,
-};
+pub use skybox::{GpuSkybox3d, PreparedSkybox3d, SkyboxError, SkyboxRenderError, SkyboxRenderer3d};
 pub use ssao::{SsaoPolicy, SsaoPolicyError};
+pub use source1_water::{
+    SOURCE1_WATER_DEFAULT_BATCH_CAPACITY, Source1WaterBatch3d, Source1WaterBatchError3d,
+    Source1WaterBuildStats3d, Source1WaterDrawStats3d, Source1WaterLimits3d,
+    Source1WaterMaterial3d, Source1WaterMaterialError3d, Source1WaterRenderError3d,
+    Source1WaterRenderer3d, Source1WaterRendererCreateError3d, Source1WaterTexture3d,
+    Source1WaterTextureError3d, Source1WaterUploadError3d, Source1WaterUploadStats3d,
+    Source1WaterWorld3d, Source1WaterWorldBuildError3d,
+};
 pub use static_world::{
-    StaticWorld3d, StaticWorldBatch3d, StaticWorldBuildError3d, StaticWorldBuildStats3d,
-    StaticWorldDrawStats3d, StaticWorldRenderer3d, StaticWorldTexture3d, StaticWorldTextureError3d,
+    BlendedStaticWorldMeshUploadError3d, StaticWorld3d, StaticWorldBatch3d,
+    StaticWorldBuildError3d, StaticWorldBuildStats3d, StaticWorldDrawStats3d,
+    StaticWorldRenderer3d, StaticWorldTexture3d, StaticWorldTextureError3d,
     StaticWorldUploadError3d, TexturedStaticWorld3d, TexturedStaticWorldBuildError3d,
     TexturedStaticWorldBuildStats3d, TexturedStaticWorldMaterial3d,
     TexturedStaticWorldRenderError3d, TexturedStaticWorldRenderer3d,
@@ -816,23 +822,19 @@ impl MeshRenderer3d {
 
         let mut triangles = 0_u32;
         let draw_calls = draws.len() as u32;
-        frame.with_surface_pass_with_depth(
-            wgpu::LoadOp::Load,
-            depth_load.operation(),
-            |pass| {
-                pass.set_pipeline(&self.double_sided_pipeline);
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                for (index, (mesh, _, _)) in draws.iter().enumerate() {
-                    let offset = u32::try_from(index as u64 * self.instance_stride)
-                        .expect("unlit instance dynamic offset fits u32");
-                    pass.set_bind_group(1, &self.instance_bind_group, &[offset]);
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-                    triangles = triangles.saturating_add(mesh.index_count / 3);
-                }
-            },
-        );
+        frame.with_surface_pass_with_depth(wgpu::LoadOp::Load, depth_load.operation(), |pass| {
+            pass.set_pipeline(&self.double_sided_pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            for (index, (mesh, _, _)) in draws.iter().enumerate() {
+                let offset = u32::try_from(index as u64 * self.instance_stride)
+                    .expect("unlit instance dynamic offset fits u32");
+                pass.set_bind_group(1, &self.instance_bind_group, &[offset]);
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                triangles = triangles.saturating_add(mesh.index_count / 3);
+            }
+        });
         Ok(MeshDrawStats {
             triangles,
             draw_calls,
@@ -3111,8 +3113,10 @@ fn character_base_color(material: Option<&Material>) -> CharacterBaseColor {
     // rely on specular/IBL for the visible look. The unlit/Lambert character path
     // has no specular term, so black diffuse paints opaque silhouettes. Restore a
     // neutral albedo and keep the authored alpha so blend cards stay transparent.
-    let luma = 0.2126_f32
-        .mul_add(surface.factor[0], 0.7152_f32.mul_add(surface.factor[1], 0.0722 * surface.factor[2]));
+    let luma = 0.2126_f32.mul_add(
+        surface.factor[0],
+        0.7152_f32.mul_add(surface.factor[1], 0.0722 * surface.factor[2]),
+    );
     if luma < 0.04 {
         surface.factor[0] = 1.0;
         surface.factor[1] = 1.0;
@@ -3548,13 +3552,8 @@ impl TexturedSkeletalSceneRenderer3d {
 
     fn draw_lighting(&self) -> LambertLighting3d {
         self.lighting.unwrap_or_else(|| {
-            LambertLighting3d::artistic(
-                [0.25, -1.0, -0.5],
-                [1.0, 1.0, 1.0],
-                0.0,
-                self.ambient_fill,
-            )
-            .unwrap_or_else(|_| LambertLighting3d::default())
+            LambertLighting3d::artistic([0.25, -1.0, -0.5], [1.0, 1.0, 1.0], 0.0, self.ambient_fill)
+                .unwrap_or_else(|_| LambertLighting3d::default())
         })
     }
 
@@ -6662,9 +6661,8 @@ const TEXTURED_SKINNED_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> =
             },
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
-                offset: (2 * size_of::<[f32; 3]>()
-                    + size_of::<[f32; 2]>()
-                    + size_of::<[u16; 4]>()) as u64,
+                offset: (2 * size_of::<[f32; 3]>() + size_of::<[f32; 2]>() + size_of::<[u16; 4]>())
+                    as u64,
                 shader_location: 4,
             },
         ],
@@ -7856,9 +7854,8 @@ impl TexturedLitMeshRenderer3d {
         let draw_buffer = uniform_buffer(
             device,
             "yuyib textured Lambert draw",
-            draw_uniform_stride.saturating_mul(
-                u64::try_from(batch_capacity).expect("capacity fits u64"),
-            ),
+            draw_uniform_stride
+                .saturating_mul(u64::try_from(batch_capacity).expect("capacity fits u64")),
         );
         let camera_bind_group = uniform_bind_group(
             device,
@@ -10025,12 +10022,8 @@ mod tests {
     #[allow(clippy::float_cmp)] // Restored albedo keeps authored alpha exactly.
     fn character_surface_restores_near_black_specular_glossiness_diffuse_rgb() {
         let material = Material::new().with_specular_glossiness(
-            yuyib_model::SpecularGlossinessMaterial::new(
-                [0.0, 0.0, 0.0, 0.6],
-                [1.0; 3],
-                1.0,
-            )
-            .with_diffuse_texture(TextureBinding::new(ModelTextureIndex::new(5), 0)),
+            yuyib_model::SpecularGlossinessMaterial::new([0.0, 0.0, 0.0, 0.6], [1.0; 3], 1.0)
+                .with_diffuse_texture(TextureBinding::new(ModelTextureIndex::new(5), 0)),
         );
 
         let surface = character_base_color(Some(&material));
@@ -10512,12 +10505,9 @@ mod tests {
         .expect("valid key");
         assert_eq!(lighting.light().illuminance_lux, 0.0);
         let exposure = [
-            lighting.ambient()[0]
-                + lighting.light().color[0] * lighting.light().illuminance_lux,
-            lighting.ambient()[1]
-                + lighting.light().color[1] * lighting.light().illuminance_lux,
-            lighting.ambient()[2]
-                + lighting.light().color[2] * lighting.light().illuminance_lux,
+            lighting.ambient()[0] + lighting.light().color[0] * lighting.light().illuminance_lux,
+            lighting.ambient()[1] + lighting.light().color[1] * lighting.light().illuminance_lux,
+            lighting.ambient()[2] + lighting.light().color[2] * lighting.light().illuminance_lux,
         ];
         assert_eq!(exposure, lighting.ambient());
         assert_eq!(exposure, [0.92, 0.92, 0.94]);
