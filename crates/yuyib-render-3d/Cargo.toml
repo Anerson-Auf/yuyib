@@ -22,5 +22,8 @@ yuyib-render-texture = { path = "../yuyib-render-texture", version = "0.1.0" }
 yuyib-scene = { path = "../yuyib-scene", version = "0.1.0" }
 yuyib-tasks = { path = "../yuyib-tasks", version = "0.1.0" }
 
+[dev-dependencies]
+naga = { version = "30.0.0", features = ["wgsl-in"] }
+
 [lints]
 workspace = true

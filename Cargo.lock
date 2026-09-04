@@ -6103,6 +6103,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "image",
+ "naga",
  "yuyib-2d",
  "yuyib-assets",
  "yuyib-ecs",

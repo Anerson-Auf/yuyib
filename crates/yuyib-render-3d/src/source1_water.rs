@@ -2220,7 +2220,6 @@ struct VertexOutput {
 
 @fragment fn fs_main(
     input: VertexOutput,
-    @builtin(position) fragment_position: vec4<f32>,
     @builtin(front_facing) front_facing: bool,
 ) -> @location(0) vec4<f32> {
     let time = camera.position_time.w;
@@ -2263,7 +2262,7 @@ struct VertexOutput {
     let has_reflection = camera.viewport_inverse_scene.w > 0.5;
     if has_refraction {
         let screen_uv = clamp(
-            fragment_position.xy * camera.viewport_inverse_scene.xy,
+            input.clip_position.xy * camera.viewport_inverse_scene.xy,
             vec2<f32>(0.0),
             vec2<f32>(1.0),
         );
@@ -2590,7 +2589,26 @@ mod tests {
     fn scene_shader_samples_non_aliasing_refraction_and_reflection() {
         assert!(SOURCE1_WATER_WGSL.contains("@group(3) @binding(0) var refraction_texture"));
         assert!(SOURCE1_WATER_WGSL.contains("@group(3) @binding(1) var reflection_texture"));
+        assert_eq!(SOURCE1_WATER_WGSL.matches("@builtin(position)").count(), 1);
+        assert!(SOURCE1_WATER_WGSL.contains("input.clip_position.xy"));
         assert!(SOURCE1_WATER_WGSL.contains("return vec4<f32>(scene_color, 1.0)"));
         assert!(SOURCE1_WATER_PRESENT_WGSL.contains("textureSample(source_texture"));
+    }
+
+    #[test]
+    fn water_shaders_pass_wgsl_validation() {
+        for (label, source) in [
+            ("water", SOURCE1_WATER_WGSL),
+            ("present", SOURCE1_WATER_PRESENT_WGSL),
+        ] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{label} WGSL failed to parse: {error}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{label} WGSL failed validation: {error}"));
+        }
     }
 }
