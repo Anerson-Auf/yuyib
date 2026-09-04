@@ -2446,6 +2446,10 @@ impl ApplicationHost {
         let Some(control) = control else {
             return true;
         };
+        // Runtime requests are desired state, not one-shot native calls. The
+        // OS may drop an active grab while the window is inactive, so the
+        // latest request must remain available for focus restoration.
+        self.application.cursor_control = control;
         let Some(window) = &self.window else {
             return true;
         };
@@ -2455,6 +2459,14 @@ impl ApplicationHost {
         }
         true
     }
+}
+
+fn cursor_control_to_restore_on_focus_gain(
+    event: &WindowEvent,
+    requested: Option<CursorControl>,
+    desired: CursorControl,
+) -> Option<CursorControl> {
+    (matches!(event, WindowEvent::Focused(true)) && requested.is_none()).then_some(desired)
 }
 
 impl ApplicationHandler for ApplicationHost {
@@ -2518,6 +2530,19 @@ impl ApplicationHandler for ApplicationHost {
     ) {
         let context = self.dispatch_window_event_hook(&event);
         if !self.apply_cursor_request(event_loop, &context) {
+            return;
+        }
+        // The initial grab is requested immediately after window creation,
+        // before Windows necessarily grants focus. Windows also releases
+        // ClipCursor when activation is lost. Reapplying the remembered
+        // desired state on focus gain closes both gaps. An explicit request
+        // from the event callback already applied the correct state above.
+        if let Some(control) = cursor_control_to_restore_on_focus_gain(
+            &event,
+            context.requested_cursor_control(),
+            self.application.cursor_control,
+        ) && !self.apply_cursor_control(event_loop, Some(control))
+        {
             return;
         }
         if context.exit_requested() {
@@ -2864,6 +2889,34 @@ mod tests {
             Some(CursorControl::Released)
         );
         assert_eq!(host.application.cursor_control, CursorControl::LockedHidden);
+    }
+
+    #[test]
+    fn focus_gain_restores_desired_cursor_control_without_overriding_a_callback() {
+        assert_eq!(
+            super::cursor_control_to_restore_on_focus_gain(
+                &WindowEvent::Focused(true),
+                None,
+                CursorControl::LockedHidden,
+            ),
+            Some(CursorControl::LockedHidden)
+        );
+        assert_eq!(
+            super::cursor_control_to_restore_on_focus_gain(
+                &WindowEvent::Focused(true),
+                Some(CursorControl::Released),
+                CursorControl::LockedHidden,
+            ),
+            None
+        );
+        assert_eq!(
+            super::cursor_control_to_restore_on_focus_gain(
+                &WindowEvent::Focused(false),
+                None,
+                CursorControl::LockedHidden,
+            ),
+            None
+        );
     }
 
     #[cfg(feature = "webview")]

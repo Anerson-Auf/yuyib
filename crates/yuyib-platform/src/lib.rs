@@ -8,6 +8,8 @@
 use std::sync::Arc;
 
 pub use winit;
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
 use winit::{
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     error::OsError,
@@ -15,8 +17,6 @@ use winit::{
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes},
 };
-#[cfg(target_os = "windows")]
-use winit::platform::windows::WindowAttributesExtWindows;
 
 /// Desired mouse-cursor behaviour for an application window.
 ///
@@ -362,6 +362,19 @@ impl Window {
                 Ok(CursorControlOutcome::Released)
             }
             CursorControl::LockedHidden => {
+                // On Windows, winit implements `Locked` with a one-pixel
+                // `ClipCursor` rectangle at the current desktop cursor
+                // position. The initial request can arrive before the newly
+                // created window receives focus, leaving that position
+                // outside the client area when the grab is restored. Move to
+                // a known client-space point first so a successful lock can
+                // never strand the hidden cursor outside the game window.
+                let size = self.inner.inner_size();
+                let center = PhysicalPosition::new(
+                    f64::from(size.width) * 0.5,
+                    f64::from(size.height) * 0.5,
+                );
+                let _ = self.inner.set_cursor_position(center);
                 let grab = match self.inner.set_cursor_grab(CursorGrabMode::Locked) {
                     Ok(()) => CursorGrab::Locked,
                     Err(_) => self
@@ -428,7 +441,7 @@ impl Window {
     ///
     /// Unlike a `WS_CHILD` surface, this is composited by DWM with the owned
     /// window below it. It is intended for a windowed `WebView2` HUD over a
-    /// native WGPU game surface: transparent WebView pixels cannot reveal a
+    /// native WGPU game surface: transparent `WebView` pixels cannot reveal a
     /// sibling child HWND reliably, while an owned transparent top-level
     /// overlay can. Windows also keeps the overlay above its owner, hides it
     /// when the owner is minimized, and destroys it with the owner.
