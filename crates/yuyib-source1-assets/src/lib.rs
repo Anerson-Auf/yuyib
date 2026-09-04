@@ -96,6 +96,22 @@ impl Source1MaterialResolver {
         self.resolve_vmt_file(&path, 0)
     }
 
+    /// Resolves and decodes one authored `$basetexture` reference directly.
+    ///
+    /// This is used by container formats such as BSP when the VMT is embedded
+    /// in the container but its referenced VTF is supplied by the declared
+    /// external texture root.
+    ///
+    /// # Errors
+    ///
+    /// Returns structured path, I/O or VTF decode failures.
+    pub fn resolve_texture_reference(
+        &self,
+        authored: &str,
+    ) -> Result<Source1BaseTexture, Source1AssetError> {
+        self.resolve_texture_authored(authored)
+    }
+
     fn resolve_vmt_file(
         &self,
         path: &Path,

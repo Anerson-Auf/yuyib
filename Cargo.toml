@@ -40,6 +40,8 @@ members = [
     "crates/yuyib-vmf",
     "crates/yuyib-vmf-model",
     "crates/yuyib-source1",
+    "crates/yuyib-bsp",
+    "crates/yuyib-source1-bsp",
     "crates/yuyib-vmt",
     "crates/yuyib-vtf",
     "crates/yuyib-ui",

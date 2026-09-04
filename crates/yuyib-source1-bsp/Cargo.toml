@@ -1,0 +1,20 @@
+[package]
+name = "yuyib-source1-bsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "High-level Source 1 BSP render, material, entity and collision pipeline for Yuyib."
+
+[dependencies]
+yuyib-bsp = { path = "../yuyib-bsp", version = "0.1.0" }
+yuyib-model = { path = "../yuyib-model", version = "0.1.0" }
+yuyib-physics = { path = "../yuyib-physics", version = "0.1.0" }
+yuyib-render-3d = { path = "../yuyib-render-3d", version = "0.1.0" }
+yuyib-source1-assets = { path = "../yuyib-source1-assets", version = "0.1.0" }
+yuyib-vmt = { path = "../yuyib-vmt", version = "0.1.0" }
+yuyib-vtf = { path = "../yuyib-vtf", version = "0.1.0" }
+
+[lints]
+workspace = true

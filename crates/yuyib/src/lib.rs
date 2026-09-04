@@ -68,9 +68,13 @@ pub use yuyib_scene as scene;
 #[cfg(feature = "three-d")]
 pub use yuyib_shader as shader;
 #[cfg(feature = "source1")]
+pub use yuyib_bsp as bsp;
+#[cfg(feature = "source1")]
 pub use yuyib_source1 as source1;
 #[cfg(feature = "source1")]
 pub use yuyib_source1_assets as source1_assets;
+#[cfg(feature = "source1")]
+pub use yuyib_source1_bsp as source1_bsp;
 #[cfg(feature = "source1")]
 pub use yuyib_source1_scene as source1_scene;
 #[cfg(feature = "tasks")]
@@ -322,6 +326,12 @@ pub mod prelude {
     };
     #[cfg(feature = "three-d")]
     pub use crate::scene::{SceneSelection, SpawnedScene, spawn_scene};
+    #[cfg(feature = "source1")]
+    pub use crate::source1_bsp::{
+        LoadedSource1Bsp, Source1BspImportError, Source1BspImportOptions,
+        Source1BspImportReport, Source1BspLoader, Source1BspMaterialDiagnostic,
+        source_position_to_yuyib, source_vector_to_yuyib,
+    };
     #[cfg(feature = "three-d")]
     pub use crate::shader::{ShaderProgram, ShaderPrototype, ShaderSource};
     #[cfg(feature = "tasks")]
