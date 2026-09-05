@@ -1342,6 +1342,7 @@ pub struct GltfAnimationPreviewGpu {
     bindings: Option<ModelTextureBindings>,
     renderer: Option<TexturedSkeletalSceneRenderer3d>,
     lighting: Option<crate::LambertLighting3d>,
+    cel_shading: Option<crate::CelShading3d>,
 }
 
 impl GltfAnimationPreviewGpu {
@@ -1355,6 +1356,7 @@ impl GltfAnimationPreviewGpu {
             bindings: None,
             renderer: None,
             lighting: None,
+            cel_shading: None,
         }
     }
 
@@ -1362,6 +1364,13 @@ impl GltfAnimationPreviewGpu {
     #[must_use]
     pub const fn with_lighting(mut self, lighting: crate::LambertLighting3d) -> Self {
         self.lighting = Some(lighting);
+        self
+    }
+
+    /// Enables material-local banded lighting when the skeletal renderer is built.
+    #[must_use]
+    pub const fn with_cel_shading(mut self, cel_shading: crate::CelShading3d) -> Self {
+        self.cel_shading = Some(cel_shading);
         self
     }
 
@@ -1412,6 +1421,9 @@ impl GltfAnimationPreviewGpu {
                 .map_err(GltfAnimationPreviewGpuError::Upload)?;
             if let Some(lighting) = self.lighting {
                 renderer = renderer.with_lighting(lighting);
+            }
+            if let Some(cel_shading) = self.cel_shading {
+                renderer = renderer.with_cel_shading(cel_shading);
             }
             self.renderer = Some(renderer);
         }
@@ -1483,6 +1495,36 @@ impl GltfAnimationPreviewGpu {
         depth_load: DepthLoad,
         visibility: &SkeletalVisibilityMask3d,
     ) -> Result<(), GltfAnimationPreviewGpuError> {
+        self.draw_with_root_transform_visibility_and_shadow(
+            frame,
+            camera,
+            scene,
+            pose,
+            root_transform,
+            depth_load,
+            visibility,
+            None,
+        )
+    }
+
+    /// Like [`Self::draw_with_root_transform_and_visibility`], optionally
+    /// receiving a directional shadow map.
+    ///
+    /// # Errors
+    ///
+    /// Returns when GPU residency is incomplete or a draw fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_root_transform_visibility_and_shadow(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        scene: &ImportedScene,
+        pose: &AnimationSnapshot,
+        root_transform: [f32; 16],
+        depth_load: DepthLoad,
+        visibility: &SkeletalVisibilityMask3d,
+        shadow: Option<&crate::GpuDirectionalShadow>,
+    ) -> Result<(), GltfAnimationPreviewGpuError> {
         let renderer = self
             .renderer
             .as_ref()
@@ -1492,7 +1534,7 @@ impl GltfAnimationPreviewGpu {
             .as_ref()
             .ok_or(GltfAnimationPreviewGpuError::NotReady)?;
         renderer
-            .draw_with_root_transform_depth_load_and_visibility(
+            .draw_with_root_transform_depth_load_visibility_and_shadow(
                 frame,
                 camera,
                 scene,
@@ -1504,6 +1546,7 @@ impl GltfAnimationPreviewGpu {
                 root_transform,
                 depth_load,
                 visibility,
+                shadow,
             )
             .map_err(GltfAnimationPreviewGpuError::Draw)?;
         Ok(())
@@ -1514,6 +1557,22 @@ impl GltfAnimationPreviewGpu {
         self.lighting = Some(lighting);
         if let Some(renderer) = self.renderer.take() {
             self.renderer = Some(renderer.with_lighting(lighting));
+        }
+    }
+
+    /// Replaces cel-shading after GPU residency.
+    pub fn set_cel_shading(&mut self, cel_shading: crate::CelShading3d) {
+        self.cel_shading = Some(cel_shading);
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_cel_shading(Some(cel_shading));
+        }
+    }
+
+    /// Disables cel-shading after GPU residency.
+    pub fn clear_cel_shading(&mut self) {
+        self.cel_shading = None;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_cel_shading(None);
         }
     }
 }

@@ -17,9 +17,10 @@ use yuyib_model_assets::{
 };
 use yuyib_render::RenderFrame;
 use yuyib_render_3d::{
-    Camera3d, DepthLoad, GpuTexturedSkinnedMesh, LambertLighting3d, ModelUploadBudget3d,
-    SkinVertex3d, TexturedSkinnedMaterial3d, TexturedSkinnedMeshRenderError,
-    TexturedSkinnedMeshRenderer3d, TexturedSkinnedMeshUploadError,
+    Camera3d, CelShading3d, DepthLoad, GpuDirectionalShadow, GpuTexturedSkinnedMesh,
+    LambertLighting3d, ModelUploadBudget3d, SkinVertex3d, TexturedSkinnedMaterial3d,
+    TexturedSkinnedMeshRenderError, TexturedSkinnedMeshRenderer3d,
+    TexturedSkinnedMeshUploadError,
 };
 use yuyib_render_texture::TextureCache;
 use yuyib_source1::{
@@ -39,6 +40,7 @@ pub struct Source1AnimatedModel3d {
     meshes: Vec<GpuTexturedSkinnedMesh>,
     next_mesh: usize,
     lighting: LambertLighting3d,
+    cel_shading: Option<CelShading3d>,
 }
 
 impl Source1AnimatedModel3d {
@@ -82,6 +84,7 @@ impl Source1AnimatedModel3d {
             meshes: Vec::new(),
             next_mesh: 0,
             lighting: LambertLighting3d::default(),
+            cel_shading: None,
         })
     }
 
@@ -90,6 +93,23 @@ impl Source1AnimatedModel3d {
     pub const fn with_lighting(mut self, lighting: LambertLighting3d) -> Self {
         self.lighting = lighting;
         self
+    }
+
+    /// Enables material-local banded lighting for this StudioModel.
+    #[must_use]
+    pub const fn with_cel_shading(mut self, cel_shading: CelShading3d) -> Self {
+        self.cel_shading = Some(cel_shading);
+        self
+    }
+
+    /// Enables banded lighting after construction.
+    pub const fn set_cel_shading(&mut self, cel_shading: CelShading3d) {
+        self.cel_shading = Some(cel_shading);
+    }
+
+    /// Disables banded lighting after construction.
+    pub const fn clear_cel_shading(&mut self) {
+        self.cel_shading = None;
     }
 
     /// Loaded Source model and animation catalog.
@@ -298,6 +318,22 @@ impl Source1AnimatedModel3d {
         model_matrix: [f32; 16],
         depth_load: DepthLoad,
     ) -> Result<(), Source1AnimatedModelError> {
+        self.draw_with_shadow(frame, camera, model_matrix, depth_load, None)
+    }
+
+    /// Draws opaque/masked primitives first and blended materials afterwards,
+    /// optionally receiving a directional shadow map.
+    ///
+    /// # Errors
+    /// Returns until residency is complete, or for invalid material/texture/palette data.
+    pub fn draw_with_shadow(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        model_matrix: [f32; 16],
+        depth_load: DepthLoad,
+        shadow: Option<&GpuDirectionalShadow>,
+    ) -> Result<(), Source1AnimatedModelError> {
         if !self.is_ready() {
             return Err(Source1AnimatedModelError::NotReady);
         }
@@ -332,11 +368,17 @@ impl Source1AnimatedModel3d {
                     .map(yuyib_model::TextureBinding::texture)
                     .ok_or(Source1AnimatedModelError::MissingBaseTexture { mesh: mesh_index })?;
                 let texture = self.texture(texture_index)?;
-                let draw_material =
+                let mut draw_material =
                     TexturedSkinnedMaterial3d::new(texture, material.base_color_factor())
                         .with_double_sided(material.double_sided())
                         .with_alpha_mode(material.alpha_mode())
                         .with_lighting(self.lighting);
+                if let Some(cel_shading) = self.cel_shading {
+                    draw_material = draw_material.with_cel_shading(cel_shading);
+                }
+                if let Some(shadow) = shadow {
+                    draw_material = draw_material.with_shadow(shadow);
+                }
                 let renderer = self
                     .renderer
                     .as_ref()

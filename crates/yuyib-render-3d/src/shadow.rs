@@ -488,6 +488,12 @@ impl GpuDirectionalShadow {
         self.cascade_count
     }
 
+    /// Receiver depth bias used by sampling passes sharing this shadow map.
+    #[must_use]
+    pub const fn depth_bias(&self) -> f32 {
+        self.depth_bias
+    }
+
     /// Column-major light view-projection for cascade 0 (smoke / single-cascade).
     #[must_use]
     pub const fn light_view_proj(&self) -> [f32; 16] {

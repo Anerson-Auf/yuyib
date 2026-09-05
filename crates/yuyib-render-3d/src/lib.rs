@@ -68,6 +68,7 @@ mod skybox;
 mod source1_water;
 mod ssao;
 mod static_world;
+mod volumetric;
 
 pub use equirect::{EquirectEnvironmentError, PreparedEquirectEnvironment3d};
 pub use ggx_cook::{GgxCookConfig, GgxCookError, cook_ggx_specular_ibl};
@@ -117,6 +118,10 @@ pub use static_world::{
     TexturedStaticWorldBuildStats3d, TexturedStaticWorldMaterial3d,
     TexturedStaticWorldRenderError3d, TexturedStaticWorldRenderer3d,
     TexturedStaticWorldUploadError3d, TexturedStaticWorldUploadStats3d,
+};
+pub use volumetric::{
+    VolumetricLighting3d, VolumetricLightingError3d, VolumetricLightingRenderError3d,
+    VolumetricLightingRenderer3d,
 };
 
 use std::{
@@ -2141,12 +2146,14 @@ impl Error for TexturedSkinnedMeshRenderError {
 #[derive(Clone, Copy)]
 pub struct TexturedSkinnedMaterial3d<'texture> {
     texture: Option<&'texture GpuTexture>,
+    shadow: Option<&'texture GpuDirectionalShadow>,
     base_color_factor: [f32; 4],
     double_sided: bool,
     alpha_mode: AlphaMode,
     light_direction: [f32; 3],
     light_radiance: [f32; 3],
     ambient: [f32; 3],
+    cel_shading: Option<CelShading3d>,
 }
 
 impl<'texture> TexturedSkinnedMaterial3d<'texture> {
@@ -2155,12 +2162,14 @@ impl<'texture> TexturedSkinnedMaterial3d<'texture> {
     pub const fn new(texture: &'texture GpuTexture, base_color_factor: [f32; 4]) -> Self {
         Self {
             texture: Some(texture),
+            shadow: None,
             base_color_factor,
             double_sided: false,
             alpha_mode: AlphaMode::Opaque,
             light_direction: [0.25, -1.0, -0.5],
             light_radiance: [1.0, 1.0, 1.0],
             ambient: [0.22, 0.23, 0.26],
+            cel_shading: None,
         }
     }
 
@@ -2193,6 +2202,20 @@ impl<'texture> TexturedSkinnedMaterial3d<'texture> {
             light.color[2] * light.illuminance_lux,
         ];
         self.ambient = lighting.ambient();
+        self
+    }
+
+    /// Enables material-local banded Lambert lighting.
+    #[must_use]
+    pub const fn with_cel_shading(mut self, cel_shading: CelShading3d) -> Self {
+        self.cel_shading = Some(cel_shading);
+        self
+    }
+
+    /// Enables directional-shadow receiving for this draw.
+    #[must_use]
+    pub const fn with_shadow(mut self, shadow: &'texture GpuDirectionalShadow) -> Self {
+        self.shadow = Some(shadow);
         self
     }
 }
@@ -2243,6 +2266,7 @@ pub struct TexturedSkinnedMeshRenderer3d {
     instance_bind_group: wgpu::BindGroup,
     palette_bind_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
+    neutral_shadow: GpuDirectionalShadow,
 }
 
 impl TexturedSkinnedMeshRenderer3d {
@@ -2251,15 +2275,20 @@ impl TexturedSkinnedMeshRenderer3d {
     pub fn new(renderer: &Renderer) -> Self {
         let depth_format = renderer.depth_format();
         let color_format = renderer.color_target_format();
-        renderer.with_raw_gpu(|device, _queue, _configuration| {
-            Self::create(device, color_format, depth_format)
+        renderer.with_raw_gpu(|device, queue, _configuration| {
+            Self::create(device, queue, color_format, depth_format)
         })
     }
 
     /// Creates the renderer during lazy initialisation in a render callback.
     #[must_use]
     pub fn new_for_frame(frame: &RenderFrame<'_>) -> Self {
-        Self::create(frame.device(), frame.surface_format(), frame.depth_format())
+        Self::create(
+            frame.device(),
+            frame.queue(),
+            frame.surface_format(),
+            frame.depth_format(),
+        )
     }
 
     /// Uploads a primitive and its matching glTF skin stream.
@@ -2511,6 +2540,7 @@ impl TexturedSkinnedMeshRenderer3d {
             material.light_direction,
             material.light_radiance,
             material.ambient,
+            material.cel_shading,
         )
         .map_err(|error| {
             TexturedSkinnedMeshRenderError::Skin(SkinnedMeshRenderError::Mesh(error))
@@ -2528,6 +2558,30 @@ impl TexturedSkinnedMeshRenderer3d {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(texture.sampler()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            material
+                                .shadow
+                                .map_or_else(|| self.neutral_shadow.depth_view(), GpuDirectionalShadow::depth_view),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(
+                            material.shadow.map_or_else(
+                                || self.neutral_shadow.compare_sampler(),
+                                GpuDirectionalShadow::compare_sampler,
+                            ),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: material.shadow.map_or_else(
+                            || self.neutral_shadow.params_buffer(),
+                            GpuDirectionalShadow::params_buffer,
+                        ).as_entire_binding(),
                     },
                 ],
             });
@@ -2565,6 +2619,7 @@ impl TexturedSkinnedMeshRenderer3d {
     #[allow(clippy::too_many_lines)]
     fn create(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         depth_format: wgpu::TextureFormat,
     ) -> Self {
@@ -2580,7 +2635,8 @@ impl TexturedSkinnedMeshRenderer3d {
         );
         let palette_layout = skin_palette_layout(device, "yuyib textured skinned palette layout");
         let texture_layout =
-            textured_material_layout(device, "yuyib textured skinned material layout");
+            textured_skinned_material_layout(device, "yuyib textured skinned material layout");
+        let neutral_shadow = GpuDirectionalShadow::neutral_lit(device, queue);
         let camera_buffer = uniform_buffer(
             device,
             "yuyib textured skinned camera",
@@ -2706,6 +2762,7 @@ impl TexturedSkinnedMeshRenderer3d {
             instance_bind_group,
             palette_bind_group,
             texture_layout,
+            neutral_shadow,
         }
     }
 
@@ -3246,6 +3303,8 @@ pub struct TexturedSkeletalSceneRenderer3d {
     ambient_fill: [f32; 3],
     /// Optional shared Lambert key for every textured skinned draw.
     lighting: Option<LambertLighting3d>,
+    /// Optional material-local comic lighting for textured skinned draws.
+    cel_shading: Option<CelShading3d>,
 }
 
 /// Failure while preparing a textured skeletal scene.
@@ -3609,6 +3668,7 @@ impl TexturedSkeletalSceneRenderer3d {
             factor_only_primitives,
             ambient_fill: [0.14, 0.14, 0.16],
             lighting: None,
+            cel_shading: None,
         })
     }
 
@@ -3627,6 +3687,18 @@ impl TexturedSkeletalSceneRenderer3d {
     pub const fn with_lighting(mut self, lighting: LambertLighting3d) -> Self {
         self.lighting = Some(lighting);
         self
+    }
+
+    /// Enables banded lighting for this skeletal scene only.
+    #[must_use]
+    pub const fn with_cel_shading(mut self, cel_shading: CelShading3d) -> Self {
+        self.cel_shading = Some(cel_shading);
+        self
+    }
+
+    /// Enables or disables banded lighting without rebuilding GPU resources.
+    pub const fn set_cel_shading(&mut self, cel_shading: Option<CelShading3d>) {
+        self.cel_shading = cel_shading;
     }
 
     fn draw_lighting(&self) -> LambertLighting3d {
@@ -3843,6 +3915,42 @@ impl TexturedSkeletalSceneRenderer3d {
         depth_load: DepthLoad,
         visibility: &SkeletalVisibilityMask3d,
     ) -> Result<MeshDrawStats, TexturedSkeletalSceneRenderError> {
+        self.draw_with_root_transform_depth_load_visibility_and_shadow(
+            frame,
+            camera,
+            scene,
+            pose,
+            textures,
+            root_transform,
+            depth_load,
+            visibility,
+            None,
+        )
+    }
+
+    /// Draws a visibility-filtered sampled character with an optional
+    /// directional-shadow receiver.
+    ///
+    /// Passing the same shadow resource used by the world renderer makes
+    /// character lighting respond to world occluders. `None` preserves the
+    /// unshadowed compatibility path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::draw_with_root_transform_and_depth_load`].
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn draw_with_root_transform_depth_load_visibility_and_shadow(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        scene: &ImportedScene,
+        pose: &AnimationSnapshot,
+        textures: SkeletalTextureResources<'_>,
+        root_transform: [f32; 16],
+        depth_load: DepthLoad,
+        visibility: &SkeletalVisibilityMask3d,
+        shadow: Option<&GpuDirectionalShadow>,
+    ) -> Result<MeshDrawStats, TexturedSkeletalSceneRenderError> {
         let mut result = MeshDrawStats::default();
         let mut has_depth = matches!(depth_load, DepthLoad::Load);
         let mut transparent = Vec::<TexturedCharacterTransparent<'_>>::new();
@@ -3895,6 +4003,16 @@ impl TexturedSkeletalSceneRenderer3d {
                 let draw = match &primitive.gpu {
                     TexturedSkeletalGpuMesh::Textured { mesh, texture } => {
                         let texture = textures.resolve(*texture)?;
+                        let mut material = TexturedSkinnedMaterial3d::new(texture, primitive.color)
+                            .with_double_sided(primitive.double_sided)
+                            .with_alpha_mode(primitive.alpha_mode)
+                            .with_lighting(self.draw_lighting());
+                        if let Some(cel_shading) = self.cel_shading {
+                            material = material.with_cel_shading(cel_shading);
+                        }
+                        if let Some(shadow) = shadow {
+                            material = material.with_shadow(shadow);
+                        }
                         self.renderer
                             .draw_with_depth_load(
                                 frame,
@@ -3902,10 +4020,7 @@ impl TexturedSkeletalSceneRenderer3d {
                                 mesh,
                                 palette,
                                 matrix,
-                                TexturedSkinnedMaterial3d::new(texture, primitive.color)
-                                    .with_double_sided(primitive.double_sided)
-                                    .with_alpha_mode(primitive.alpha_mode)
-                                    .with_lighting(self.draw_lighting()),
+                                material,
                                 depth_load,
                             )
                             .map_err(TexturedSkeletalSceneRenderError::Draw)?
@@ -4030,6 +4145,16 @@ impl TexturedSkeletalSceneRenderer3d {
                 } => match &primitive.gpu {
                     TexturedSkeletalGpuMesh::Textured { mesh, texture } => {
                         let texture = textures.resolve(*texture)?;
+                        let mut material = TexturedSkinnedMaterial3d::new(texture, primitive.color)
+                            .with_double_sided(primitive.double_sided)
+                            .with_alpha_mode(primitive.alpha_mode)
+                            .with_lighting(self.draw_lighting());
+                        if let Some(cel_shading) = self.cel_shading {
+                            material = material.with_cel_shading(cel_shading);
+                        }
+                        if let Some(shadow) = shadow {
+                            material = material.with_shadow(shadow);
+                        }
                         self.renderer
                             .draw_transparent_with_depth_load(
                                 frame,
@@ -4037,10 +4162,7 @@ impl TexturedSkeletalSceneRenderer3d {
                                 mesh,
                                 palette,
                                 matrix,
-                                TexturedSkinnedMaterial3d::new(texture, primitive.color)
-                                    .with_double_sided(primitive.double_sided)
-                                    .with_alpha_mode(primitive.alpha_mode)
-                                    .with_lighting(self.draw_lighting()),
+                                material,
                                 depth_load,
                             )
                             .map_err(TexturedSkeletalSceneRenderError::Draw)?
@@ -6823,9 +6945,11 @@ struct TexturedSkinnedUniform {
     /// `color × intensity` radiance for the Lambert term.
     light_radiance: [f32; 3],
     _pad_end: f32,
+    /// x = diffuse step count (`0` disables); y = PBR-compatible specular cutoff.
+    cel: [f32; 4],
 }
 
-const _: () = assert!(size_of::<TexturedSkinnedUniform>() == 144);
+const _: () = assert!(size_of::<TexturedSkinnedUniform>() == 160);
 
 impl TexturedSkinnedUniform {
     fn from_parts(
@@ -6835,6 +6959,7 @@ impl TexturedSkinnedUniform {
         light_direction: [f32; 3],
         light_radiance: [f32; 3],
         ambient: [f32; 3],
+        cel_shading: Option<CelShading3d>,
     ) -> Result<Self, MeshRenderError> {
         if !all_finite(&model) {
             return Err(MeshRenderError::InvalidModelMatrix);
@@ -6861,6 +6986,14 @@ impl TexturedSkinnedUniform {
             _pad_after_light_dir: 0.0,
             light_radiance,
             _pad_end: 0.0,
+            cel: cel_shading.map_or([0.0; 4], |cel| {
+                [
+                    cel.diffuse_steps_gpu(),
+                    cel.specular_threshold(),
+                    0.0,
+                    0.0,
+                ]
+            }),
         })
     }
 }
@@ -6956,6 +7089,7 @@ struct Instance {
     ambient: vec3<f32>,
     light_direction: vec3<f32>,
     light_radiance: vec3<f32>,
+    cel: vec4<f32>,
 };
 struct SkinPalette { matrices: array<mat4x4<f32>, 512>, };
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -6963,6 +7097,14 @@ struct SkinPalette { matrices: array<mat4x4<f32>, 512>, };
 @group(2) @binding(0) var<storage, read> skin: SkinPalette;
 @group(3) @binding(0) var base_color_texture: texture_2d<f32>;
 @group(3) @binding(1) var base_color_sampler: sampler;
+@group(3) @binding(2) var shadow_map: texture_depth_2d_array;
+@group(3) @binding(3) var shadow_sampler: sampler_comparison;
+struct ShadowParams {
+    light_view_proj_0: mat4x4<f32>,
+    light_view_proj_1: mat4x4<f32>,
+    params: vec4<f32>,
+};
+@group(3) @binding(4) var<uniform> shadow: ShadowParams;
 struct VertexInput {
     @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
     @location(2) tex_coord: vec2<f32>,
@@ -6972,6 +7114,7 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coord: vec2<f32>,
     @location(1) world_normal: vec3<f32>,
+    @location(2) world_position: vec3<f32>,
 };
 fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
     return weights.x * skin.matrices[joints.x]
@@ -6984,20 +7127,51 @@ fn skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
     let skinned_position = skin_m * vec4<f32>(input.position, 1.0);
     let skinned_normal = normalize((skin_m * vec4<f32>(input.normal, 0.0)).xyz);
     var output: VertexOutput;
-    output.clip_position = camera.view_projection * instance.model * skinned_position;
+    let world_position = instance.model * skinned_position;
+    output.clip_position = camera.view_projection * world_position;
     output.tex_coord = input.tex_coord;
     // Uniform playermodel scale: mat3(model) is enough; normalize afterwards.
     output.world_normal = normalize((instance.model * vec4<f32>(skinned_normal, 0.0)).xyz);
+    output.world_position = world_position.xyz;
     return output;
+}
+fn sample_cascade(world_position: vec3<f32>, layer: i32, matrix: mat4x4<f32>) -> f32 {
+    let clip = matrix * vec4<f32>(world_position, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    return textureSampleCompare(shadow_map, shadow_sampler, uv, layer, ndc.z - shadow.params.y);
+}
+fn sample_shadow(world_position: vec3<f32>) -> f32 {
+    var visibility = 1.0;
+    let near = sample_cascade(world_position, 0, shadow.light_view_proj_0);
+    if (near >= 0.0) { visibility = min(visibility, near); }
+    if (shadow.params.w > 1.5) {
+        let far = sample_cascade(world_position, 1, shadow.light_view_proj_1);
+        if (far >= 0.0) { visibility = min(visibility, far); }
+    }
+    return visibility;
 }
 @fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let base = textureSample(base_color_texture, base_color_sampler, input.tex_coord) * instance.color;
     if instance.alpha_cutoff >= 0.0 && base.a < instance.alpha_cutoff { discard; }
-    // View-independent exposure only. Directional N·L is deferred until skinned
-    // PBR shares the world probe — orbiting a fixed pose must not change
-    // whole-avatar brightness. World normals stay in the vertex stage for that
-    // future path; light_direction is reserved in the uniform layout.
-    let light = instance.ambient + instance.light_radiance;
+    var direct = instance.light_radiance;
+    if (instance.cel.x >= 2.0) {
+        let n_dot_l = max(dot(normalize(input.world_normal), normalize(-instance.light_direction)), 0.0);
+        let bands = max(instance.cel.x - 1.0, 1.0);
+        let stepped = floor(clamp(n_dot_l, 0.0, 0.99999) * instance.cel.x) / bands;
+        direct *= stepped;
+    }
+    if (shadow.params.x > 0.5) {
+        var visibility = sample_shadow(input.world_position);
+        if (instance.cel.x >= 2.0) {
+            visibility = select(0.35, 1.0, visibility >= 0.5);
+        }
+        direct *= visibility;
+    }
+    let light = instance.ambient + direct;
     return vec4<f32>(base.rgb * light, base.a);
 }
 ";
@@ -8284,6 +8458,59 @@ fn textured_material_layout(device: &wgpu::Device, label: &'static str) -> wgpu:
     })
 }
 
+fn textured_skinned_material_layout(
+    device: &wgpu::Device,
+    label: &'static str,
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(GpuDirectionalShadow::sample_uniform_size()),
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
 const TEXTURED_LIT_MESH_WGSL: &str = r"
 struct Camera { view_projection: mat4x4<f32>, };
 struct Draw {
@@ -8748,6 +8975,89 @@ pub struct LambertLighting3d {
     light: DirectionalLightDraw,
     ambient: [f32; 3],
 }
+
+/// Opt-in banded lighting for character and PBR materials.
+///
+/// This is material state rather than a renderer-global switch: a scene can
+/// keep the world physically shaded while rendering a player or viewmodel with
+/// stable comic bands. `diffuse_steps` controls N.L quantisation and
+/// `specular_threshold` controls the hard highlight cutoff used by PBR paths.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CelShading3d {
+    diffuse_steps: u32,
+    specular_threshold: f32,
+}
+
+impl CelShading3d {
+    /// Creates a validated cel-shading policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CelShadingError3d`] unless the diffuse band count is in
+    /// `2..=8` and the specular threshold is finite and in `0.0..=1.0`.
+    pub fn new(
+        diffuse_steps: u32,
+        specular_threshold: f32,
+    ) -> Result<Self, CelShadingError3d> {
+        if !(2..=8).contains(&diffuse_steps) {
+            return Err(CelShadingError3d::InvalidDiffuseSteps);
+        }
+        if !specular_threshold.is_finite() || !(0.0..=1.0).contains(&specular_threshold) {
+            return Err(CelShadingError3d::InvalidSpecularThreshold);
+        }
+        Ok(Self {
+            diffuse_steps,
+            specular_threshold,
+        })
+    }
+
+    /// Three readable diffuse bands with a compact hard highlight.
+    #[must_use]
+    pub fn comic() -> Self {
+        Self {
+            diffuse_steps: 3,
+            specular_threshold: 0.82,
+        }
+    }
+
+    /// Number of diffuse lighting bands.
+    #[must_use]
+    pub const fn diffuse_steps(self) -> u32 {
+        self.diffuse_steps
+    }
+
+    /// PBR half-vector cutoff for the hard specular highlight.
+    #[must_use]
+    pub const fn specular_threshold(self) -> f32 {
+        self.specular_threshold
+    }
+
+    pub(crate) fn diffuse_steps_gpu(self) -> f32 {
+        u8::try_from(self.diffuse_steps).map_or(8.0, f32::from)
+    }
+}
+
+/// Invalid [`CelShading3d`] construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CelShadingError3d {
+    /// Diffuse band count was outside `2..=8`.
+    InvalidDiffuseSteps,
+    /// Specular cutoff was non-finite or outside `0.0..=1.0`.
+    InvalidSpecularThreshold,
+}
+
+impl fmt::Display for CelShadingError3d {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidDiffuseSteps => "cel diffuse steps must be in 2..=8",
+            Self::InvalidSpecularThreshold => {
+                "cel specular threshold must be finite and in 0..=1"
+            }
+        })
+    }
+}
+
+impl Error for CelShadingError3d {}
 
 impl LambertLighting3d {
     /// Создаёт свет из простых художественных параметров.
@@ -10725,11 +11035,12 @@ mod tests {
     }
 
     #[test]
-    fn textured_skinned_fragment_lighting_is_flat_not_ndotl() {
-        // Locks the sci-fi-girl yaw-brightness regression: orbiting a fixed pose
-        // must not change whole-avatar exposure via directional N·L.
+    fn textured_skinned_fragment_keeps_flat_default_and_opt_in_cel_ndotl() {
+        // The default keeps the established flat exposure, while the explicit
+        // cel branch consumes the already-produced world normal.
         assert!(
-            TEXTURED_SKINNED_MESH_WGSL.contains("instance.ambient + instance.light_radiance"),
+            TEXTURED_SKINNED_MESH_WGSL.contains("var direct = instance.light_radiance")
+                && TEXTURED_SKINNED_MESH_WGSL.contains("let light = instance.ambient + direct"),
             "skinned fragment must use flat ambient+radiance exposure"
         );
         let fragment = TEXTURED_SKINNED_MESH_WGSL
@@ -10737,9 +11048,27 @@ mod tests {
             .nth(1)
             .expect("fragment stage");
         assert!(
-            !fragment.contains("dot("),
-            "skinned fragment must not sample N·L (found dot in fragment):\n{fragment}"
+            fragment.contains("if (instance.cel.x >= 2.0)")
+                && fragment.contains("dot(normalize(input.world_normal)"),
+            "cel branch must quantize true model-space lighting:\n{fragment}"
         );
+        assert!(
+            fragment.contains("if (shadow.params.x > 0.5)")
+                && fragment.contains("sample_shadow(input.world_position)"),
+            "skinned lighting must optionally receive the directional shadow:\n{fragment}"
+        );
+    }
+
+    #[test]
+    fn textured_skinned_shader_passes_wgsl_validation() {
+        let module = naga::front::wgsl::parse_str(TEXTURED_SKINNED_MESH_WGSL)
+            .expect("textured skinned WGSL parse");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("textured skinned WGSL validation");
     }
 
     #[test]

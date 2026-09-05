@@ -27,8 +27,8 @@ use yuyib_model::{
 use yuyib_model_assets::{ModelTextureLoader, PreparedModelTextures};
 use yuyib_render::RenderFrame;
 use yuyib_render_3d::{
-    Camera3d, DepthLoad, GltfAnimationPreviewGpu, GltfAnimationPreviewGpuError, LambertLighting3d,
-    ModelUploadBudget3d, SkeletalVisibilityMask3d,
+    Camera3d, DepthLoad, GltfAnimationPreviewGpu, GltfAnimationPreviewGpuError,
+    GpuDirectionalShadow, LambertLighting3d, ModelUploadBudget3d, SkeletalVisibilityMask3d,
 };
 use yuyib_tasks::TaskPool;
 
@@ -269,6 +269,13 @@ impl AnimatedCharacter3d {
         self
     }
 
+    /// Enables material-local banded lighting for this character.
+    #[must_use]
+    pub fn with_cel_shading(mut self, cel_shading: yuyib_render_3d::CelShading3d) -> Self {
+        self.gpu = self.gpu.with_cel_shading(cel_shading);
+        self
+    }
+
     /// Returns whether textures and the skeletal renderer are resident.
     #[must_use]
     pub const fn is_ready(&self) -> bool {
@@ -407,8 +414,32 @@ impl AnimatedCharacter3d {
         depth_load: DepthLoad,
         visibility: &SkeletalVisibilityMask3d,
     ) -> Result<(), AnimatedCharacterError> {
+        self.draw_with_visibility_and_shadow(
+            frame,
+            camera,
+            root_transform,
+            depth_load,
+            visibility,
+            None,
+        )
+    }
+
+    /// Draws with explicit visibility and optional directional-shadow reception.
+    ///
+    /// # Errors
+    ///
+    /// Returns when GPU residency is incomplete or draw fails.
+    pub fn draw_with_visibility_and_shadow(
+        &self,
+        frame: &mut RenderFrame<'_>,
+        camera: Camera3d,
+        root_transform: [f32; 16],
+        depth_load: DepthLoad,
+        visibility: &SkeletalVisibilityMask3d,
+        shadow: Option<&GpuDirectionalShadow>,
+    ) -> Result<(), AnimatedCharacterError> {
         self.gpu
-            .draw_with_root_transform_and_visibility(
+            .draw_with_root_transform_visibility_and_shadow(
                 frame,
                 camera,
                 &self.asset.scene,
@@ -416,6 +447,7 @@ impl AnimatedCharacter3d {
                 root_transform,
                 depth_load,
                 visibility,
+                shadow,
             )
             .map_err(AnimatedCharacterError::Gpu)
     }
@@ -435,6 +467,16 @@ impl AnimatedCharacter3d {
     /// Replaces flat character lighting after GPU residency.
     pub fn set_lighting(&mut self, lighting: LambertLighting3d) {
         self.gpu.set_lighting(lighting);
+    }
+
+    /// Replaces banded-lighting parameters after GPU residency.
+    pub fn set_cel_shading(&mut self, cel_shading: yuyib_render_3d::CelShading3d) {
+        self.gpu.set_cel_shading(cel_shading);
+    }
+
+    /// Disables banded lighting after GPU residency.
+    pub fn clear_cel_shading(&mut self) {
+        self.gpu.clear_cel_shading();
     }
 
     /// Returns the imported asset.

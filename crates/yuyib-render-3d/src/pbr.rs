@@ -164,6 +164,7 @@ pub struct PbrMaterial3d {
     roughness: f32,
     emissive: [f32; 3],
     alpha_mode: PbrAlphaMode3d,
+    cel_shading: Option<crate::CelShading3d>,
 }
 
 impl PbrMaterial3d {
@@ -193,6 +194,7 @@ impl PbrMaterial3d {
             roughness,
             emissive: [0.0; 3],
             alpha_mode: PbrAlphaMode3d::Opaque,
+            cel_shading: None,
         })
     }
 
@@ -213,6 +215,13 @@ impl PbrMaterial3d {
     #[must_use]
     pub const fn with_alpha_mode(mut self, alpha_mode: PbrAlphaMode3d) -> Self {
         self.alpha_mode = alpha_mode;
+        self
+    }
+
+    /// Enables banded diffuse and hard-threshold specular lighting.
+    #[must_use]
+    pub const fn with_cel_shading(mut self, cel_shading: crate::CelShading3d) -> Self {
+        self.cel_shading = Some(cel_shading);
         self
     }
 
@@ -244,6 +253,12 @@ impl PbrMaterial3d {
     #[must_use]
     pub const fn alpha_mode(self) -> PbrAlphaMode3d {
         self.alpha_mode
+    }
+
+    /// Returns material-local comic lighting, if enabled.
+    #[must_use]
+    pub const fn cel_shading(self) -> Option<crate::CelShading3d> {
+        self.cel_shading
     }
 }
 
@@ -1974,13 +1989,18 @@ impl PbrDrawUniform {
                 material.emissive[2],
                 0.0,
             ],
-            // alpha.x = mask cutoff (-1 disables); alpha.y = specular IBL strength.
+            // alpha.x = mask cutoff (-1 disables); alpha.y = specular IBL strength;
+            // alpha.z = cel diffuse steps (0 disables); alpha.w = specular cutoff.
             // Textured draws overwrite material.z/w for normal scale / handedness.
             alpha: [
                 material.alpha_mode.shader_cutoff(),
                 lighting.specular_ibl_strength(),
-                0.0,
-                0.0,
+                material
+                    .cel_shading
+                    .map_or(0.0, crate::CelShading3d::diffuse_steps_gpu),
+                material
+                    .cel_shading
+                    .map_or(0.0, crate::CelShading3d::specular_threshold),
             ],
         })
     }
@@ -2048,6 +2068,9 @@ fn geometry_schlick_ggx(n_dot_v: f32, roughness: f32) -> f32 {
 }
 fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cos_theta, 5.0);
+}
+fn toon_band(value: f32, steps: f32) -> f32 {
+    return floor(clamp(value, 0.0, 0.99999) * steps) / max(steps - 1.0, 1.0);
 }
 fn diffuse_irradiance(normal: vec3<f32>) -> vec3<f32> {
     let x = normal.x;
@@ -2131,7 +2154,15 @@ fn sample_directional_shadow(world_position: vec3<f32>) -> f32 {
     if (shadow.params.x > 0.5) {
         shadow_visibility = sample_directional_shadow(input.world_position);
     }
-    let direct = (diffuse + specular) * draw.light_color.rgb * n_dot_l * shadow_visibility;
+    var direct_n_dot_l = n_dot_l;
+    var direct_specular = specular;
+    if (draw.alpha.z >= 2.0) {
+        direct_n_dot_l = toon_band(n_dot_l, draw.alpha.z);
+        direct_specular = f * select(0.0, 1.0, max(dot(n, h), 0.0) >= draw.alpha.w);
+        shadow_visibility = select(0.35, 1.0, shadow_visibility >= 0.5);
+    }
+    let direct = (diffuse * direct_n_dot_l + direct_specular * direct_n_dot_l)
+        * draw.light_color.rgb * shadow_visibility;
     let ibl_diffuse = diffuse_weight * albedo * diffuse_irradiance(n);
     var ibl_specular = vec3<f32>(0.0);
     if (specular_ibl_strength > 0.0) {
@@ -2227,6 +2258,9 @@ fn geometry_schlick_ggx(n_dot_v: f32, roughness: f32) -> f32 {
 }
 fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cos_theta, 5.0);
+}
+fn toon_band(value: f32, steps: f32) -> f32 {
+    return floor(clamp(value, 0.0, 0.99999) * steps) / max(steps - 1.0, 1.0);
 }
 fn diffuse_irradiance(normal: vec3<f32>) -> vec3<f32> {
     let x = normal.x;
@@ -2339,7 +2373,15 @@ fn sample_directional_shadow(world_position: vec3<f32>) -> f32 {
     if (shadow.params.x > 0.5) {
         shadow_visibility = sample_directional_shadow(input.world_position);
     }
-    let direct = (diffuse + specular) * draw.light_color.rgb * n_dot_l * shadow_visibility;
+    var direct_n_dot_l = n_dot_l;
+    var direct_specular = specular;
+    if (draw.alpha.z >= 2.0) {
+        direct_n_dot_l = toon_band(n_dot_l, draw.alpha.z);
+        direct_specular = f * select(0.0, 1.0, max(dot(n, h), 0.0) >= draw.alpha.w);
+        shadow_visibility = select(0.35, 1.0, shadow_visibility >= 0.5);
+    }
+    let direct = (diffuse * direct_n_dot_l + direct_specular * direct_n_dot_l)
+        * draw.light_color.rgb * shadow_visibility;
     let ibl_diffuse = diffuse_weight * albedo * diffuse_irradiance(n);
     var ibl_specular = vec3<f32>(0.0);
     let specular_ibl_strength = draw.alpha.y;
@@ -2365,6 +2407,20 @@ fn sample_directional_shadow(world_position: vec3<f32>) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pbr_shaders_pass_wgsl_validation() {
+        for (label, source) in [("factor", PBR_WGSL), ("textured", TEXTURED_PBR_WGSL)] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{label} PBR WGSL parse failed: {error}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{label} PBR WGSL validation failed: {error}"));
+        }
+    }
 
     #[test]
     fn pbr_material_validates_unit_factors_and_colours() {
