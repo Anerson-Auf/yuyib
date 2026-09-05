@@ -9,13 +9,20 @@
 //! This deliberately supports opaque, factor-only materials. It is a world
 //! geometry path, not a replacement for glTF/PBR or dynamic character assets.
 
-use std::{collections::HashMap, error::Error, fmt, mem::size_of, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    fmt,
+    mem::size_of,
+    sync::Arc,
+};
 
 use bytemuck::{Pod, Zeroable};
 
 use wgpu::util::DeviceExt;
 use yuyib_2d::{Texture, TextureHandle, TextureSize, TextureSizeError};
 use yuyib_assets::Assets;
+use yuyib_game_3d::{ClipDepthRange3d, Frustum3d, LocalAabb3d, LocalBounds3d};
 use yuyib_model::{AlphaMode, Material, MaterialIndex, MeshPrimitive, Model};
 use yuyib_render::{RenderFrame, wgpu};
 use yuyib_render_texture::{
@@ -310,6 +317,10 @@ pub struct StaticWorldDrawStats3d {
     pub triangles: u64,
     /// Low-level indexed draw calls submitted this frame.
     pub draw_calls: u64,
+    /// Resident material/cell batches rejected before GPU submission.
+    pub culled_batches: u64,
+    /// Indexed triangles omitted by camera-frustum rejection.
+    pub culled_triangles: u64,
 }
 
 impl StaticWorldRenderer3d {
@@ -385,6 +396,8 @@ impl StaticWorldRenderer3d {
             batches: draws.len(),
             triangles: u64::from(draw.triangles),
             draw_calls: u64::from(draw.draw_calls),
+            culled_batches: 0,
+            culled_triangles: 0,
         })
     }
 }
@@ -637,17 +650,20 @@ enum TexturedStaticWorldBatch3d {
     Factor {
         primitive: MeshPrimitive,
         color: [f32; 4],
+        bounds: LocalAabb3d,
     },
     Texture {
         primitive: MeshPrimitive,
         texture: Arc<StaticWorldTexture3d>,
         color: [f32; 4],
+        bounds: LocalAabb3d,
     },
     BlendTextures {
         primitive: MeshPrimitive,
         first: Arc<StaticWorldTexture3d>,
         second: Arc<StaticWorldTexture3d>,
         color: [f32; 4],
+        bounds: LocalAabb3d,
     },
 }
 
@@ -678,6 +694,13 @@ impl TexturedStaticWorldBuildStats3d {
     }
 }
 
+/// Source-space edge length of one X/Z static-world culling cell.
+///
+/// This conservative partition keeps material batching inside a nearby region
+/// while allowing the renderer to reject whole GPU meshes outside the camera
+/// frustum. Source BSP worlds use this value by default.
+pub const SOURCE_BSP_STATIC_WORLD_CELL_SIZE: f32 = 1_024.0;
+
 impl TexturedStaticWorld3d {
     /// Cooks a model using an explicit decision for every referenced material.
     ///
@@ -692,10 +715,44 @@ impl TexturedStaticWorld3d {
     /// geometry.
     pub fn from_model_with_materials(
         model: &Model,
+        resolve: impl FnMut(MaterialIndex, &Material) -> TexturedStaticWorldMaterial3d,
+    ) -> Result<Self, TexturedStaticWorldBuildError3d> {
+        Self::from_model_with_materials_partitioned(model, None, resolve)
+    }
+
+    /// Cooks a model into material batches partitioned into X/Z spatial cells.
+    ///
+    /// Geometry is assigned by triangle centroid, but every resident cell keeps
+    /// a tight AABB around its complete triangles. Therefore frustum rejection
+    /// never removes a triangle that intersects the camera, including triangles
+    /// that cross a cell edge. This is the intended Source BSP path: it trades
+    /// one map-wide material mesh for cullable nearby meshes without changing
+    /// the source material or texture policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TexturedStaticWorldBuildError3d::InvalidSpatialCellSize`] for
+    /// an invalid partition edge, plus the same errors as
+    /// [`Self::from_model_with_materials`].
+    pub fn from_model_with_materials_spatial(
+        model: &Model,
+        cell_size: f32,
+        resolve: impl FnMut(MaterialIndex, &Material) -> TexturedStaticWorldMaterial3d,
+    ) -> Result<Self, TexturedStaticWorldBuildError3d> {
+        if !cell_size.is_finite() || !(1.0..=65_536.0).contains(&cell_size) {
+            return Err(TexturedStaticWorldBuildError3d::InvalidSpatialCellSize);
+        }
+        Self::from_model_with_materials_partitioned(model, Some(cell_size), resolve)
+    }
+
+    fn from_model_with_materials_partitioned(
+        model: &Model,
+        cell_size: Option<f32>,
         mut resolve: impl FnMut(MaterialIndex, &Material) -> TexturedStaticWorldMaterial3d,
     ) -> Result<Self, TexturedStaticWorldBuildError3d> {
         let mut buckets = Vec::<TexturedBuildBucket>::new();
         let mut bucket_by_material = HashMap::<Option<usize>, usize>::new();
+        let mut bucket_by_spatial_key = HashMap::<SpatialBucketKey, usize>::new();
         let mut resolved = HashMap::<usize, TexturedStaticWorldMaterial3d>::new();
         let mut stats = TexturedStaticWorldBuildStats3d::default();
 
@@ -732,30 +789,57 @@ impl TexturedStaticWorld3d {
                     stats.skipped_primitives += 1;
                     continue;
                 }
-                let bucket_index = if let Some(index) = bucket_by_material.get(&material_key) {
-                    *index
+                if let Some(cell_size) = cell_size {
+                    let mut triangles_by_cell = BTreeMap::<SpatialCell3d, Vec<[u32; 3]>>::new();
+                    for triangle in primitive.indices().chunks_exact(3) {
+                        let triangle = [triangle[0], triangle[1], triangle[2]];
+                        let cell = spatial_cell_for_triangle(primitive, triangle, cell_size);
+                        triangles_by_cell.entry(cell).or_default().push(triangle);
+                    }
+                    for (cell, triangles) in triangles_by_cell {
+                        let spatial_key = SpatialBucketKey { material: material_key, cell };
+                        let bucket_index = if let Some(index) = bucket_by_spatial_key.get(&spatial_key) {
+                            *index
+                        } else {
+                            let index = buckets.len();
+                            buckets.push(TexturedBuildBucket::new(material.clone()));
+                            bucket_by_spatial_key.insert(spatial_key, index);
+                            index
+                        };
+                        buckets[bucket_index].append_triangles(
+                            primitive,
+                            &triangles,
+                            mesh_index,
+                            primitive_index,
+                            bucket_index,
+                        )?;
+                    }
                 } else {
-                    let index = buckets.len();
-                    buckets.push(TexturedBuildBucket::new(material));
-                    bucket_by_material.insert(material_key, index);
-                    index
-                };
-                buckets[bucket_index].append(
-                    primitive,
-                    mesh_index,
-                    primitive_index,
-                    bucket_index,
-                )?;
+                    let bucket_index = if let Some(index) = bucket_by_material.get(&material_key) {
+                        *index
+                    } else {
+                        let index = buckets.len();
+                        buckets.push(TexturedBuildBucket::new(material));
+                        bucket_by_material.insert(material_key, index);
+                        index
+                    };
+                    buckets[bucket_index].append(
+                        primitive,
+                        mesh_index,
+                        primitive_index,
+                        bucket_index,
+                    )?;
+                }
             }
         }
 
         let mut batches = Vec::with_capacity(buckets.len());
         for (batch, bucket) in buckets.into_iter().enumerate() {
-            let (primitive, material) = bucket.finish(batch)?;
+            let (primitive, material, bounds) = bucket.finish(batch)?;
             match material {
                 TexturedStaticWorldMaterial3d::Factor(color) => {
                     stats.factor_batches += 1;
-                    batches.push(TexturedStaticWorldBatch3d::Factor { primitive, color });
+                    batches.push(TexturedStaticWorldBatch3d::Factor { primitive, color, bounds });
                 }
                 TexturedStaticWorldMaterial3d::Texture { texture, factor } => {
                     stats.textured_batches += 1;
@@ -763,6 +847,7 @@ impl TexturedStaticWorld3d {
                         primitive,
                         texture,
                         color: factor,
+                        bounds,
                     });
                 }
                 TexturedStaticWorldMaterial3d::BlendTextures {
@@ -777,6 +862,7 @@ impl TexturedStaticWorld3d {
                         first,
                         second,
                         color: factor,
+                        bounds,
                     });
                 }
                 TexturedStaticWorldMaterial3d::Skip => {
@@ -791,6 +877,37 @@ impl TexturedStaticWorld3d {
     #[must_use]
     pub const fn stats(&self) -> TexturedStaticWorldBuildStats3d {
         self.stats
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct SpatialCell3d {
+    x: i32,
+    z: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SpatialBucketKey {
+    material: Option<usize>,
+    cell: SpatialCell3d,
+}
+
+fn spatial_cell_for_triangle(
+    primitive: &MeshPrimitive,
+    triangle: [u32; 3],
+    cell_size: f32,
+) -> SpatialCell3d {
+    let positions = primitive.positions();
+    let [first, second, third] = triangle.map(|index| {
+        positions[usize::try_from(index).expect("validated mesh index fits usize")]
+    });
+    let centre = [
+        (first[0] + second[0] + third[0]) / 3.0,
+        (first[2] + second[2] + third[2]) / 3.0,
+    ];
+    SpatialCell3d {
+        x: (centre[0] / cell_size).floor() as i32,
+        z: (centre[1] / cell_size).floor() as i32,
     }
 }
 
@@ -885,10 +1002,87 @@ impl TexturedBuildBucket {
         Ok(())
     }
 
+    fn append_triangles(
+        &mut self,
+        primitive: &MeshPrimitive,
+        triangles: &[[u32; 3]],
+        mesh: usize,
+        primitive_index: usize,
+        batch: usize,
+    ) -> Result<(), TexturedStaticWorldBuildError3d> {
+        let textured = matches!(
+            self.material,
+            TexturedStaticWorldMaterial3d::Texture { .. }
+                | TexturedStaticWorldMaterial3d::BlendTextures { .. }
+        );
+        let blended = matches!(
+            self.material,
+            TexturedStaticWorldMaterial3d::BlendTextures { .. }
+        );
+        let normals = if textured {
+            Some(primitive.normals().ok_or(
+                TexturedStaticWorldBuildError3d::MissingNormals {
+                    mesh,
+                    primitive: primitive_index,
+                },
+            )?)
+        } else {
+            None
+        };
+        let tex_coords = if textured {
+            Some(primitive.tex_coords_0().ok_or(
+                TexturedStaticWorldBuildError3d::MissingTexCoords0 {
+                    mesh,
+                    primitive: primitive_index,
+                },
+            )?)
+        } else {
+            None
+        };
+        let texture_blend_weights = if blended {
+            Some(primitive.texture_blend_weights().ok_or(
+                TexturedStaticWorldBuildError3d::MissingTextureBlendWeights {
+                    mesh,
+                    primitive: primitive_index,
+                },
+            )?)
+        } else {
+            None
+        };
+        let mut local_vertices = HashMap::<u32, u32>::new();
+        for triangle in triangles {
+            for &source_index in triangle {
+                let index = if let Some(index) = local_vertices.get(&source_index) {
+                    *index
+                } else {
+                    let source = usize::try_from(source_index)
+                        .expect("validated mesh index fits usize");
+                    let index = u32::try_from(self.positions.len()).map_err(|_| {
+                        TexturedStaticWorldBuildError3d::TooManyVertices { batch }
+                    })?;
+                    self.positions.push(primitive.positions()[source]);
+                    if let Some(normals) = normals {
+                        self.normals.push(normals[source]);
+                    }
+                    if let Some(tex_coords) = tex_coords {
+                        self.tex_coords.push(tex_coords[source]);
+                    }
+                    if let Some(texture_blend_weights) = texture_blend_weights {
+                        self.texture_blend_weights.push(texture_blend_weights[source]);
+                    }
+                    local_vertices.insert(source_index, index);
+                    index
+                };
+                self.indices.push(index);
+            }
+        }
+        Ok(())
+    }
+
     fn finish(
         self,
         batch: usize,
-    ) -> Result<(MeshPrimitive, TexturedStaticWorldMaterial3d), TexturedStaticWorldBuildError3d>
+    ) -> Result<(MeshPrimitive, TexturedStaticWorldMaterial3d, LocalAabb3d), TexturedStaticWorldBuildError3d>
     {
         let Self {
             positions,
@@ -907,6 +1101,7 @@ impl TexturedBuildBucket {
             material,
             TexturedStaticWorldMaterial3d::BlendTextures { .. }
         );
+        let bounds = local_aabb_for_positions(&positions);
         let mut primitive = MeshPrimitive::new(positions, indices).map_err(|source| {
             TexturedStaticWorldBuildError3d::CombinedGeometry { batch, source }
         })?;
@@ -926,13 +1121,27 @@ impl TexturedBuildBucket {
                     source,
                 })?;
         }
-        Ok((primitive, material))
+        Ok((primitive, material, bounds))
     }
+}
+
+fn local_aabb_for_positions(positions: &[[f32; 3]]) -> LocalAabb3d {
+    let mut minimum = positions[0];
+    let mut maximum = positions[0];
+    for position in &positions[1..] {
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(position[axis]);
+            maximum[axis] = maximum[axis].max(position[axis]);
+        }
+    }
+    LocalAabb3d::new(minimum, maximum).expect("validated static-world positions define finite bounds")
 }
 
 /// Failure while cooking a texture-aware static world.
 #[derive(Debug)]
 pub enum TexturedStaticWorldBuildError3d {
+    /// Spatial partition edge is not finite or outside the supported range.
+    InvalidSpatialCellSize,
     /// A primitive referenced an absent model material slot.
     MissingMaterial {
         /// Source mesh index.
@@ -991,6 +1200,9 @@ pub enum TexturedStaticWorldBuildError3d {
 impl fmt::Display for TexturedStaticWorldBuildError3d {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidSpatialCellSize => formatter.write_str(
+                "textured static-world spatial cell size must be finite and between 1 and 65536",
+            ),
             Self::MissingMaterial {
                 mesh,
                 primitive,
@@ -1062,17 +1274,38 @@ enum TexturedStaticWorldGpuBatch3d {
     Factor {
         mesh: GpuMesh,
         color: [f32; 4],
+        bounds: LocalAabb3d,
     },
     Texture {
         mesh: GpuTexturedLitMesh,
         material: GpuTexturedLitMaterial,
         color: [f32; 4],
+        bounds: LocalAabb3d,
     },
     BlendTextures {
         mesh: GpuBlendedStaticWorldMesh,
         material: GpuBlendedStaticWorldMaterial,
         color: [f32; 4],
+        bounds: LocalAabb3d,
     },
+}
+
+impl TexturedStaticWorldGpuBatch3d {
+    const fn bounds(&self) -> LocalAabb3d {
+        match self {
+            Self::Factor { bounds, .. }
+            | Self::Texture { bounds, .. }
+            | Self::BlendTextures { bounds, .. } => *bounds,
+        }
+    }
+
+    fn triangle_count(&self) -> u64 {
+        match self {
+            Self::Factor { mesh, .. } => u64::from(mesh.index_count() / 3),
+            Self::Texture { mesh, .. } => u64::from(mesh.index_count() / 3),
+            Self::BlendTextures { mesh, .. } => u64::from(mesh.index_count / 3),
+        }
+    }
 }
 
 /// GPU upload/cache metrics for [`TexturedStaticWorldRenderer3d`].
@@ -1149,7 +1382,11 @@ impl TexturedStaticWorldRenderer3d {
 
         for (batch, source) in world.batches.iter().enumerate() {
             match source {
-                TexturedStaticWorldBatch3d::Factor { primitive, color } => {
+                TexturedStaticWorldBatch3d::Factor {
+                    primitive,
+                    color,
+                    bounds,
+                } => {
                     let mesh = factor_renderer
                         .upload_mesh_for_frame(frame, primitive)
                         .map_err(|source| TexturedStaticWorldUploadError3d::FactorMesh {
@@ -1159,12 +1396,14 @@ impl TexturedStaticWorldRenderer3d {
                     batches.push(TexturedStaticWorldGpuBatch3d::Factor {
                         mesh,
                         color: *color,
+                        bounds: *bounds,
                     });
                 }
                 TexturedStaticWorldBatch3d::Texture {
                     primitive,
                     texture,
                     color,
+                    bounds,
                 } => {
                     let key = texture.cache_key().to_owned();
                     let handle = if let Some(handle) = texture_handles.get(&key).copied() {
@@ -1202,6 +1441,7 @@ impl TexturedStaticWorldRenderer3d {
                         mesh,
                         material,
                         color: *color,
+                        bounds: *bounds,
                     });
                 }
                 TexturedStaticWorldBatch3d::BlendTextures {
@@ -1209,6 +1449,7 @@ impl TexturedStaticWorldRenderer3d {
                     first,
                     second,
                     color,
+                    bounds,
                 } => {
                     let first_key = first.cache_key().to_owned();
                     let second_key = second.cache_key().to_owned();
@@ -1256,6 +1497,7 @@ impl TexturedStaticWorldRenderer3d {
                         mesh,
                         material,
                         color: *color,
+                        bounds: *bounds,
                     });
                 }
             }
@@ -1296,18 +1538,44 @@ impl TexturedStaticWorldRenderer3d {
         camera: Camera3d,
         lighting: LambertLighting3d,
     ) -> Result<StaticWorldDrawStats3d, TexturedStaticWorldRenderError3d> {
-        let factors: Vec<_> = self
-            .batches
-            .iter()
-            .filter_map(|batch| match batch {
-                TexturedStaticWorldGpuBatch3d::Factor { mesh, color } => {
-                    Some((mesh, identity_matrix(), *color))
-                }
-                TexturedStaticWorldGpuBatch3d::Texture { .. }
-                | TexturedStaticWorldGpuBatch3d::BlendTextures { .. } => None,
-            })
-            .collect();
         let mut stats = StaticWorldDrawStats3d::default();
+        let frustum = camera_frustum(frame, camera);
+        let mut factors = Vec::new();
+        let mut textured = Vec::new();
+        let mut blended = Vec::new();
+        for batch in &self.batches {
+            if !batch_intersects_frustum(batch.bounds(), frustum.as_ref()) {
+                stats.culled_batches += 1;
+                stats.culled_triangles += batch.triangle_count();
+                continue;
+            }
+            match batch {
+                TexturedStaticWorldGpuBatch3d::Factor { mesh, color, .. } => {
+                    factors.push((mesh, identity_matrix(), *color));
+                }
+                TexturedStaticWorldGpuBatch3d::Texture {
+                    mesh,
+                    material,
+                    color,
+                    ..
+                } => textured.push(TexturedLitBatchDraw::new(
+                    mesh,
+                    LitMeshInstance3d::new(identity_matrix(), LitMaterial3d::new(*color), lighting),
+                    material,
+                    true,
+                )),
+                TexturedStaticWorldGpuBatch3d::BlendTextures {
+                    mesh,
+                    material,
+                    color,
+                    ..
+                } => blended.push(BlendedStaticWorldBatchDraw {
+                    mesh,
+                    material,
+                    color: *color,
+                }),
+            }
+        }
         let mut has_depth = false;
         if !factors.is_empty() {
             let draw = self
@@ -1320,24 +1588,6 @@ impl TexturedStaticWorldRenderer3d {
             stats.draw_calls += u64::from(draw.draw_calls);
         }
 
-        let textured: Vec<_> = self
-            .batches
-            .iter()
-            .filter_map(|batch| match batch {
-                TexturedStaticWorldGpuBatch3d::Texture {
-                    mesh,
-                    material,
-                    color,
-                } => Some(TexturedLitBatchDraw::new(
-                    mesh,
-                    LitMeshInstance3d::new(identity_matrix(), LitMaterial3d::new(*color), lighting),
-                    material,
-                    true,
-                )),
-                TexturedStaticWorldGpuBatch3d::Factor { .. }
-                | TexturedStaticWorldGpuBatch3d::BlendTextures { .. } => None,
-            })
-            .collect();
         if !textured.is_empty() {
             let depth_load = if has_depth {
                 DepthLoad::Load
@@ -1354,23 +1604,6 @@ impl TexturedStaticWorldRenderer3d {
             has_depth = true;
         }
 
-        let blended: Vec<_> = self
-            .batches
-            .iter()
-            .filter_map(|batch| match batch {
-                TexturedStaticWorldGpuBatch3d::BlendTextures {
-                    mesh,
-                    material,
-                    color,
-                } => Some(BlendedStaticWorldBatchDraw {
-                    mesh,
-                    material,
-                    color: *color,
-                }),
-                TexturedStaticWorldGpuBatch3d::Factor { .. }
-                | TexturedStaticWorldGpuBatch3d::Texture { .. } => None,
-            })
-            .collect();
         if !blended.is_empty() {
             let depth_load = if has_depth {
                 DepthLoad::Load
@@ -1387,6 +1620,21 @@ impl TexturedStaticWorldRenderer3d {
         }
         Ok(stats)
     }
+}
+
+fn camera_frustum(frame: &RenderFrame<'_>, camera: Camera3d) -> Option<Frustum3d> {
+    camera
+        .view_projection(frame.draw_size())
+        .ok()
+        .and_then(|matrix| Frustum3d::from_clip_matrix(matrix, ClipDepthRange3d::ZeroToOne).ok())
+}
+
+fn batch_intersects_frustum(bounds: LocalAabb3d, frustum: Option<&Frustum3d>) -> bool {
+    frustum.map_or(true, |frustum| {
+        frustum
+            .intersects_local_bounds(LocalBounds3d::Aabb(bounds), identity_matrix())
+            .unwrap_or(true)
+    })
 }
 
 fn cache_static_world_texture(
@@ -2149,6 +2397,47 @@ mod tests {
         assert_eq!(primitive.positions().len(), 6);
         assert_eq!(primitive.tex_coords_0().map(<[_]>::len), Some(6));
         assert_eq!(primitive.normals().map(<[_]>::len), Some(6));
+    }
+
+    #[test]
+    fn spatial_world_keeps_material_batches_cullable_by_xz_cell() {
+        let model = Model::new(
+            vec![
+                Mesh::new(
+                    Some("world".to_owned()),
+                    vec![textured_triangle(0, 0.0), textured_triangle(0, 2_048.0)],
+                )
+                .expect("mesh"),
+            ],
+            vec![Material::new().with_name("wall")],
+            Vec::new(),
+        )
+        .expect("model");
+        let texture = Arc::new(
+            StaticWorldTexture3d::rgba8("wall.vtf", 1, 1, vec![255; 4]).expect("texture"),
+        );
+
+        let world = TexturedStaticWorld3d::from_model_with_materials_spatial(
+            &model,
+            SOURCE_BSP_STATIC_WORLD_CELL_SIZE,
+            |_, material| TexturedStaticWorldMaterial3d::texture(material, Arc::clone(&texture)),
+        )
+        .expect("spatial world");
+
+        assert_eq!(world.stats().source_triangles, 2);
+        assert_eq!(world.stats().textured_batches, 2);
+        assert_eq!(world.stats().batches(), 2);
+        let triangles = world
+            .batches
+            .iter()
+            .map(|batch| match batch {
+                TexturedStaticWorldBatch3d::Texture { primitive, .. } => {
+                    primitive.indices().len() / 3
+                }
+                _ => 0,
+            })
+            .sum::<usize>();
+        assert_eq!(triangles, 2);
     }
 
     #[test]

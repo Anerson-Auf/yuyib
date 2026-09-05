@@ -362,8 +362,9 @@ impl Source1BspLoader {
 
         let water_world = build_water_world(&geometry.model, &water_materials)?;
 
-        let render_world = TexturedStaticWorld3d::from_model_with_materials(
+        let render_world = TexturedStaticWorld3d::from_model_with_materials_spatial(
             &geometry.model,
+            yuyib_render_3d::SOURCE_BSP_STATIC_WORLD_CELL_SIZE,
             |_index, material| {
                 let Some(name) = material.name() else {
                     return TexturedStaticWorldMaterial3d::factor(material);

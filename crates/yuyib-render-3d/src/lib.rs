@@ -118,6 +118,7 @@ pub use static_world::{
     TexturedStaticWorldBuildStats3d, TexturedStaticWorldMaterial3d,
     TexturedStaticWorldRenderError3d, TexturedStaticWorldRenderer3d,
     TexturedStaticWorldUploadError3d, TexturedStaticWorldUploadStats3d,
+    SOURCE_BSP_STATIC_WORLD_CELL_SIZE,
 };
 pub use volumetric::{
     VolumetricLighting3d, VolumetricLightingError3d, VolumetricLightingRenderError3d,
